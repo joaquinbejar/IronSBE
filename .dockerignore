@@ -1,0 +1,39 @@
+# Build artifacts
+target/
+*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+doc/
+*.md
+!README.md
+
+# CI/CD
+.github/
+
+# Docker (avoid recursive copy)
+Docker/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test artifacts
+*.profraw
+*.profdata
+
+# Temporary files
+*.tmp
+*.temp

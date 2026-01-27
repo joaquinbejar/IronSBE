@@ -1,0 +1,105 @@
+name: SEMVER
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - main
+      - 'release/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: full
+
+jobs:
+  semver:
+    name: semver
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y make pkg-config build-essential
+
+      - name: Check semver for ironsbe-core
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-core
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe-schema
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-schema
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe-codegen
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-codegen
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe-derive
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-derive
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe-channel
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-channel
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe-transport
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-transport
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe-server
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-server
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe-client
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-client
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe-marketdata
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-marketdata
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe-bench
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe-bench
+          feature-group: all-features
+          rust-toolchain: stable
+
+      - name: Check semver for ironsbe
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ironsbe
+          feature-group: all-features
+          rust-toolchain: stable

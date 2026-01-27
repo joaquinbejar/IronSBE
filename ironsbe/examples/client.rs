@@ -83,10 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("[Client] Disconnected from server");
                 }
                 ClientEvent::Message(data) => {
-                    println!(
-                        "[Client] Received response: {} bytes",
-                        data.len()
-                    );
+                    println!("[Client] Received response: {} bytes", data.len());
                     // Try to decode the payload
                     if data.len() > MessageHeader::ENCODED_LENGTH {
                         let payload = &data[MessageHeader::ENCODED_LENGTH..];
@@ -123,7 +120,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     handle.disconnect();
 
     // Wait for client task to finish
-    tokio::time::timeout(Duration::from_secs(2), client_task).await.ok();
+    tokio::time::timeout(Duration::from_secs(2), client_task)
+        .await
+        .ok();
 
     println!("Client stopped");
     Ok(())

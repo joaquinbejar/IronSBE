@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Joaquin Bejar <jb@taunais.com>"]
 license = "MIT"
@@ -26,17 +26,17 @@ categories = ["finance", "encoding", "network-programming"]
 
 [workspace.dependencies]
 # Internal crates
-ironsbe = { path = "ironsbe", version = "0.1.0" }
-ironsbe-core = { path = "ironsbe-core", version = "0.1.0" }
-ironsbe-schema = { path = "ironsbe-schema", version = "0.1.0" }
-ironsbe-codegen = { path = "ironsbe-codegen", version = "0.1.0" }
-ironsbe-derive = { path = "ironsbe-derive", version = "0.1.0" }
-ironsbe-channel = { path = "ironsbe-channel", version = "0.1.0" }
-ironsbe-transport = { path = "ironsbe-transport", version = "0.1.0" }
-ironsbe-server = { path = "ironsbe-server", version = "0.1.0" }
-ironsbe-client = { path = "ironsbe-client", version = "0.1.0" }
-ironsbe-marketdata = { path = "ironsbe-marketdata", version = "0.1.0" }
-ironsbe-bench = { path = "ironsbe-bench", version = "0.1.0" }
+ironsbe = { path = "ironsbe", version = "0.1.1" }
+ironsbe-core = { path = "ironsbe-core", version = "0.1.1" }
+ironsbe-schema = { path = "ironsbe-schema", version = "0.1.1" }
+ironsbe-codegen = { path = "ironsbe-codegen", version = "0.1.1" }
+ironsbe-derive = { path = "ironsbe-derive", version = "0.1.1" }
+ironsbe-channel = { path = "ironsbe-channel", version = "0.1.1" }
+ironsbe-transport = { path = "ironsbe-transport", version = "0.1.1" }
+ironsbe-server = { path = "ironsbe-server", version = "0.1.1" }
+ironsbe-client = { path = "ironsbe-client", version = "0.1.1" }
+ironsbe-marketdata = { path = "ironsbe-marketdata", version = "0.1.1" }
+ironsbe-bench = { path = "ironsbe-bench", version = "0.1.1" }
 
 # External dependencies - Latest stable versions as of Jan 2025
 thiserror = "2.0"

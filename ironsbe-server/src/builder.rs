@@ -11,8 +11,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc as tokio_mpsc;
-use tokio_util::codec::{Decoder, Encoder, Framed};
 use tokio_stream::StreamExt;
+use tokio_util::codec::{Decoder, Encoder, Framed};
 
 /// Builder for configuring and creating a server.
 pub struct ServerBuilder<H> {
@@ -164,7 +164,9 @@ impl<H: MessageHandler + Send + Sync + 'static> Server<H> {
         tokio::spawn(async move {
             tracing::info!("Session {} connected from {}", session_id, addr);
 
-            if let Err(e) = handle_session(session_id, stream, handler.as_ref(), max_frame_size).await {
+            if let Err(e) =
+                handle_session(session_id, stream, handler.as_ref(), max_frame_size).await
+            {
                 tracing::error!("Session {} error: {:?}", session_id, e);
             }
 
@@ -303,11 +305,9 @@ struct SessionResponder {
 
 impl Responder for SessionResponder {
     fn send(&self, message: &[u8]) -> Result<(), SendError> {
-        self.tx
-            .send(message.to_vec())
-            .map_err(|_| SendError {
-                message: "channel closed".to_string(),
-            })
+        self.tx.send(message.to_vec()).map_err(|_| SendError {
+            message: "channel closed".to_string(),
+        })
     }
 
     fn send_to(&self, _session_id: u64, message: &[u8]) -> Result<(), SendError> {

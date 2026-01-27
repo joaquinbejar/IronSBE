@@ -6,8 +6,8 @@ use ironsbe_core::header::MessageHeader;
 use ironsbe_server::builder::ServerBuilder;
 use ironsbe_server::handler::{MessageHandler, Responder};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Simple echo handler that logs received messages and echoes them back.
 struct EchoHandler {
