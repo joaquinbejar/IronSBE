@@ -192,48 +192,50 @@ fn main() {
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              IronSBE Architecture                            │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         Application Layer                            │    │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                  │    │
-│  │  │   Server    │  │   Client    │  │ Market Data │                  │    │
-│  │  │   Engine    │  │   Engine    │  │   Handler   │                  │    │
-│  │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                  │    │
-│  └─────────┼────────────────┼────────────────┼──────────────────────────┘    │
-│            │                │                │                               │
-│  ┌─────────▼────────────────▼────────────────▼──────────────────────────┐    │
-│  │                         Channel Layer                                │    │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                  │    │
-│  │  │    SPSC     │  │    MPSC     │  │  Broadcast  │                  │    │
-│  │  │  (~20 ns)   │  │  (~100 ns)  │  │  (1-to-N)   │                  │    │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘                  │    │
-│  └──────────────────────────┬───────────────────────────────────────────┘    │
-│                             │                                                │
-│  ┌──────────────────────────▼───────────────────────────────────────────┐    │
-│  │                        Transport Layer                               │    │
-│  │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐        │    │
-│  │  │    TCP    │  │    UDP    │  │ Multicast │  │    IPC    │        │    │
-│  │  │  (Tokio)  │  │  Unicast  │  │   (A/B)   │  │   (SHM)   │        │    │
-│  │  └───────────┘  └───────────┘  └───────────┘  └───────────┘        │    │
-│  └──────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐    │
-│  │                          Codec Layer                                 │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
-│  │  │              Generated Encoders / Decoders                  │    │    │
-│  │  │         (Zero-copy, compile-time offsets, type-safe)        │    │    │
-│  │  └─────────────────────────────────────────────────────────────┘    │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
-│  │  │                    ironsbe-core                             │    │    │
-│  │  │         (Buffer traits, headers, primitives)                │    │    │
-│  │  └─────────────────────────────────────────────────────────────┘    │    │
-│  └──────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Application["Application Layer"]
+        Server["Server Engine"]
+        Client["Client Engine"]
+        MarketData["Market Data Handler"]
+    end
+
+    subgraph Channel["Channel Layer"]
+        SPSC["SPSC<br/>~20 ns"]
+        MPSC["MPSC<br/>~100 ns"]
+        Broadcast["Broadcast<br/>1-to-N"]
+    end
+
+    subgraph Transport["Transport Layer"]
+        TCP["TCP<br/>Tokio"]
+        UDP["UDP<br/>Unicast"]
+        Multicast["Multicast<br/>A/B"]
+        IPC["IPC<br/>SHM"]
+    end
+
+    subgraph Codec["Codec Layer"]
+        Encoders["Generated Encoders / Decoders<br/>Zero-copy, compile-time offsets, type-safe"]
+        Core["ironsbe-core<br/>Buffer traits, headers, primitives"]
+    end
+
+    Server --> SPSC
+    Server --> MPSC
+    Client --> SPSC
+    Client --> MPSC
+    MarketData --> Broadcast
+
+    SPSC --> TCP
+    SPSC --> UDP
+    MPSC --> TCP
+    MPSC --> Multicast
+    Broadcast --> Multicast
+    Broadcast --> IPC
+
+    TCP --> Encoders
+    UDP --> Encoders
+    Multicast --> Encoders
+    IPC --> Encoders
+    Encoders --> Core
 ```
 
 ---
