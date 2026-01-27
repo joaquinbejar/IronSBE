@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="doc/assets/ironsbe-logo.svg" alt="IronSBE Logo" width="200"/>
+  <img src="doc/assets/ironsbe-logo.png" alt="IronSBE Logo" width="200"/>
 </p>
 
 <h1 align="center">IronSBE</h1>
