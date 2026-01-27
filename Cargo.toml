@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "ironsbe",
+    "ironsbe-core",
+    "ironsbe-schema",
+    "ironsbe-codegen",
+    "ironsbe-derive",
+    "ironsbe-channel",
+    "ironsbe-transport",
+    "ironsbe-server",
+    "ironsbe-client",
+    "ironsbe-marketdata",
+    "ironsbe-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Joaquin Bejar <jb@taunais.com>"]
+license = "MIT"
+repository = "https://github.com/joaquinbejar/IronSBE"
+homepage = "https://github.com/joaquinbejar/IronSBE"
+keywords = ["finance", "sbe", "trading", "low-latency", "binary-encoding"]
+categories = ["finance", "encoding", "network-programming"]
+
+[workspace.dependencies]
+# Internal crates
+ironsbe = { path = "ironsbe", version = "0.1.0" }
+ironsbe-core = { path = "ironsbe-core", version = "0.1.0" }
+ironsbe-schema = { path = "ironsbe-schema", version = "0.1.0" }
+ironsbe-codegen = { path = "ironsbe-codegen", version = "0.1.0" }
+ironsbe-derive = { path = "ironsbe-derive", version = "0.1.0" }
+ironsbe-channel = { path = "ironsbe-channel", version = "0.1.0" }
+ironsbe-transport = { path = "ironsbe-transport", version = "0.1.0" }
+ironsbe-server = { path = "ironsbe-server", version = "0.1.0" }
+ironsbe-client = { path = "ironsbe-client", version = "0.1.0" }
+ironsbe-marketdata = { path = "ironsbe-marketdata", version = "0.1.0" }
+ironsbe-bench = { path = "ironsbe-bench", version = "0.1.0" }
+
+# External dependencies
+thiserror = "2.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+bytes = { version = "1.9", features = ["serde"] }
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
+tokio = { version = "1.43", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+num-traits = "0.2"
+num-derive = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+quick-xml = "0.37"
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "parsing"] }
+rtrb = "0.3"
+lru = "0.12"
+memmap2 = "0.9"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release.build-override]
+opt-level = 3
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
