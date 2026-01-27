@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://crates.io/crates/ironsbe"><img src="https://img.shields.io/crates/v/ironsbe.svg" alt="Crates.io"/></a>
   <a href="https://docs.rs/ironsbe"><img src="https://docs.rs/ironsbe/badge.svg" alt="Documentation"/></a>
-  <a href="https://github.com/joaquinbejar/IronSBE/actions"><img src="https://github.com/joaquinbejar/IronSBE/workflows/CI/badge.svg" alt="CI Status"/></a>
+  <a href="https://github.com/joaquinbejar/IronSBE/actions"><img src="https://github.com/joaquinbejar/IronSBE/workflows/Build/badge.svg" alt="Build Status"/></a>
   <a href="https://codecov.io/gh/joaquinbejar/IronSBE"><img src="https://codecov.io/gh/joaquinbejar/IronSBE/branch/main/graph/badge.svg" alt="Coverage"/></a>
   <a href="https://github.com/joaquinbejar/IronSBE/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"/></a>
 </p>
