@@ -1,18 +1,19 @@
 <p align="center">
-  <img src="docs/assets/ironsbe-logo.svg" alt="IronSBE Logo" width="200"/>
+  <img src="doc/assets/ironsbe-logo.svg" alt="IronSBE Logo" width="200"/>
 </p>
 
 <h1 align="center">IronSBE</h1>
 
 <p align="center">
-  <strong>High-Performance Simple Binary Encoding (SBE) for Rust</strong>
+  <strong>High-Performance Simple Binary Encoding (SBE) Server/Client for Rust</strong>
 </p>
 
 <p align="center">
   <a href="https://crates.io/crates/ironsbe"><img src="https://img.shields.io/crates/v/ironsbe.svg" alt="Crates.io"/></a>
   <a href="https://docs.rs/ironsbe"><img src="https://docs.rs/ironsbe/badge.svg" alt="Documentation"/></a>
-  <a href="https://github.com/capitaldelta/ironsbe/actions"><img src="https://github.com/capitaldelta/ironsbe/workflows/CI/badge.svg" alt="CI Status"/></a>
-  <a href="https://github.com/capitaldelta/ironsbe/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"/></a>
+  <a href="https://github.com/joaquinbejar/IronSBE/actions"><img src="https://github.com/joaquinbejar/IronSBE/workflows/CI/badge.svg" alt="CI Status"/></a>
+  <a href="https://codecov.io/gh/joaquinbejar/IronSBE"><img src="https://codecov.io/gh/joaquinbejar/IronSBE/branch/main/graph/badge.svg" alt="Coverage"/></a>
+  <a href="https://github.com/joaquinbejar/IronSBE/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"/></a>
 </p>
 
 <p align="center">
@@ -23,19 +24,20 @@
 
 ## Overview
 
-IronSBE is a complete Rust implementation of the [FIX Simple Binary Encoding (SBE)](https://www.fixtrading.org/standards/sbe/) protocol, designed for ultra-low-latency financial systems. It provides both server and client capabilities with a focus on performance, type safety, and ease of use.
+IronSBE is a complete Rust implementation of the [Simple Binary Encoding (SBE)](https://www.fixtrading.org/standards/sbe/) protocol, designed for ultra-low-latency financial systems. It provides both server and client capabilities with a focus on performance, type safety, and ease of use.
 
 SBE is the binary encoding standard used by major exchanges including CME, Eurex, LSE, NASDAQ, and Binance for market data feeds and order entry systems.
 
 ### Key Features
 
-- 🚀 **Zero-copy decoding** - Direct buffer access with compile-time offset calculation
-- 🔧 **Schema-driven code generation** - Type-safe messages from XML specifications
-- ⚡ **Sub-microsecond latency** - SIMD-optimized, cache-friendly memory layouts
-- 📡 **Multi-transport support** - TCP, UDP unicast/multicast, shared memory IPC
-- 🔄 **A/B feed arbitration** - First-arrival-wins deduplication for redundant feeds
-- 📊 **Market data patterns** - Order book management, gap detection, snapshot recovery
-- 🛡️ **100% safe Rust** - No unsafe code in generated codecs
+- **Zero-copy decoding** - Direct buffer access with compile-time offset calculation
+- **Schema-driven code generation** - Type-safe messages from XML specifications
+- **Sub-microsecond latency** - Cache-friendly memory layouts with aligned buffers
+- **Multi-transport support** - TCP, UDP unicast/multicast, shared memory IPC
+- **A/B feed arbitration** - First-arrival-wins deduplication for redundant feeds
+- **Market data patterns** - Order book management, gap detection, snapshot recovery
+- **100% safe Rust** - No unsafe code in core library
+- **Async/await support** - Built on Tokio for high-performance async I/O
 
 ---
 
@@ -238,32 +240,103 @@ fn main() {
 
 ## Crate Structure
 
+IronSBE is organized as a Cargo workspace with 11 crates:
+
 | Crate | Description |
 |-------|-------------|
-| `ironsbe` | Facade crate re-exporting public API |
-| `ironsbe-core` | Buffer traits, message headers, primitive types |
-| `ironsbe-schema` | SBE XML schema parser and validation |
-| `ironsbe-codegen` | Build-time Rust code generation |
-| `ironsbe-derive` | Procedural macros (`#[derive(SbeMessage)]`) |
-| `ironsbe-channel` | Lock-free SPSC/MPSC channels |
-| `ironsbe-transport` | TCP, UDP, multicast, shared memory |
-| `ironsbe-server` | Server engine with session management |
-| `ironsbe-client` | Client connector with reconnection |
-| `ironsbe-marketdata` | Order book, recovery, A/B arbitration |
+| [`ironsbe`](ironsbe/) | Facade crate re-exporting public API |
+| [`ironsbe-core`](ironsbe-core/) | Buffer traits, message headers, primitive types, encoder/decoder traits |
+| [`ironsbe-schema`](ironsbe-schema/) | SBE XML schema parser and validation |
+| [`ironsbe-codegen`](ironsbe-codegen/) | Build-time Rust code generation from SBE schemas |
+| [`ironsbe-derive`](ironsbe-derive/) | Procedural macros (`#[derive(SbeMessage)]`) |
+| [`ironsbe-channel`](ironsbe-channel/) | Lock-free SPSC/MPSC/Broadcast channels |
+| [`ironsbe-transport`](ironsbe-transport/) | TCP, UDP unicast/multicast, shared memory IPC |
+| [`ironsbe-server`](ironsbe-server/) | Async server engine with session management |
+| [`ironsbe-client`](ironsbe-client/) | Async client with auto-reconnection |
+| [`ironsbe-marketdata`](ironsbe-marketdata/) | Order book, gap detection, A/B feed arbitration |
+| [`ironsbe-bench`](ironsbe-bench/) | Benchmarks using Criterion |
+
+### Dependency Graph
+
+```
+ironsbe (facade)
+├── ironsbe-core
+├── ironsbe-schema
+├── ironsbe-codegen
+├── ironsbe-channel
+├── ironsbe-transport
+├── ironsbe-server
+├── ironsbe-client
+└── ironsbe-marketdata
+
+ironsbe-server
+├── ironsbe-core
+├── ironsbe-channel
+└── ironsbe-transport
+
+ironsbe-client
+├── ironsbe-core
+├── ironsbe-channel
+└── ironsbe-transport
+
+ironsbe-codegen
+├── ironsbe-core
+└── ironsbe-schema
+```
 
 ---
 
 ## Examples
 
-### TCP Server
+### Running the Examples
+
+IronSBE includes working server and client examples:
+
+```bash
+# Terminal 1: Start the server
+cd ironsbe && cargo run --example server
+
+# Terminal 2: Run the client
+cd ironsbe && cargo run --example client
+```
+
+**Expected output:**
+
+Server:
+```
+Starting IronSBE server on 127.0.0.1:9000
+[Server] Session 1 connected
+[Server] Message #1 from session 1: template_id=101, size=45 bytes
+[Server] Message #2 from session 1: template_id=102, size=45 bytes
+...
+[Server] Session 1 disconnected
+```
+
+Client:
+```
+Connecting to IronSBE server at 127.0.0.1:9000
+[Client] Connected to server
+[Client] Sent message #1
+[Client] Received response: 45 bytes
+[Client] Response payload: Hello from IronSBE client! Message #1
+...
+Client stopped
+```
+
+### TCP Echo Server
 
 ```rust
-use ironsbe::prelude::*;
-use ironsbe_server::{ServerBuilder, MessageHandler, Responder};
+use ironsbe_core::header::MessageHeader;
+use ironsbe_server::builder::ServerBuilder;
+use ironsbe_server::handler::{MessageHandler, Responder};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-struct OrderHandler;
+struct EchoHandler {
+    message_count: AtomicU64,
+}
 
-impl MessageHandler for OrderHandler {
+impl MessageHandler for EchoHandler {
     fn on_message(
         &self,
         session_id: u64,
@@ -271,138 +344,164 @@ impl MessageHandler for OrderHandler {
         buffer: &[u8],
         responder: &dyn Responder,
     ) {
-        match header.template_id {
-            1 => {
-                // Handle NewOrderSingle
-                let order = NewOrderSingleDecoder::wrap(buffer, 8, 1);
-                println!("Order received: {:?}", order.cl_ord_id());
-                
-                // Send response
-                let mut resp = [0u8; 128];
-                let encoder = ExecutionReportEncoder::wrap(&mut resp, 0);
-                // ... encode response
-                responder.send(&resp[..encoder.encoded_length()]).ok();
-            }
-            _ => {}
-        }
+        let count = self.message_count.fetch_add(1, Ordering::Relaxed) + 1;
+        println!(
+            "Message #{} from session {}: template_id={}, size={} bytes",
+            count, session_id, header.template_id, buffer.len()
+        );
+        
+        // Echo the message back
+        responder.send(buffer).ok();
+    }
+
+    fn on_session_start(&self, session_id: u64) {
+        println!("Session {} connected", session_id);
+    }
+
+    fn on_session_end(&self, session_id: u64) {
+        println!("Session {} disconnected", session_id);
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (mut server, _handle) = ServerBuilder::new()
-        .bind("0.0.0.0:9000".parse()?)
-        .handler(OrderHandler)
+    let addr: SocketAddr = "127.0.0.1:9000".parse()?;
+    let handler = EchoHandler { message_count: AtomicU64::new(0) };
+
+    let (mut server, handle) = ServerBuilder::new()
+        .bind(addr)
+        .handler(handler)
+        .max_connections(100)
         .build();
-    
+
+    // Handle Ctrl+C for graceful shutdown
+    let shutdown_handle = std::sync::Arc::new(handle);
+    let sh = shutdown_handle.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        sh.shutdown();
+    });
+
     server.run().await?;
     Ok(())
 }
 ```
 
-### TCP Client with Channels
+### TCP Client
 
 ```rust
-use ironsbe::prelude::*;
-use ironsbe_client::ClientBuilder;
+use ironsbe_client::builder::{ClientBuilder, ClientEvent};
+use ironsbe_core::buffer::{AlignedBuffer, ReadBuffer, WriteBuffer};
+use ironsbe_core::header::MessageHeader;
+use std::net::SocketAddr;
+use std::time::Duration;
+
+fn create_message(template_id: u16, payload: &[u8]) -> Vec<u8> {
+    let mut buffer = AlignedBuffer::<256>::new();
+    let header = MessageHeader::new(payload.len() as u16, template_id, 1, 1);
+    header.encode(&mut buffer, 0);
+    
+    let header_size = MessageHeader::ENCODED_LENGTH;
+    buffer.as_mut_slice()[header_size..header_size + payload.len()]
+        .copy_from_slice(payload);
+    
+    buffer.as_slice()[..header_size + payload.len()].to_vec()
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (mut client, mut handle) = ClientBuilder::new("127.0.0.1:9000".parse()?)
-        .reconnect(true)
+    let addr: SocketAddr = "127.0.0.1:9000".parse()?;
+
+    let (mut client, mut handle) = ClientBuilder::new(addr)
+        .connect_timeout(Duration::from_secs(5))
+        .max_reconnect_attempts(3)
         .build();
-    
+
     // Run client in background
     tokio::spawn(async move { client.run().await });
-    
-    // Send order via channel
-    let mut buf = [0u8; 128];
-    let encoder = NewOrderSingleEncoder::wrap(&mut buf, 0);
-    encoder
-        .set_cl_ord_id(b"ORD001              ")
-        .set_symbol(b"AAPL    ")
-        .set_side(Side::Buy)
-        .set_quantity(100);
-    
-    handle.send(buf[..encoder.encoded_length()].to_vec())?;
-    
-    // Receive responses via channel
-    while let Some(event) = handle.poll() {
-        match event {
-            ClientEvent::Message(data) => {
-                println!("Received: {} bytes", data.len());
-            }
-            ClientEvent::Disconnected => break,
-            _ => {}
-        }
-    }
-    
-    Ok(())
-}
-```
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-### UDP Multicast Market Data
-
-```rust
-use ironsbe::prelude::*;
-use ironsbe_transport::udp::multicast::{MulticastConfig, MulticastReceiver};
-use ironsbe_marketdata::MarketDataHandler;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = MulticastConfig {
-        feed_a_group: "239.1.1.1".parse()?,
-        feed_b_group: "239.1.1.2".parse()?,
-        port: 14310,
-        interface: "0.0.0.0".parse()?,
-        recv_buffer_size: 8 * 1024 * 1024,
-    };
-    
-    let receiver = MulticastReceiver::new(config).await?;
-    
-    // A/B arbitration happens automatically
-    loop {
-        let packet = receiver.recv().await?;
+    // Send messages
+    for i in 1..=5 {
+        let payload = format!("Hello from client! Message #{}", i);
+        let message = create_message(100 + i as u16, payload.as_bytes());
+        handle.send(message)?;
         
-        // Packet is deduplicated - only first arrival processed
-        let header = MessageHeader::wrap(&packet.data, 0);
-        println!(
-            "Seq: {}, Template: {}, Latency: {:?}",
-            packet.sequence,
-            header.template_id,
-            packet.recv_time.elapsed(),
-        );
+        // Poll for responses
+        while let Some(event) = handle.poll() {
+            match event {
+                ClientEvent::Message(data) => {
+                    println!("Received: {} bytes", data.len());
+                }
+                ClientEvent::Connected => println!("Connected"),
+                ClientEvent::Disconnected => println!("Disconnected"),
+                ClientEvent::Error(e) => eprintln!("Error: {}", e),
+            }
+        }
+        
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    handle.disconnect();
+    Ok(())
 }
 ```
 
 ### SPSC Channel (Ultra-Low Latency)
 
 ```rust
-use ironsbe_channel::spsc::SpscChannel;
+use ironsbe_channel::spsc;
 
 fn main() {
-    let (mut tx, mut rx) = SpscChannel::<OrderCommand>::new(4096);
+    // Create a lock-free SPSC channel
+    let (mut tx, mut rx) = spsc::channel::<u64>(4096);
     
-    // Producer thread (strategy)
+    // Producer thread
     std::thread::spawn(move || {
-        loop {
-            let order = OrderCommand { /* ... */ };
-            
+        for i in 0..1_000_000 {
             // ~12ns send latency
-            if tx.send(order).is_err() {
-                break;
+            while tx.send(i).is_err() {
+                std::hint::spin_loop();
             }
         }
     });
     
-    // Consumer thread (network I/O)
+    // Consumer thread - busy-poll for lowest latency
+    let mut count = 0u64;
     loop {
-        // Busy-poll for lowest latency
-        let order = rx.recv_spin();
-        
-        // Process order...
+        if let Some(value) = rx.recv() {
+            count += 1;
+            if count >= 1_000_000 {
+                break;
+            }
+        }
     }
+    
+    println!("Received {} messages", count);
+}
+```
+
+### Broadcast Channel
+
+```rust
+use ironsbe_channel::broadcast::BroadcastChannel;
+
+fn main() {
+    let channel = BroadcastChannel::<u64>::new(1024);
+    
+    // Create multiple subscribers
+    let mut sub1 = channel.subscribe();
+    let mut sub2 = channel.subscribe();
+    
+    // Publish messages
+    channel.send(42);
+    channel.send(100);
+    
+    // All subscribers receive all messages
+    assert_eq!(sub1.recv(), Some(42));
+    assert_eq!(sub2.recv(), Some(42));
+    assert_eq!(sub1.recv(), Some(100));
+    assert_eq!(sub2.recv(), Some(100));
 }
 ```
 
@@ -462,22 +561,23 @@ sudo ethtool -C eth0 rx-usecs 0 tx-usecs 0
 ## Documentation
 
 - [API Reference](https://docs.rs/ironsbe)
-- [Architecture Guide](docs/architecture.md)
-- [Performance Tuning](docs/performance.md)
-- [Schema Reference](docs/schema.md)
-- [Examples](examples/)
+- [Architecture Guide](doc/architecture.md)
+- [Examples](ironsbe/examples/)
 
 ---
 
-## Contributing
+## Development
 
-Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) before submitting a PR.
+### Prerequisites
 
-### Development Setup
+- Rust 1.85+ (Edition 2024)
+- Cargo
+
+### Building
 
 ```bash
-git clone https://github.com/capitaldelta/ironsbe.git
-cd ironsbe
+git clone https://github.com/joaquinbejar/IronSBE.git
+cd IronSBE
 
 # Build all crates
 cargo build --workspace
@@ -485,42 +585,89 @@ cargo build --workspace
 # Run tests
 cargo test --workspace
 
-# Run benchmarks
-cargo bench --workspace
+# Run linting
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Format code
+cargo fmt --all
 
 # Generate documentation
 cargo doc --workspace --no-deps --open
 ```
 
+### Using the Makefile
+
+The project includes a comprehensive Makefile:
+
+```bash
+# Format and lint
+make fmt
+make lint
+
+# Run tests
+make test
+
+# Pre-push checks (recommended before committing)
+make pre-push
+
+# Run benchmarks
+make bench
+
+# Generate documentation
+make doc
+
+# Set version across all crates
+make version VERSION=0.2.0
+
+# Publish all crates to crates.io (in dependency order)
+make publish-all
+```
+
+### Running Examples
+
+```bash
+# Run the server example
+cd ironsbe && cargo run --example server
+
+# Run the client example (in another terminal)
+cd ironsbe && cargo run --example client
+```
+
 ### Code Style
 
 - Follow Rust standard formatting (`cargo fmt`)
-- Pass all clippy lints (`cargo clippy`)
+- Pass all clippy lints (`cargo clippy -- -D warnings`)
 - Add tests for new functionality
 - Update documentation for API changes
+- All comments and documentation in English
 
 ---
 
-## Contribution and Contact
+## Contributing
 
-We welcome contributions to this project! If you would like to contribute, please follow these steps:
+Contributions are welcome! Please follow these steps:
 
-1. Fork the repository.
-2. Create a new branch for your feature or bug fix.
-3. Make your changes and ensure that the project still builds and all tests pass.
-4. Commit your changes and push your branch to your forked repository.
-5. Submit a pull request to the main repository.
+1. Fork the repository
+2. Create a new branch for your feature or bug fix
+3. Make your changes and ensure that the project still builds and all tests pass
+4. Run `make pre-push` to verify everything works
+5. Commit your changes and push your branch to your forked repository
+6. Submit a pull request to the main repository
 
-If you have any questions, issues, or would like to provide feedback, please feel free to contact the project
-maintainer:
+---
 
-### **Contact Information**
+## Contact
+
+If you have any questions, issues, or would like to provide feedback, please feel free to contact the project maintainer:
+
 - **Author**: Joaquín Béjar García
 - **Email**: jb@taunais.com
 - **Telegram**: [@joaquin_bejar](https://t.me/joaquin_bejar)
-- **Repository**: <https://github.com/joaquinbejar/IronFix>
-- **Documentation**: <https://docs.rs/ironfix>
+- **Repository**: <https://github.com/joaquinbejar/IronSBE>
+- **Documentation**: <https://docs.rs/ironsbe>
 
-We appreciate your interest and look forward to your contributions!
+---
 
-**License**: MIT
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

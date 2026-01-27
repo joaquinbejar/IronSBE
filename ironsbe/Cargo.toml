@@ -1,0 +1,34 @@
+[package]
+name = "ironsbe"
+description = "High-performance SBE (Simple Binary Encoding) server/client for Rust"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["sbe", "binary-encoding", "trading", "low-latency", "finance"]
+categories = ["encoding", "network-programming", "finance"]
+readme = "../README.md"
+
+[dependencies]
+ironsbe-core = { workspace = true }
+ironsbe-schema = { workspace = true }
+ironsbe-codegen = { workspace = true }
+ironsbe-channel = { workspace = true }
+ironsbe-transport = { workspace = true }
+ironsbe-server = { workspace = true }
+ironsbe-client = { workspace = true }
+ironsbe-marketdata = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "server"
+path = "examples/server.rs"
+
+[[example]]
+name = "client"
+path = "examples/client.rs"

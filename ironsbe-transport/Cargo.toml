@@ -1,0 +1,26 @@
+[package]
+name = "ironsbe-transport"
+description = "Network transport layer for IronSBE - TCP, UDP, and IPC"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["transport", "tcp", "udp", "multicast", "ipc"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+ironsbe-core = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+lru = { workspace = true }
+memmap2 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

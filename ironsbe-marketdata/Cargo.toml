@@ -1,0 +1,20 @@
+[package]
+name = "ironsbe-marketdata"
+description = "Market data handling patterns for IronSBE - order books, recovery, arbitration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["marketdata", "orderbook", "trading", "finance"]
+categories = ["finance", "data-structures"]
+
+[dependencies]
+ironsbe-core = { workspace = true }
+ironsbe-channel = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]

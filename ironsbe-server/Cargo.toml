@@ -1,0 +1,27 @@
+[package]
+name = "ironsbe-server"
+description = "Server-side engine for IronSBE messaging"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["server", "sbe", "messaging", "low-latency"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+ironsbe-core = { workspace = true }
+ironsbe-channel = { workspace = true }
+ironsbe-transport = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = "0.1"
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

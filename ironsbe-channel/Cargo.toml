@@ -1,0 +1,19 @@
+[package]
+name = "ironsbe-channel"
+description = "High-performance channel abstractions for IronSBE messaging"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["channel", "spsc", "mpsc", "low-latency", "lock-free"]
+categories = ["concurrency", "data-structures"]
+
+[dependencies]
+rtrb = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }

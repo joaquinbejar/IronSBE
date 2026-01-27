@@ -10,16 +10,17 @@ version:
 	@if [ -z "$(VERSION)" ]; then echo "Usage: make version VERSION=x.y.z"; exit 1; fi
 	@echo "Setting version to $(VERSION) across all crates..."
 	@sed -i '' 's/^version = "[^"]*"/version = "$(VERSION)"/' Cargo.toml
+	@sed -i '' 's/ironsbe = { path = "ironsbe", version = "[^"]*"/ironsbe = { path = "ironsbe", version = "$(VERSION)"/' Cargo.toml
 	@sed -i '' 's/ironsbe-core = { path = "ironsbe-core", version = "[^"]*"/ironsbe-core = { path = "ironsbe-core", version = "$(VERSION)"/' Cargo.toml
-	@sed -i '' 's/ironsbe-dictionary = { path = "ironsbe-dictionary", version = "[^"]*"/ironsbe-dictionary = { path = "ironsbe-dictionary", version = "$(VERSION)"/' Cargo.toml
-	@sed -i '' 's/ironsbe-tagvalue = { path = "ironsbe-tagvalue", version = "[^"]*"/ironsbe-tagvalue = { path = "ironsbe-tagvalue", version = "$(VERSION)"/' Cargo.toml
-	@sed -i '' 's/ironsbe-session = { path = "ironsbe-session", version = "[^"]*"/ironsbe-session = { path = "ironsbe-session", version = "$(VERSION)"/' Cargo.toml
-	@sed -i '' 's/ironsbe-store = { path = "ironsbe-store", version = "[^"]*"/ironsbe-store = { path = "ironsbe-store", version = "$(VERSION)"/' Cargo.toml
-	@sed -i '' 's/ironsbe-transport = { path = "ironsbe-transport", version = "[^"]*"/ironsbe-transport = { path = "ironsbe-transport", version = "$(VERSION)"/' Cargo.toml
-	@sed -i '' 's/ironsbe-fast = { path = "ironsbe-fast", version = "[^"]*"/ironsbe-fast = { path = "ironsbe-fast", version = "$(VERSION)"/' Cargo.toml
+	@sed -i '' 's/ironsbe-schema = { path = "ironsbe-schema", version = "[^"]*"/ironsbe-schema = { path = "ironsbe-schema", version = "$(VERSION)"/' Cargo.toml
 	@sed -i '' 's/ironsbe-codegen = { path = "ironsbe-codegen", version = "[^"]*"/ironsbe-codegen = { path = "ironsbe-codegen", version = "$(VERSION)"/' Cargo.toml
 	@sed -i '' 's/ironsbe-derive = { path = "ironsbe-derive", version = "[^"]*"/ironsbe-derive = { path = "ironsbe-derive", version = "$(VERSION)"/' Cargo.toml
-	@sed -i '' 's/ironsbe-engine = { path = "ironsbe-engine", version = "[^"]*"/ironsbe-engine = { path = "ironsbe-engine", version = "$(VERSION)"/' Cargo.toml
+	@sed -i '' 's/ironsbe-channel = { path = "ironsbe-channel", version = "[^"]*"/ironsbe-channel = { path = "ironsbe-channel", version = "$(VERSION)"/' Cargo.toml
+	@sed -i '' 's/ironsbe-transport = { path = "ironsbe-transport", version = "[^"]*"/ironsbe-transport = { path = "ironsbe-transport", version = "$(VERSION)"/' Cargo.toml
+	@sed -i '' 's/ironsbe-server = { path = "ironsbe-server", version = "[^"]*"/ironsbe-server = { path = "ironsbe-server", version = "$(VERSION)"/' Cargo.toml
+	@sed -i '' 's/ironsbe-client = { path = "ironsbe-client", version = "[^"]*"/ironsbe-client = { path = "ironsbe-client", version = "$(VERSION)"/' Cargo.toml
+	@sed -i '' 's/ironsbe-marketdata = { path = "ironsbe-marketdata", version = "[^"]*"/ironsbe-marketdata = { path = "ironsbe-marketdata", version = "$(VERSION)"/' Cargo.toml
+	@sed -i '' 's/ironsbe-bench = { path = "ironsbe-bench", version = "[^"]*"/ironsbe-bench = { path = "ironsbe-bench", version = "$(VERSION)"/' Cargo.toml
 	@echo "Version updated to $(VERSION)"
 	@cargo check --workspace
 
@@ -114,32 +115,32 @@ publish-all: readme
 	@echo "2/11: Publishing ironsbe-derive..."
 	cargo publish -p ironsbe-derive || true
 	@sleep 30
-	@echo "3/11: Publishing ironsbe-dictionary..."
-	cargo publish -p ironsbe-dictionary || true
+	@echo "3/11: Publishing ironsbe-schema..."
+	cargo publish -p ironsbe-schema || true
 	@sleep 30
-	@echo "4/11: Publishing ironsbe-tagvalue..."
-	cargo publish -p ironsbe-tagvalue || true
-	@sleep 30
-	@echo "5/11: Publishing ironsbe-store..."
-	cargo publish -p ironsbe-store || true
-	@sleep 30
-	@echo "6/11: Publishing ironsbe-session..."
-	cargo publish -p ironsbe-session || true
-	@sleep 30
-	@echo "7/11: Publishing ironsbe-transport..."
-	cargo publish -p ironsbe-transport || true
-	@sleep 30
-	@echo "8/11: Publishing ironsbe-fast..."
-	cargo publish -p ironsbe-fast || true
-	@sleep 30
-	@echo "9/11: Publishing ironsbe-codegen..."
+	@echo "4/11: Publishing ironsbe-codegen..."
 	cargo publish -p ironsbe-codegen || true
 	@sleep 30
-	@echo "10/11: Publishing ironsbe-engine..."
-	cargo publish -p ironsbe-engine || true
+	@echo "5/11: Publishing ironsbe-channel..."
+	cargo publish -p ironsbe-channel || true
+	@sleep 30
+	@echo "6/11: Publishing ironsbe-transport..."
+	cargo publish -p ironsbe-transport || true
+	@sleep 30
+	@echo "7/11: Publishing ironsbe-server..."
+	cargo publish -p ironsbe-server || true
+	@sleep 30
+	@echo "8/11: Publishing ironsbe-client..."
+	cargo publish -p ironsbe-client || true
+	@sleep 30
+	@echo "9/11: Publishing ironsbe-marketdata..."
+	cargo publish -p ironsbe-marketdata || true
+	@sleep 30
+	@echo "10/11: Publishing ironsbe-bench..."
+	cargo publish -p ironsbe-bench || true
 	@sleep 30
 	@echo "11/11: Publishing ironsbe..."
-	cargo publish -p ironsbe-example || true
+	cargo publish -p ironsbe || true
 	@echo "Done! All crates published."
 
 .PHONY: coverage

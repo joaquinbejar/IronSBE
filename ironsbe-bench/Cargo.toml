@@ -1,0 +1,24 @@
+[package]
+name = "ironsbe-bench"
+description = "Benchmarking suite for IronSBE"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["benchmark", "performance", "sbe"]
+categories = ["development-tools::profiling"]
+
+[dependencies]
+ironsbe-core = { workspace = true }
+ironsbe-channel = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "encoding"
+harness = false
+
+[[bench]]
+name = "throughput"
+harness = false

@@ -1,0 +1,20 @@
+[package]
+name = "ironsbe-codegen"
+description = "Code generation from SBE XML schemas for IronSBE"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["sbe", "codegen", "code-generation"]
+categories = ["development-tools", "encoding"]
+
+[dependencies]
+ironsbe-core = { workspace = true }
+ironsbe-schema = { workspace = true }
+thiserror = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+
+[dev-dependencies]
