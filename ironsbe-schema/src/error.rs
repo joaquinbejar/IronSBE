@@ -179,3 +179,153 @@ impl ParseError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_error_missing_attr() {
+        let err = ParseError::missing_attr("message", "id");
+        let msg = err.to_string();
+        assert!(msg.contains("message"));
+        assert!(msg.contains("id"));
+        assert!(msg.contains("missing required attribute"));
+    }
+
+    #[test]
+    fn test_parse_error_invalid_attr() {
+        let err = ParseError::invalid_attr("field", "offset", "abc");
+        let msg = err.to_string();
+        assert!(msg.contains("field"));
+        assert!(msg.contains("offset"));
+        assert!(msg.contains("abc"));
+        assert!(msg.contains("invalid value"));
+    }
+
+    #[test]
+    fn test_parse_error_unknown_element() {
+        let err = ParseError::unknown_element("foo", "types");
+        let msg = err.to_string();
+        assert!(msg.contains("foo"));
+        assert!(msg.contains("types"));
+        assert!(msg.contains("unknown element"));
+    }
+
+    #[test]
+    fn test_parse_error_duplicate() {
+        let err = ParseError::duplicate("type", "MyType");
+        let msg = err.to_string();
+        assert!(msg.contains("type"));
+        assert!(msg.contains("MyType"));
+        assert!(msg.contains("duplicate"));
+    }
+
+    #[test]
+    fn test_parse_error_unknown_type() {
+        let err = ParseError::UnknownType {
+            type_name: "UnknownType".to_string(),
+            field: "myField".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("UnknownType"));
+        assert!(msg.contains("myField"));
+    }
+
+    #[test]
+    fn test_parse_error_invalid_structure() {
+        let err = ParseError::InvalidStructure {
+            message: "bad structure".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bad structure"));
+    }
+
+    #[test]
+    fn test_schema_error_type_not_found() {
+        let err = SchemaError::TypeNotFound {
+            name: "MissingType".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("MissingType"));
+        assert!(msg.contains("not found"));
+    }
+
+    #[test]
+    fn test_schema_error_message_not_found() {
+        let err = SchemaError::MessageNotFound {
+            name: "MissingMessage".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("MissingMessage"));
+    }
+
+    #[test]
+    fn test_schema_error_invalid_offset() {
+        let err = SchemaError::InvalidOffset {
+            field: "price".to_string(),
+            offset: 10,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("price"));
+        assert!(msg.contains("10"));
+    }
+
+    #[test]
+    fn test_schema_error_block_length_mismatch() {
+        let err = SchemaError::BlockLengthMismatch {
+            message: "Order".to_string(),
+            declared: 48,
+            calculated: 56,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Order"));
+        assert!(msg.contains("48"));
+        assert!(msg.contains("56"));
+    }
+
+    #[test]
+    fn test_schema_error_circular_reference() {
+        let err = SchemaError::CircularReference {
+            path: "A -> B -> A".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("A -> B -> A"));
+        assert!(msg.contains("circular"));
+    }
+
+    #[test]
+    fn test_schema_error_invalid_enum_value() {
+        let err = SchemaError::InvalidEnumValue {
+            enum_name: "Side".to_string(),
+            value: "Unknown".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Side"));
+        assert!(msg.contains("Unknown"));
+    }
+
+    #[test]
+    fn test_schema_error_validation() {
+        let err = SchemaError::Validation {
+            message: "validation failed".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("validation failed"));
+    }
+
+    #[test]
+    fn test_schema_error_from_parse_error() {
+        let parse_err = ParseError::missing_attr("msg", "id");
+        let schema_err: SchemaError = parse_err.into();
+        let msg = schema_err.to_string();
+        assert!(msg.contains("parse error"));
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = ParseError::missing_attr("elem", "attr");
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("MissingAttribute"));
+    }
+}

@@ -132,3 +132,108 @@ impl ClientSession {
         SinkExt::<&[u8]>::close(&mut self.framed).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sbe_frame_codec_new() {
+        let codec = SbeFrameCodec::new();
+        assert_eq!(codec.max_frame_size, 64 * 1024);
+    }
+
+    #[test]
+    fn test_sbe_frame_codec_with_max_frame_size() {
+        let codec = SbeFrameCodec::with_max_frame_size(128 * 1024);
+        assert_eq!(codec.max_frame_size, 128 * 1024);
+    }
+
+    #[test]
+    fn test_sbe_frame_codec_default() {
+        let codec = SbeFrameCodec::default();
+        assert_eq!(codec.max_frame_size, 64 * 1024);
+    }
+
+    #[test]
+    fn test_decode_incomplete_header() {
+        let mut codec = SbeFrameCodec::new();
+        let mut buf = BytesMut::from(&[0u8, 1, 2][..]);
+
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_incomplete_frame() {
+        let mut codec = SbeFrameCodec::new();
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&10u32.to_le_bytes()); // length = 10
+        buf.extend_from_slice(&[1, 2, 3, 4, 5]); // only 5 bytes, need 10
+
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_complete_frame() {
+        let mut codec = SbeFrameCodec::new();
+        let mut buf = BytesMut::new();
+        let data = b"Hello";
+        buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(data);
+
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        let frame = result.unwrap();
+        assert!(frame.is_some());
+        assert_eq!(frame.unwrap().as_ref(), data);
+    }
+
+    #[test]
+    fn test_decode_frame_too_large() {
+        let mut codec = SbeFrameCodec::with_max_frame_size(10);
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&100u32.to_le_bytes()); // length = 100, exceeds max
+
+        let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_encode_frame() {
+        use tokio_util::codec::Encoder;
+
+        let mut codec = SbeFrameCodec::new();
+        let mut buf = BytesMut::new();
+        let data = b"Hello";
+
+        let result = codec.encode(data.as_slice(), &mut buf);
+        assert!(result.is_ok());
+
+        // Check length prefix
+        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        assert_eq!(len, data.len());
+
+        // Check data
+        assert_eq!(&buf[4..], data);
+    }
+
+    #[test]
+    fn test_encode_frame_too_large() {
+        use tokio_util::codec::Encoder;
+
+        let mut codec = SbeFrameCodec::with_max_frame_size(5);
+        let mut buf = BytesMut::new();
+        let data = b"Hello World"; // 11 bytes, exceeds max of 5
+
+        let result = codec.encode(data.as_slice(), &mut buf);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+}

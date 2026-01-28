@@ -142,3 +142,56 @@ impl TcpClient {
             .map_err(TransportError::Io)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tcp_client_config_default() {
+        let config = TcpClientConfig::default();
+        assert_eq!(config.server_addr.port(), 9000);
+        assert_eq!(config.connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.max_frame_size, 64 * 1024);
+        assert!(config.tcp_nodelay);
+        assert_eq!(config.recv_buffer_size, Some(256 * 1024));
+        assert_eq!(config.send_buffer_size, Some(256 * 1024));
+    }
+
+    #[test]
+    fn test_tcp_client_config_new() {
+        let addr: SocketAddr = "192.168.1.1:8080".parse().unwrap();
+        let config = TcpClientConfig::new(addr);
+        assert_eq!(config.server_addr, addr);
+        assert_eq!(config.connect_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_tcp_client_config_builder() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let config = TcpClientConfig::new(addr)
+            .connect_timeout(Duration::from_secs(10))
+            .max_frame_size(128 * 1024)
+            .tcp_nodelay(false);
+
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.max_frame_size, 128 * 1024);
+        assert!(!config.tcp_nodelay);
+    }
+
+    #[test]
+    fn test_tcp_client_config_clone() {
+        let config = TcpClientConfig::default();
+        let cloned = config.clone();
+        assert_eq!(config.server_addr, cloned.server_addr);
+        assert_eq!(config.max_frame_size, cloned.max_frame_size);
+    }
+
+    #[test]
+    fn test_tcp_client_config_debug() {
+        let config = TcpClientConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("TcpClientConfig"));
+        assert!(debug_str.contains("9000"));
+    }
+}

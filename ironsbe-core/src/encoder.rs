@@ -267,4 +267,97 @@ mod tests {
         assert!(buf[0..8].iter().all(|&b| b == 0));
         assert_eq!(buf[8], 0xFF);
     }
+
+    #[test]
+    fn test_encoder_buffer_advance() {
+        let mut buf = [0u8; 64];
+        let mut encoder = EncoderBuffer::new(&mut buf, 0);
+
+        encoder.advance(10);
+        assert_eq!(encoder.position(), 10);
+        assert_eq!(encoder.bytes_written(), 10);
+    }
+
+    #[test]
+    fn test_encoder_buffer_set_position() {
+        let mut buf = [0u8; 64];
+        let mut encoder = EncoderBuffer::new(&mut buf, 0);
+
+        encoder.write_u32_le(0x12345678);
+        assert_eq!(encoder.position(), 4);
+
+        encoder.set_position(20);
+        assert_eq!(encoder.position(), 20);
+    }
+
+    #[test]
+    fn test_encoder_buffer_buffer_access() {
+        let mut buf = [0u8; 64];
+        let mut encoder = EncoderBuffer::new(&mut buf, 0);
+
+        encoder.write_u8(0xAB);
+
+        // Test immutable access
+        assert_eq!(encoder.buffer()[0], 0xAB);
+
+        // Test mutable access
+        encoder.buffer_mut()[1] = 0xCD;
+        assert_eq!(encoder.buffer()[1], 0xCD);
+    }
+
+    #[test]
+    fn test_encoder_buffer_debug() {
+        let mut buf = [0u8; 64];
+        let encoder = EncoderBuffer::new(&mut buf, 0);
+        let debug_str = format!("{:?}", encoder);
+        assert!(debug_str.contains("EncoderBuffer"));
+    }
+
+    /// Test encoder implementation for testing purposes.
+    struct TestEncoder {
+        offset: usize,
+        len: usize,
+    }
+
+    impl SbeEncoder for TestEncoder {
+        const TEMPLATE_ID: u16 = 1;
+        const SCHEMA_ID: u16 = 100;
+        const SCHEMA_VERSION: u16 = 1;
+        const BLOCK_LENGTH: u16 = 16;
+
+        fn wrap(_buffer: &mut [u8], offset: usize) -> TestEncoder {
+            TestEncoder {
+                offset,
+                len: MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize,
+            }
+        }
+
+        fn encoded_length(&self) -> usize {
+            self.len
+        }
+    }
+
+    #[test]
+    fn test_sbe_encoder_create_header() {
+        let header = TestEncoder::create_header();
+        // Copy values to avoid alignment issues
+        let block_length = header.block_length;
+        let template_id = header.template_id;
+        let schema_id = header.schema_id;
+        let version = header.version;
+
+        assert_eq!(block_length, 16);
+        assert_eq!(template_id, 1);
+        assert_eq!(schema_id, 100);
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_sbe_encoder_wrap() {
+        let mut buf = [0u8; 64];
+        let encoder = TestEncoder::wrap(&mut buf, 0);
+
+        assert_eq!(encoder.offset, 0);
+        assert_eq!(encoder.encoded_length(), 24); // 8 header + 16 block
+    }
 }

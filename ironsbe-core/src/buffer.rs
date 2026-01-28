@@ -601,4 +601,111 @@ mod tests {
         data.put_u32_le(0, 0xDEADBEEF);
         assert_eq!(data.get_u32_le(0), 0xDEADBEEF);
     }
+
+    #[test]
+    fn test_aligned_buffer_zeroed() {
+        let buf: AlignedBuffer<128> = AlignedBuffer::zeroed();
+        assert_eq!(buf.len(), 128);
+        assert!(buf.as_slice().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_aligned_buffer_as_mut_slice() {
+        let mut buf: AlignedBuffer<64> = AlignedBuffer::new();
+        let slice = buf.as_mut_slice();
+        slice[0] = 0xAB;
+        slice[1] = 0xCD;
+        assert_eq!(buf.get_u8(0), 0xAB);
+        assert_eq!(buf.get_u8(1), 0xCD);
+    }
+
+    #[test]
+    fn test_aligned_buffer_debug() {
+        let buf: AlignedBuffer<256> = AlignedBuffer::new();
+        let debug_str = format!("{:?}", buf);
+        assert!(debug_str.contains("AlignedBuffer"));
+        assert!(debug_str.contains("256"));
+    }
+
+    #[test]
+    fn test_buffer_pool_clone() {
+        let pool1 = BufferPool::new(2);
+        let pool2 = pool1.clone();
+
+        // Both pools share the same underlying buffers
+        let buf = pool1.acquire().expect("Should acquire");
+        assert_eq!(pool1.available(), 1);
+        assert_eq!(pool2.available(), 1);
+
+        pool2.release(buf);
+        assert_eq!(pool1.available(), 2);
+        assert_eq!(pool2.available(), 2);
+    }
+
+    #[test]
+    fn test_buffer_pool_debug() {
+        let pool = BufferPool::new(4);
+        let debug_str = format!("{:?}", pool);
+        assert!(debug_str.contains("BufferPool"));
+        assert!(debug_str.contains("capacity"));
+        assert!(debug_str.contains("4"));
+    }
+
+    #[test]
+    fn test_slice_read_buffer_all_types() {
+        let data: &[u8] = &[
+            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
+        ];
+
+        assert_eq!(data.get_i8(0), 0x12);
+        assert_eq!(data.get_i16_le(0), 0x3412);
+        assert_eq!(data.get_i32_le(0), 0x78563412_u32 as i32);
+        assert_eq!(data.get_i64_le(0), 0xF0DEBC9A78563412_u64 as i64);
+        assert_eq!(data.get_u64_le(0), 0xF0DEBC9A78563412);
+    }
+
+    #[test]
+    fn test_vec_write_buffer_all_types() {
+        let mut data = vec![0u8; 64];
+
+        data.put_u8(0, 0xFF);
+        assert_eq!(data.get_u8(0), 0xFF);
+
+        data.put_i8(1, -1);
+        assert_eq!(data.get_i8(1), -1);
+
+        data.put_u16_le(2, 0xABCD);
+        assert_eq!(data.get_u16_le(2), 0xABCD);
+
+        data.put_i16_le(4, -1234);
+        assert_eq!(data.get_i16_le(4), -1234);
+
+        data.put_i32_le(8, -123456);
+        assert_eq!(data.get_i32_le(8), -123456);
+
+        data.put_u64_le(16, 0x123456789ABCDEF0);
+        assert_eq!(data.get_u64_le(16), 0x123456789ABCDEF0);
+
+        data.put_i64_le(24, -9876543210);
+        assert_eq!(data.get_i64_le(24), -9876543210);
+
+        data.put_f32_le(32, 3.14159);
+        assert!((data.get_f32_le(32) - 3.14159).abs() < 0.0001);
+
+        data.put_f64_le(40, 2.718281828);
+        assert!((data.get_f64_le(40) - 2.718281828).abs() < 0.0000001);
+
+        data.put_bytes(48, b"test");
+        assert_eq!(data.get_bytes(48, 4), b"test");
+
+        data.put_str(52, "hello", 8);
+        assert_eq!(data.get_str(52, 8), "hello");
+    }
+
+    #[test]
+    fn test_aligned_buffer_default() {
+        let buf: AlignedBuffer<32> = AlignedBuffer::default();
+        assert_eq!(buf.len(), 32);
+    }
 }

@@ -139,3 +139,52 @@ impl TcpConnection {
         SinkExt::<&[u8]>::close(&mut self.framed).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tcp_server_config_default() {
+        let config = TcpServerConfig::default();
+        assert_eq!(config.bind_addr.port(), 9000);
+        assert_eq!(config.max_connections, 1000);
+        assert_eq!(config.max_frame_size, 64 * 1024);
+        assert!(config.tcp_nodelay);
+    }
+
+    #[test]
+    fn test_tcp_server_config_new() {
+        let addr: SocketAddr = "192.168.1.1:8080".parse().unwrap();
+        let config = TcpServerConfig::new(addr);
+        assert_eq!(config.bind_addr, addr);
+        assert_eq!(config.max_connections, 1000);
+    }
+
+    #[test]
+    fn test_tcp_server_config_builder() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let config = TcpServerConfig::new(addr)
+            .max_connections(500)
+            .max_frame_size(128 * 1024);
+
+        assert_eq!(config.max_connections, 500);
+        assert_eq!(config.max_frame_size, 128 * 1024);
+    }
+
+    #[test]
+    fn test_tcp_server_config_clone() {
+        let config = TcpServerConfig::default();
+        let cloned = config.clone();
+        assert_eq!(config.bind_addr, cloned.bind_addr);
+        assert_eq!(config.max_connections, cloned.max_connections);
+    }
+
+    #[test]
+    fn test_tcp_server_config_debug() {
+        let config = TcpServerConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("TcpServerConfig"));
+        assert!(debug_str.contains("9000"));
+    }
+}

@@ -296,4 +296,61 @@ mod tests {
         tx.send(42).unwrap();
         assert_eq!(rx.recv_spin_limited(100), Some(42));
     }
+
+    #[test]
+    fn test_sender_is_connected() {
+        let (tx, rx) = channel::<u64>(16);
+        assert!(tx.is_connected());
+        drop(rx);
+        assert!(!tx.is_connected());
+    }
+
+    #[test]
+    fn test_sender_capacity() {
+        let (tx, _rx) = channel::<u64>(16);
+        assert_eq!(tx.capacity(), 16);
+    }
+
+    #[test]
+    fn test_receiver_len_and_is_empty() {
+        let (mut tx, rx) = channel::<u64>(16);
+        assert!(rx.is_empty());
+        assert_eq!(rx.len(), 0);
+
+        tx.send(1).unwrap();
+        tx.send(2).unwrap();
+        assert!(!rx.is_empty());
+    }
+
+    #[test]
+    fn test_try_send() {
+        let (mut tx, mut rx) = channel::<u64>(2);
+
+        assert!(tx.try_send(1).is_ok());
+        assert!(tx.try_send(2).is_ok());
+        assert!(tx.try_send(3).is_err()); // Full
+
+        rx.recv();
+        assert!(tx.try_send(3).is_ok());
+    }
+
+    #[test]
+    fn test_try_recv() {
+        let (mut tx, mut rx) = channel::<u64>(16);
+
+        assert!(rx.try_recv().is_none());
+
+        tx.send(42).unwrap();
+        assert_eq!(rx.try_recv(), Some(42));
+        assert!(rx.try_recv().is_none());
+    }
+
+    #[test]
+    fn test_send_after_receiver_dropped() {
+        let (mut tx, rx) = channel::<u64>(16);
+        drop(rx);
+
+        // Should fail since receiver is dropped
+        assert!(tx.send(42).is_err());
+    }
 }

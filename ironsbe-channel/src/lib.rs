@@ -65,3 +65,57 @@ pub trait ChannelReceiver<T>: Send {
     /// Blocking receive with timeout.
     fn recv_timeout(&self, timeout: std::time::Duration) -> Option<T>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_channel_error_display_full() {
+        let err: ChannelError<u32> = ChannelError::Full(42);
+        assert_eq!(err.to_string(), "channel full");
+    }
+
+    #[test]
+    fn test_channel_error_display_disconnected() {
+        let err: ChannelError<u32> = ChannelError::Disconnected(42);
+        assert_eq!(err.to_string(), "channel disconnected");
+    }
+
+    #[test]
+    fn test_channel_error_display_empty() {
+        let err: ChannelError<u32> = ChannelError::Empty;
+        assert_eq!(err.to_string(), "channel empty");
+    }
+
+    #[test]
+    fn test_channel_error_display_timeout() {
+        let err: ChannelError<u32> = ChannelError::Timeout;
+        assert_eq!(err.to_string(), "operation timed out");
+    }
+
+    #[test]
+    fn test_channel_error_equality() {
+        let err1: ChannelError<u32> = ChannelError::Empty;
+        let err2: ChannelError<u32> = ChannelError::Empty;
+        assert_eq!(err1, err2);
+
+        let err3: ChannelError<u32> = ChannelError::Timeout;
+        assert_ne!(err1, err3);
+    }
+
+    #[test]
+    fn test_channel_error_clone() {
+        let err: ChannelError<u32> = ChannelError::Full(42);
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn test_channel_error_debug() {
+        let err: ChannelError<u32> = ChannelError::Full(42);
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("Full"));
+        assert!(debug_str.contains("42"));
+    }
+}

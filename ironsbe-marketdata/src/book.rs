@@ -334,4 +334,101 @@ mod tests {
         assert_eq!(best[0].price, 100); // Best ask is lowest
         assert_eq!(best[1].price, 101);
     }
+
+    #[test]
+    fn test_side_enum() {
+        assert_eq!(Side::Bid, Side::Bid);
+        assert_ne!(Side::Bid, Side::Ask);
+
+        let debug_str = format!("{:?}", Side::Bid);
+        assert!(debug_str.contains("Bid"));
+    }
+
+    #[test]
+    fn test_price_level_clone() {
+        let level = PriceLevel {
+            price: 100,
+            quantity: 50,
+            order_count: 2,
+        };
+        let cloned = level;
+        assert_eq!(level.price, cloned.price);
+        assert_eq!(level.quantity, cloned.quantity);
+        assert_eq!(level.order_count, cloned.order_count);
+    }
+
+    #[test]
+    fn test_book_side_clear() {
+        let mut side = BookSide::new(true);
+        side.update(100, 50, 1);
+        side.update(101, 30, 1);
+        assert_eq!(side.len(), 2);
+
+        side.clear();
+        assert_eq!(side.len(), 0);
+        assert!(side.top().is_none());
+    }
+
+    #[test]
+    fn test_order_book_clear() {
+        let mut book = OrderBook::new(1);
+        book.bids.update(100, 50, 1);
+        book.asks.update(102, 30, 1);
+
+        book.clear();
+        assert!(book.best_bid().is_none());
+        assert!(book.best_ask().is_none());
+    }
+
+    #[test]
+    fn test_book_update_clone() {
+        let update = BookUpdate {
+            instrument_id: 1,
+            seq_num: 100,
+            side: Side::Bid,
+            price: 1000,
+            quantity: 50,
+            order_count: 2,
+        };
+        let cloned = update.clone();
+        assert_eq!(update.instrument_id, cloned.instrument_id);
+        assert_eq!(update.seq_num, cloned.seq_num);
+    }
+
+    #[test]
+    fn test_book_snapshot_clone() {
+        let snapshot = BookSnapshot {
+            instrument_id: 1,
+            seq_num: 100,
+            bids: vec![PriceLevel {
+                price: 99,
+                quantity: 100,
+                order_count: 5,
+            }],
+            asks: vec![],
+        };
+        let cloned = snapshot.clone();
+        assert_eq!(snapshot.instrument_id, cloned.instrument_id);
+        assert_eq!(snapshot.bids.len(), cloned.bids.len());
+    }
+
+    #[test]
+    fn test_order_book_empty_spread() {
+        let book = OrderBook::new(1);
+        assert!(book.spread().is_none());
+        assert!(book.mid_price().is_none());
+    }
+
+    #[test]
+    fn test_book_side_update_existing_level() {
+        let mut side = BookSide::new(true);
+        side.update(100, 50, 2);
+        assert_eq!(side.top().unwrap().quantity, 50);
+
+        // Update same price level
+        side.update(100, 75, 3);
+        assert_eq!(side.len(), 1);
+        assert_eq!(side.top().unwrap().quantity, 75);
+        assert_eq!(side.top().unwrap().order_count, 3);
+    }
 }

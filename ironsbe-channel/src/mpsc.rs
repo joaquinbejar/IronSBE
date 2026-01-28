@@ -265,4 +265,31 @@ mod tests {
         assert_eq!(items, vec![0, 1, 2, 3, 4]);
         assert!(rx.is_empty());
     }
+
+    #[test]
+    fn test_receiver_len() {
+        let (tx, rx) = channel::<u64>(16);
+        assert_eq!(rx.len(), 0);
+        assert!(rx.is_empty());
+
+        tx.send(1).unwrap();
+        tx.send(2).unwrap();
+        assert_eq!(rx.len(), 2);
+        assert!(!rx.is_empty());
+    }
+
+    #[test]
+    fn test_as_select() {
+        let (tx, rx) = channel::<u64>(16);
+        tx.send(42).unwrap();
+
+        let inner = rx.as_select();
+        assert_eq!(inner.try_recv().ok(), Some(42));
+    }
+
+    #[test]
+    fn test_sender_capacity() {
+        let (tx, _rx) = channel::<u64>(16);
+        assert_eq!(tx.capacity(), Some(16));
+    }
 }

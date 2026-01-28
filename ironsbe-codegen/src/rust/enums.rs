@@ -124,3 +124,99 @@ impl<'a> EnumGenerator<'a> {
         output
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironsbe_schema::ir::SchemaIr;
+    use ironsbe_schema::parser::parse_schema;
+
+    fn create_test_ir_with_enum() -> SchemaIr {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <enum name="Side" encodingType="uint8">
+            <validValue name="Buy">1</validValue>
+            <validValue name="Sell">2</validValue>
+        </enum>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="1">
+        <field name="side" id="1" type="Side" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        SchemaIr::from_schema(&schema)
+    }
+
+    fn create_test_ir_with_set() -> SchemaIr {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <set name="Flags" encodingType="uint8">
+            <choice name="Active">0</choice>
+            <choice name="Visible">1</choice>
+        </set>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="1">
+        <field name="flags" id="1" type="Flags" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        SchemaIr::from_schema(&schema)
+    }
+
+    #[test]
+    fn test_enum_generator_new() {
+        let ir = create_test_ir_with_enum();
+        let generator = EnumGenerator::new(&ir);
+        assert!(!generator.ir.types.is_empty());
+    }
+
+    #[test]
+    fn test_generate_enum() {
+        let ir = create_test_ir_with_enum();
+        let generator = EnumGenerator::new(&ir);
+        let output = generator.generate();
+
+        assert!(output.contains("enum"));
+        assert!(output.contains("impl From"));
+    }
+
+    #[test]
+    fn test_generate_set() {
+        let ir = create_test_ir_with_set();
+        let generator = EnumGenerator::new(&ir);
+        let output = generator.generate();
+
+        assert!(output.contains("struct"));
+        assert!(output.contains("is_set"));
+        assert!(output.contains("set"));
+        assert!(output.contains("clear"));
+    }
+
+    #[test]
+    fn test_generate_empty_ir() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <type name="uint64" primitiveType="uint64"/>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="8">
+        <field name="value" id="1" type="uint64" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let ir = SchemaIr::from_schema(&schema);
+        let generator = EnumGenerator::new(&ir);
+        let output = generator.generate();
+
+        // No enums or sets, should be empty or minimal
+        assert!(!output.contains("enum Side"));
+    }
+}

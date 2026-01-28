@@ -84,3 +84,152 @@ impl MessageHandler for MessageDispatcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handler::{FnHandler, SendError};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    struct MockResponder;
+
+    impl Responder for MockResponder {
+        fn send(&self, _message: &[u8]) -> Result<(), SendError> {
+            Ok(())
+        }
+
+        fn send_to(&self, _session_id: u64, _message: &[u8]) -> Result<(), SendError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_dispatcher_new() {
+        let dispatcher = MessageDispatcher::new();
+        assert!(!dispatcher.has_handler(1));
+    }
+
+    #[test]
+    fn test_dispatcher_default() {
+        let dispatcher = MessageDispatcher::default();
+        assert!(!dispatcher.has_handler(1));
+    }
+
+    #[test]
+    fn test_dispatcher_register() {
+        let mut dispatcher = MessageDispatcher::new();
+
+        let handler = FnHandler::new(|_session_id, _buffer, _responder| {});
+        dispatcher.register(1, handler);
+
+        assert!(dispatcher.has_handler(1));
+        assert!(!dispatcher.has_handler(2));
+    }
+
+    #[test]
+    fn test_dispatcher_on_message_with_handler() {
+        let mut dispatcher = MessageDispatcher::new();
+
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = called.clone();
+
+        let handler = FnHandler::new(move |_session_id, _buffer, _responder| {
+            called_clone.store(true, Ordering::SeqCst);
+        });
+        dispatcher.register(1, handler);
+
+        let header = MessageHeader::new(16, 1, 100, 1);
+        let responder = MockResponder;
+        dispatcher.on_message(1, &header, &[0u8; 24], &responder);
+
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_dispatcher_on_message_no_handler() {
+        let dispatcher = MessageDispatcher::new();
+
+        let header = MessageHeader::new(16, 99, 100, 1);
+        let responder = MockResponder;
+
+        // Should not panic, just log warning
+        dispatcher.on_message(1, &header, &[0u8; 24], &responder);
+    }
+
+    struct TestDefaultHandler {
+        session_started: Arc<AtomicU64>,
+        session_ended: Arc<AtomicU64>,
+    }
+
+    impl MessageHandler for TestDefaultHandler {
+        fn on_message(
+            &self,
+            _session_id: u64,
+            _header: &MessageHeader,
+            _buffer: &[u8],
+            _responder: &dyn Responder,
+        ) {
+        }
+
+        fn on_session_start(&self, session_id: u64) {
+            self.session_started.store(session_id, Ordering::SeqCst);
+        }
+
+        fn on_session_end(&self, session_id: u64) {
+            self.session_ended.store(session_id, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_dispatcher_with_default_handler() {
+        let mut dispatcher = MessageDispatcher::new();
+
+        let session_started = Arc::new(AtomicU64::new(0));
+        let session_ended = Arc::new(AtomicU64::new(0));
+
+        let default_handler = TestDefaultHandler {
+            session_started: session_started.clone(),
+            session_ended: session_ended.clone(),
+        };
+        dispatcher.set_default(default_handler);
+
+        dispatcher.on_session_start(42);
+        assert_eq!(session_started.load(Ordering::SeqCst), 42);
+
+        dispatcher.on_session_end(43);
+        assert_eq!(session_ended.load(Ordering::SeqCst), 43);
+    }
+
+    #[test]
+    fn test_dispatcher_on_error_with_default() {
+        let mut dispatcher = MessageDispatcher::new();
+
+        struct ErrorHandler {
+            error_received: Arc<AtomicBool>,
+        }
+
+        impl MessageHandler for ErrorHandler {
+            fn on_message(
+                &self,
+                _session_id: u64,
+                _header: &MessageHeader,
+                _buffer: &[u8],
+                _responder: &dyn Responder,
+            ) {
+            }
+
+            fn on_error(&self, _session_id: u64, _error: &str) {
+                self.error_received.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let error_received = Arc::new(AtomicBool::new(false));
+        let handler = ErrorHandler {
+            error_received: error_received.clone(),
+        };
+        dispatcher.set_default(handler);
+
+        dispatcher.on_error(1, "test error");
+        assert!(error_received.load(Ordering::SeqCst));
+    }
+}

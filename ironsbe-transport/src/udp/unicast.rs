@@ -99,3 +99,61 @@ impl UdpReceiver {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_udp_sender_bind() {
+        let local: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let target: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+        let sender = UdpSender::bind(local, target).await;
+        assert!(sender.is_ok());
+
+        let sender = sender.unwrap();
+        assert_eq!(sender.target_addr(), target);
+        assert!(sender.local_addr().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_udp_receiver_bind() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let receiver = UdpReceiver::bind(addr, 1024).await;
+        assert!(receiver.is_ok());
+
+        let receiver = receiver.unwrap();
+        assert!(receiver.local_addr().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_udp_send_recv() {
+        let receiver_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let mut receiver = UdpReceiver::bind(receiver_addr, 1024).await.unwrap();
+        let actual_receiver_addr = receiver.local_addr().unwrap();
+
+        let sender_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let sender = UdpSender::bind(sender_addr, actual_receiver_addr)
+            .await
+            .unwrap();
+
+        let data = b"Hello, UDP!";
+        let sent = sender.send(data).await.unwrap();
+        assert_eq!(sent, data.len());
+
+        let (received, from_addr) = receiver.recv().await.unwrap();
+        assert_eq!(received, data);
+        assert_eq!(from_addr, sender.local_addr().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_udp_receiver_set_buffer_size() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let receiver = UdpReceiver::bind(addr, 1024).await.unwrap();
+
+        let result = receiver.set_recv_buffer_size(4096);
+        assert!(result.is_ok());
+    }
+}

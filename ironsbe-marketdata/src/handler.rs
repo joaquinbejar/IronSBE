@@ -262,3 +262,148 @@ impl std::fmt::Display for HandlerError {
 }
 
 impl std::error::Error for HandlerError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::book::Side;
+    use ironsbe_channel::spsc::SpscChannel;
+
+    #[test]
+    fn test_instrument_state_equality() {
+        assert_eq!(InstrumentState::Active, InstrumentState::Active);
+        assert_ne!(InstrumentState::Active, InstrumentState::Stale);
+    }
+
+    #[test]
+    fn test_instrument_state_clone() {
+        let state = InstrumentState::Recovering;
+        let cloned = state;
+        assert_eq!(state, cloned);
+    }
+
+    #[test]
+    fn test_instrument_state_debug() {
+        let state = InstrumentState::Initializing;
+        let debug_str = format!("{:?}", state);
+        assert!(debug_str.contains("Initializing"));
+    }
+
+    #[test]
+    fn test_market_data_event_debug() {
+        let event = MarketDataEvent::BookUpdated(123);
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("BookUpdated"));
+        assert!(debug_str.contains("123"));
+
+        let event = MarketDataEvent::TopOfBookChanged(456);
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("TopOfBookChanged"));
+
+        let event = MarketDataEvent::StateChanged(789, InstrumentState::Active);
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("StateChanged"));
+
+        let event = MarketDataEvent::GapDetected(1, 10, 15);
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("GapDetected"));
+    }
+
+    #[test]
+    fn test_handler_error_display() {
+        let err = HandlerError {
+            message: "test error".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("test error"));
+        assert!(msg.contains("handler error"));
+    }
+
+    #[test]
+    fn test_handler_error_debug() {
+        let err = HandlerError {
+            message: "debug test".to_string(),
+        };
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("HandlerError"));
+        assert!(debug_str.contains("debug test"));
+    }
+
+    #[test]
+    fn test_handler_new() {
+        let (tx, _rx) = SpscChannel::new(16);
+        let handler = MarketDataHandler::new(tx);
+        assert!(handler.subscribed_instruments().is_empty());
+    }
+
+    #[test]
+    fn test_handler_subscribe() {
+        let (tx, _rx) = SpscChannel::new(16);
+        let mut handler = MarketDataHandler::new(tx);
+
+        handler.subscribe(100);
+        assert!(handler.subscribed_instruments().contains(&100));
+        assert_eq!(handler.get_state(100), Some(InstrumentState::Initializing));
+        assert!(handler.get_book(100).is_some());
+    }
+
+    #[test]
+    fn test_handler_unsubscribe() {
+        let (tx, _rx) = SpscChannel::new(16);
+        let mut handler = MarketDataHandler::new(tx);
+
+        handler.subscribe(100);
+        assert!(handler.subscribed_instruments().contains(&100));
+
+        handler.unsubscribe(100);
+        assert!(!handler.subscribed_instruments().contains(&100));
+        assert_eq!(handler.get_state(100), None);
+        assert!(handler.get_book(100).is_none());
+    }
+
+    #[test]
+    fn test_handler_mark_stale() {
+        let (tx, _rx) = SpscChannel::new(16);
+        let mut handler = MarketDataHandler::new(tx);
+
+        handler.subscribe(100);
+        handler.mark_stale(100);
+        assert_eq!(handler.get_state(100), Some(InstrumentState::Stale));
+    }
+
+    #[test]
+    fn test_handler_on_incremental_initializing() {
+        let (tx, _rx) = SpscChannel::new(16);
+        let mut handler = MarketDataHandler::new(tx);
+
+        handler.subscribe(100);
+
+        let update = BookUpdate {
+            instrument_id: 100,
+            seq_num: 1,
+            side: Side::Bid,
+            price: 10000,
+            quantity: 50,
+            order_count: 1,
+        };
+
+        let result = handler.on_incremental(update);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_handler_subscribed_instruments() {
+        let (tx, _rx) = SpscChannel::new(16);
+        let mut handler = MarketDataHandler::new(tx);
+
+        handler.subscribe(100);
+        handler.subscribe(200);
+        handler.subscribe(300);
+
+        let instruments = handler.subscribed_instruments();
+        assert_eq!(instruments.len(), 3);
+        assert!(instruments.contains(&100));
+        assert!(instruments.contains(&200));
+        assert!(instruments.contains(&300));
+    }
+}

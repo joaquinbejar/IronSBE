@@ -284,6 +284,15 @@ impl Timestamp {
     pub const fn is_null(&self) -> bool {
         self.0 == u64::MAX
     }
+
+    /// Creates a timestamp from a Duration.
+    ///
+    /// # Arguments
+    /// * `duration` - Duration to convert
+    #[must_use]
+    pub fn from_duration(duration: std::time::Duration) -> Self {
+        Self(duration.as_nanos() as u64)
+    }
 }
 
 impl From<u64> for Timestamp {
@@ -318,6 +327,19 @@ impl ByteOrder {
             _ => None,
         }
     }
+
+    /// Returns true if this byte order matches the native platform byte order.
+    #[must_use]
+    pub const fn is_native(&self) -> bool {
+        #[cfg(target_endian = "little")]
+        {
+            matches!(self, Self::LittleEndian)
+        }
+        #[cfg(target_endian = "big")]
+        {
+            matches!(self, Self::BigEndian)
+        }
+    }
 }
 
 /// Field presence indicator.
@@ -343,6 +365,24 @@ impl Presence {
             _ => None,
         }
     }
+
+    /// Returns true if this is a required field.
+    #[must_use]
+    pub const fn is_required(&self) -> bool {
+        matches!(self, Self::Required)
+    }
+
+    /// Returns true if this is an optional field.
+    #[must_use]
+    pub const fn is_optional(&self) -> bool {
+        matches!(self, Self::Optional)
+    }
+
+    /// Returns true if this is a constant field.
+    #[must_use]
+    pub const fn is_constant(&self) -> bool {
+        matches!(self, Self::Constant)
+    }
 }
 
 #[cfg(test)]
@@ -365,16 +405,151 @@ mod tests {
     }
 
     #[test]
+    fn test_primitive_type_rust_type() {
+        assert_eq!(PrimitiveType::Char.rust_type(), "u8");
+        assert_eq!(PrimitiveType::Int8.rust_type(), "i8");
+        assert_eq!(PrimitiveType::Int16.rust_type(), "i16");
+        assert_eq!(PrimitiveType::Int32.rust_type(), "i32");
+        assert_eq!(PrimitiveType::Int64.rust_type(), "i64");
+        assert_eq!(PrimitiveType::Uint8.rust_type(), "u8");
+        assert_eq!(PrimitiveType::Uint16.rust_type(), "u16");
+        assert_eq!(PrimitiveType::Uint32.rust_type(), "u32");
+        assert_eq!(PrimitiveType::Uint64.rust_type(), "u64");
+        assert_eq!(PrimitiveType::Float.rust_type(), "f32");
+        assert_eq!(PrimitiveType::Double.rust_type(), "f64");
+    }
+
+    #[test]
+    fn test_primitive_type_sbe_name() {
+        assert_eq!(PrimitiveType::Char.sbe_name(), "char");
+        assert_eq!(PrimitiveType::Int8.sbe_name(), "int8");
+        assert_eq!(PrimitiveType::Int16.sbe_name(), "int16");
+        assert_eq!(PrimitiveType::Int32.sbe_name(), "int32");
+        assert_eq!(PrimitiveType::Int64.sbe_name(), "int64");
+        assert_eq!(PrimitiveType::Uint8.sbe_name(), "uint8");
+        assert_eq!(PrimitiveType::Uint16.sbe_name(), "uint16");
+        assert_eq!(PrimitiveType::Uint32.sbe_name(), "uint32");
+        assert_eq!(PrimitiveType::Uint64.sbe_name(), "uint64");
+        assert_eq!(PrimitiveType::Float.sbe_name(), "float");
+        assert_eq!(PrimitiveType::Double.sbe_name(), "double");
+    }
+
+    #[test]
     fn test_primitive_type_from_sbe_name() {
+        assert_eq!(
+            PrimitiveType::from_sbe_name("char"),
+            Some(PrimitiveType::Char)
+        );
+        assert_eq!(
+            PrimitiveType::from_sbe_name("int8"),
+            Some(PrimitiveType::Int8)
+        );
+        assert_eq!(
+            PrimitiveType::from_sbe_name("int16"),
+            Some(PrimitiveType::Int16)
+        );
+        assert_eq!(
+            PrimitiveType::from_sbe_name("int32"),
+            Some(PrimitiveType::Int32)
+        );
+        assert_eq!(
+            PrimitiveType::from_sbe_name("int64"),
+            Some(PrimitiveType::Int64)
+        );
+        assert_eq!(
+            PrimitiveType::from_sbe_name("uint8"),
+            Some(PrimitiveType::Uint8)
+        );
+        assert_eq!(
+            PrimitiveType::from_sbe_name("uint16"),
+            Some(PrimitiveType::Uint16)
+        );
+        assert_eq!(
+            PrimitiveType::from_sbe_name("uint32"),
+            Some(PrimitiveType::Uint32)
+        );
         assert_eq!(
             PrimitiveType::from_sbe_name("uint64"),
             Some(PrimitiveType::Uint64)
+        );
+        assert_eq!(
+            PrimitiveType::from_sbe_name("float"),
+            Some(PrimitiveType::Float)
         );
         assert_eq!(
             PrimitiveType::from_sbe_name("double"),
             Some(PrimitiveType::Double)
         );
         assert_eq!(PrimitiveType::from_sbe_name("invalid"), None);
+    }
+
+    #[test]
+    fn test_primitive_type_is_signed() {
+        assert!(PrimitiveType::Int8.is_signed());
+        assert!(PrimitiveType::Int16.is_signed());
+        assert!(PrimitiveType::Int32.is_signed());
+        assert!(PrimitiveType::Int64.is_signed());
+        assert!(!PrimitiveType::Uint8.is_signed());
+        assert!(!PrimitiveType::Uint16.is_signed());
+        assert!(!PrimitiveType::Char.is_signed());
+        assert!(!PrimitiveType::Float.is_signed());
+    }
+
+    #[test]
+    fn test_primitive_type_is_unsigned() {
+        assert!(PrimitiveType::Uint8.is_unsigned());
+        assert!(PrimitiveType::Uint16.is_unsigned());
+        assert!(PrimitiveType::Uint32.is_unsigned());
+        assert!(PrimitiveType::Uint64.is_unsigned());
+        assert!(!PrimitiveType::Int8.is_unsigned());
+        assert!(!PrimitiveType::Int16.is_unsigned());
+        assert!(!PrimitiveType::Char.is_unsigned());
+        assert!(!PrimitiveType::Float.is_unsigned());
+    }
+
+    #[test]
+    fn test_primitive_type_is_float() {
+        assert!(PrimitiveType::Float.is_float());
+        assert!(PrimitiveType::Double.is_float());
+        assert!(!PrimitiveType::Int32.is_float());
+        assert!(!PrimitiveType::Uint64.is_float());
+        assert!(!PrimitiveType::Char.is_float());
+    }
+
+    #[test]
+    fn test_primitive_type_clone_eq_hash() {
+        let t1 = PrimitiveType::Int32;
+        let t2 = t1;
+        assert_eq!(t1, t2);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(PrimitiveType::Int32);
+        set.insert(PrimitiveType::Int64);
+        assert!(set.contains(&PrimitiveType::Int32));
+        assert!(!set.contains(&PrimitiveType::Float));
+    }
+
+    #[test]
+    fn test_null_values() {
+        assert_eq!(null_values::CHAR_NULL, 0);
+        assert_eq!(null_values::INT8_NULL, i8::MIN);
+        assert_eq!(null_values::INT16_NULL, i16::MIN);
+        assert_eq!(null_values::INT32_NULL, i32::MIN);
+        assert_eq!(null_values::INT64_NULL, i64::MIN);
+        assert_eq!(null_values::UINT8_NULL, u8::MAX);
+        assert_eq!(null_values::UINT16_NULL, u16::MAX);
+        assert_eq!(null_values::UINT32_NULL, u32::MAX);
+        assert_eq!(null_values::UINT64_NULL, u64::MAX);
+        assert!(null_values::FLOAT_NULL.is_nan());
+        assert!(null_values::DOUBLE_NULL.is_nan());
+    }
+
+    #[test]
+    fn test_decimal_new() {
+        let dec = Decimal::new(12345, -3);
+        assert_eq!(dec.mantissa, 12345);
+        assert_eq!(dec.exponent, -3);
     }
 
     #[test]
@@ -397,6 +572,34 @@ mod tests {
     }
 
     #[test]
+    fn test_decimal_display() {
+        let dec = Decimal::new(15050, -2);
+        let s = format!("{}", dec);
+        assert!(s.contains("150.5"));
+
+        let null = Decimal::null();
+        assert_eq!(format!("{}", null), "NULL");
+    }
+
+    #[test]
+    fn test_decimal_default() {
+        let dec = Decimal::default();
+        assert_eq!(dec.mantissa, 0);
+        assert_eq!(dec.exponent, 0);
+    }
+
+    #[test]
+    fn test_decimal_encoded_length() {
+        assert_eq!(Decimal::ENCODED_LENGTH, 9);
+    }
+
+    #[test]
+    fn test_timestamp_new() {
+        let ts = Timestamp::new(1_000_000_000);
+        assert_eq!(ts.0, 1_000_000_000);
+    }
+
+    #[test]
     fn test_timestamp() {
         let ts = Timestamp::new(1_000_000_000);
         assert_eq!(ts.as_nanos(), 1_000_000_000);
@@ -406,6 +609,44 @@ mod tests {
 
         assert!(!ts.is_null());
         assert!(Timestamp::NULL.is_null());
+    }
+
+    #[test]
+    fn test_timestamp_now() {
+        let ts = Timestamp::now();
+        assert!(!ts.is_null());
+        assert!(ts.as_nanos() > 0);
+    }
+
+    #[test]
+    fn test_timestamp_from_duration() {
+        use std::time::Duration;
+        let dur = Duration::from_secs(5);
+        let ts = Timestamp::from_duration(dur);
+        assert_eq!(ts.as_secs(), 5);
+    }
+
+    #[test]
+    fn test_timestamp_ordering() {
+        let ts1 = Timestamp::new(100);
+        let ts2 = Timestamp::new(200);
+        assert!(ts1 < ts2);
+        assert!(ts2 > ts1);
+    }
+
+    #[test]
+    fn test_timestamp_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Timestamp::new(100));
+        set.insert(Timestamp::new(200));
+        assert!(set.contains(&Timestamp::new(100)));
+        assert!(!set.contains(&Timestamp::new(300)));
+    }
+
+    #[test]
+    fn test_timestamp_encoded_length() {
+        assert_eq!(Timestamp::ENCODED_LENGTH, 8);
     }
 
     #[test]
@@ -419,10 +660,45 @@ mod tests {
     }
 
     #[test]
+    fn test_byte_order_is_native() {
+        #[cfg(target_endian = "little")]
+        {
+            assert!(ByteOrder::LittleEndian.is_native());
+            assert!(!ByteOrder::BigEndian.is_native());
+        }
+        #[cfg(target_endian = "big")]
+        {
+            assert!(!ByteOrder::LittleEndian.is_native());
+            assert!(ByteOrder::BigEndian.is_native());
+        }
+    }
+
+    #[test]
     fn test_presence() {
         assert_eq!(Presence::parse("required"), Some(Presence::Required));
         assert_eq!(Presence::parse("optional"), Some(Presence::Optional));
         assert_eq!(Presence::parse("constant"), Some(Presence::Constant));
         assert_eq!(Presence::parse("invalid"), None);
+    }
+
+    #[test]
+    fn test_presence_is_required() {
+        assert!(Presence::Required.is_required());
+        assert!(!Presence::Optional.is_required());
+        assert!(!Presence::Constant.is_required());
+    }
+
+    #[test]
+    fn test_presence_is_optional() {
+        assert!(!Presence::Required.is_optional());
+        assert!(Presence::Optional.is_optional());
+        assert!(!Presence::Constant.is_optional());
+    }
+
+    #[test]
+    fn test_presence_is_constant() {
+        assert!(!Presence::Required.is_constant());
+        assert!(!Presence::Optional.is_constant());
+        assert!(Presence::Constant.is_constant());
     }
 }

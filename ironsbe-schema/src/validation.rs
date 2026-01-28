@@ -264,4 +264,122 @@ mod tests {
         let result = validate_schema(&schema);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_validate_duplicate_message_name() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <type name="uint64" primitiveType="uint64"/>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="8">
+        <field name="value" id="1" type="uint64" offset="0"/>
+    </sbe:message>
+    <sbe:message name="Test" id="2" blockLength="8">
+        <field name="value" id="1" type="uint64" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let result = validate_schema(&schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_unknown_field_type() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="8">
+        <field name="value" id="1" type="UnknownType" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let result = validate_schema(&schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_primitive_type_field() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="8">
+        <field name="value" id="1" type="uint64" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let result = validate_schema(&schema);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_enum_with_valid_values() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <enum name="Side" encodingType="uint8">
+            <validValue name="Buy">1</validValue>
+            <validValue name="Sell">2</validValue>
+        </enum>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="1">
+        <field name="side" id="1" type="Side" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let result = validate_schema(&schema);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_set_type() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <set name="Flags" encodingType="uint8">
+            <choice name="Active">0</choice>
+            <choice name="Visible">1</choice>
+        </set>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="1">
+        <field name="flags" id="1" type="Flags" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let result = validate_schema(&schema);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_composite_type() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <composite name="Decimal">
+            <type name="mantissa" primitiveType="int64"/>
+            <type name="exponent" primitiveType="int8"/>
+        </composite>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="9">
+        <field name="price" id="1" type="Decimal" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let result = validate_schema(&schema);
+        assert!(result.is_ok());
+    }
 }

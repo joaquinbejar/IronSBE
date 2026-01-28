@@ -42,7 +42,11 @@ impl BenchmarkResult {
 
     fn format_throughput(&self) -> String {
         if self.throughput >= 1_000_000.0 {
-            format!("{:.1}M {}", self.throughput / 1_000_000.0, self.throughput_unit)
+            format!(
+                "{:.1}M {}",
+                self.throughput / 1_000_000.0,
+                self.throughput_unit
+            )
         } else if self.throughput >= 1_000.0 {
             format!("{:.0}K {}", self.throughput / 1_000.0, self.throughput_unit)
         } else {
@@ -93,7 +97,11 @@ where
     }
 
     let (p50, p99) = calculate_percentiles(batch_times_ns);
-    let throughput = if p50 > 0.0 { 1_000_000_000.0 / p50 } else { 0.0 };
+    let throughput = if p50 > 0.0 {
+        1_000_000_000.0 / p50
+    } else {
+        0.0
+    };
 
     BenchmarkResult {
         name: name.to_string(),
@@ -152,7 +160,7 @@ fn decode_market_data_10(buffer: &AlignedBuffer<512>) -> (MessageHeader, u16) {
     let header = MessageHeader::wrap(buffer, 0);
     let offset = MessageHeader::ENCODED_LENGTH;
     let num_entries = buffer.get_u16_le(offset);
-    
+
     // Read all entries
     let mut _sum: i64 = 0;
     let mut entry_offset = offset + 4;
@@ -160,7 +168,7 @@ fn decode_market_data_10(buffer: &AlignedBuffer<512>) -> (MessageHeader, u16) {
         _sum += buffer.get_i64_le(entry_offset);
         entry_offset += MARKET_DATA_ENTRY_SIZE;
     }
-    
+
     (header, num_entries)
 }
 
@@ -174,7 +182,7 @@ fn run_encode_new_order_single() -> BenchmarkResult {
 fn run_decode_new_order_single() -> BenchmarkResult {
     let mut buffer = AlignedBuffer::<256>::new();
     encode_new_order_single(&mut buffer);
-    
+
     benchmark_batch("Decode NewOrderSingle", || {
         std::hint::black_box(decode_new_order_single(std::hint::black_box(&buffer)));
     })
@@ -190,7 +198,7 @@ fn run_encode_market_data() -> BenchmarkResult {
 fn run_decode_market_data() -> BenchmarkResult {
     let mut buffer = AlignedBuffer::<512>::new();
     encode_market_data_10(&mut buffer);
-    
+
     benchmark_batch("Decode MarketData (10 entries)", || {
         std::hint::black_box(decode_market_data_10(std::hint::black_box(&buffer)));
     })
@@ -198,7 +206,7 @@ fn run_decode_market_data() -> BenchmarkResult {
 
 fn run_spsc_channel() -> BenchmarkResult {
     let (mut tx, mut rx) = spsc::channel::<u64>(4096);
-    
+
     benchmark_batch("SPSC channel send", || {
         tx.send(std::hint::black_box(42)).unwrap();
         std::hint::black_box(rx.recv().unwrap());
@@ -207,7 +215,7 @@ fn run_spsc_channel() -> BenchmarkResult {
 
 fn run_mpsc_channel() -> BenchmarkResult {
     let (tx, rx) = mpsc::channel::<u64>(4096);
-    
+
     benchmark_batch("MPSC channel send", || {
         tx.send(std::hint::black_box(42)).unwrap();
         std::hint::black_box(rx.recv().unwrap());
@@ -242,7 +250,7 @@ fn run_tcp_roundtrip() -> BenchmarkResult {
 
     let mut client = TcpStream::connect(addr).unwrap();
     client.set_nodelay(true).unwrap();
-    
+
     let message = b"Hello, IronSBE!";
     let mut response = [0u8; 64];
 
@@ -255,7 +263,7 @@ fn run_tcp_roundtrip() -> BenchmarkResult {
     // Benchmark (fewer iterations for TCP)
     let tcp_iterations = 10_000;
     let mut samples = Vec::with_capacity(tcp_iterations);
-    
+
     for _ in 0..tcp_iterations {
         let start = Instant::now();
         client.write_all(message).unwrap();
@@ -280,11 +288,17 @@ fn run_tcp_roundtrip() -> BenchmarkResult {
 
 fn main() {
     println!();
-    println!("╔═══════════════════════════════════════════════════════════════════════════════════╗");
-    println!("║                         IronSBE Performance Report                                 ║");
-    println!("╚═══════════════════════════════════════════════════════════════════════════════════╝");
+    println!(
+        "╔═══════════════════════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "║                         IronSBE Performance Report                                 ║"
+    );
+    println!(
+        "╚═══════════════════════════════════════════════════════════════════════════════════╝"
+    );
     println!();
-    
+
     // System info
     println!("System Information:");
     println!("  - Batch size: {}", BATCH_SIZE);
@@ -312,15 +326,23 @@ fn main() {
     ];
 
     println!();
-    println!("┌─────────────────────────────────────┬───────────────┬───────────────┬─────────────────┐");
-    println!("│ Operation                           │ Latency (p50) │ Latency (p99) │ Throughput      │");
-    println!("├─────────────────────────────────────┼───────────────┼───────────────┼─────────────────┤");
-    
+    println!(
+        "┌─────────────────────────────────────┬───────────────┬───────────────┬─────────────────┐"
+    );
+    println!(
+        "│ Operation                           │ Latency (p50) │ Latency (p99) │ Throughput      │"
+    );
+    println!(
+        "├─────────────────────────────────────┼───────────────┼───────────────┼─────────────────┤"
+    );
+
     for result in &results {
         result.print_row();
     }
-    
-    println!("└─────────────────────────────────────┴───────────────┴───────────────┴─────────────────┘");
+
+    println!(
+        "└─────────────────────────────────────┴───────────────┴───────────────┴─────────────────┘"
+    );
     println!();
 
     // Markdown format for README

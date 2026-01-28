@@ -654,4 +654,115 @@ mod tests {
         assert!(!schema.has_type("unknown"));
         assert!(schema.get_type("uint64").is_some());
     }
+
+    #[test]
+    fn test_schema_build_type_map() {
+        let mut schema = Schema::new("test".to_string(), 1, 1);
+        schema.types.push(TypeDef::Primitive(PrimitiveDef::new(
+            "int32".to_string(),
+            PrimitiveType::Int32,
+        )));
+        schema.types.push(TypeDef::Primitive(PrimitiveDef::new(
+            "int64".to_string(),
+            PrimitiveType::Int64,
+        )));
+
+        schema.build_type_map();
+
+        assert!(schema.has_type("int32"));
+        assert!(schema.has_type("int64"));
+    }
+
+    #[test]
+    fn test_byte_order_parse() {
+        assert_eq!(
+            ByteOrder::parse("littleEndian"),
+            Some(ByteOrder::LittleEndian)
+        );
+        assert_eq!(ByteOrder::parse("bigEndian"), Some(ByteOrder::BigEndian));
+        assert_eq!(ByteOrder::parse("le"), Some(ByteOrder::LittleEndian));
+        assert_eq!(ByteOrder::parse("be"), Some(ByteOrder::BigEndian));
+        assert_eq!(ByteOrder::parse("invalid"), None);
+    }
+
+    #[test]
+    fn test_presence_parse() {
+        assert_eq!(Presence::parse("required"), Some(Presence::Required));
+        assert_eq!(Presence::parse("optional"), Some(Presence::Optional));
+        assert_eq!(Presence::parse("constant"), Some(Presence::Constant));
+        assert_eq!(Presence::parse("REQUIRED"), Some(Presence::Required));
+        assert_eq!(Presence::parse("invalid"), None);
+    }
+
+    #[test]
+    fn test_primitive_type_rust_type() {
+        assert_eq!(PrimitiveType::Char.rust_type(), "u8");
+        assert_eq!(PrimitiveType::Int8.rust_type(), "i8");
+        assert_eq!(PrimitiveType::Uint64.rust_type(), "u64");
+        assert_eq!(PrimitiveType::Float.rust_type(), "f32");
+        assert_eq!(PrimitiveType::Double.rust_type(), "f64");
+    }
+
+    #[test]
+    fn test_primitive_type_sbe_name() {
+        assert_eq!(PrimitiveType::Char.sbe_name(), "char");
+        assert_eq!(PrimitiveType::Int32.sbe_name(), "int32");
+        assert_eq!(PrimitiveType::Uint64.sbe_name(), "uint64");
+    }
+
+    #[test]
+    fn test_primitive_type_from_sbe_name() {
+        assert_eq!(
+            PrimitiveType::from_sbe_name("char"),
+            Some(PrimitiveType::Char)
+        );
+        assert_eq!(
+            PrimitiveType::from_sbe_name("int64"),
+            Some(PrimitiveType::Int64)
+        );
+        assert_eq!(PrimitiveType::from_sbe_name("unknown"), None);
+    }
+
+    #[test]
+    fn test_type_def_name() {
+        let prim = TypeDef::Primitive(PrimitiveDef::new("test".to_string(), PrimitiveType::Int32));
+        assert_eq!(prim.name(), "test");
+
+        let comp = TypeDef::Composite(CompositeDef::new("decimal".to_string()));
+        assert_eq!(comp.name(), "decimal");
+
+        let enum_def = TypeDef::Enum(EnumDef::new("Side".to_string(), PrimitiveType::Uint8));
+        assert_eq!(enum_def.name(), "Side");
+
+        let set_def = TypeDef::Set(SetDef::new("Flags".to_string(), PrimitiveType::Uint8));
+        assert_eq!(set_def.name(), "Flags");
+    }
+
+    #[test]
+    fn test_enum_value_as_u64() {
+        let val = EnumValue::new("Buy".to_string(), "1".to_string());
+        assert_eq!(val.as_u64(), Some(1));
+
+        let val2 = EnumValue::new("Invalid".to_string(), "abc".to_string());
+        assert_eq!(val2.as_u64(), None);
+    }
+
+    #[test]
+    fn test_set_def() {
+        let mut set_def = SetDef::new("Flags".to_string(), PrimitiveType::Uint8);
+        set_def.add_choice(SetChoice::new("Active".to_string(), 0));
+        set_def.add_choice(SetChoice::new("Visible".to_string(), 1));
+
+        assert_eq!(set_def.choices.len(), 2);
+        assert_eq!(set_def.get_choice("Active").unwrap().bit_position, 0);
+        assert_eq!(set_def.get_choice("Visible").unwrap().bit_position, 1);
+    }
+
+    #[test]
+    fn test_composite_field() {
+        let field = CompositeField::new("mantissa".to_string(), "int64".to_string(), 8);
+        assert_eq!(field.name, "mantissa");
+        assert_eq!(field.type_name, "int64");
+        assert_eq!(field.encoded_length, 8);
+    }
 }

@@ -405,6 +405,7 @@ pub fn to_pascal_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::parse_schema;
 
     #[test]
     fn test_to_snake_case() {
@@ -418,5 +419,107 @@ mod tests {
         assert_eq!(to_pascal_case("message_header"), "MessageHeader");
         assert_eq!(to_pascal_case("side"), "Side");
         assert_eq!(to_pascal_case("order-type"), "OrderType");
+    }
+
+    #[test]
+    fn test_schema_ir_from_schema() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <type name="uint64" primitiveType="uint64"/>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="8">
+        <field name="value" id="1" type="uint64" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let ir = SchemaIr::from_schema(&schema);
+
+        assert_eq!(ir.package, "test");
+        assert_eq!(ir.schema_id, 1);
+        assert_eq!(ir.schema_version, 1);
+        assert!(!ir.messages.is_empty());
+    }
+
+    #[test]
+    fn test_resolved_type_from_primitive() {
+        let resolved = ResolvedType::from_primitive(PrimitiveType::Uint64);
+        assert_eq!(resolved.name, "uint64");
+        assert_eq!(resolved.encoded_length, 8);
+        assert_eq!(resolved.rust_type, "u64");
+        assert!(!resolved.is_array);
+    }
+
+    #[test]
+    fn test_type_kind_debug() {
+        let kind = TypeKind::Primitive(PrimitiveType::Int32);
+        let debug_str = format!("{:?}", kind);
+        assert!(debug_str.contains("Primitive"));
+
+        let kind = TypeKind::Composite;
+        let debug_str = format!("{:?}", kind);
+        assert!(debug_str.contains("Composite"));
+
+        let kind = TypeKind::Enum(PrimitiveType::Uint8);
+        let debug_str = format!("{:?}", kind);
+        assert!(debug_str.contains("Enum"));
+
+        let kind = TypeKind::Set(PrimitiveType::Uint16);
+        let debug_str = format!("{:?}", kind);
+        assert!(debug_str.contains("Set"));
+    }
+
+    #[test]
+    fn test_resolved_type_clone() {
+        let resolved = ResolvedType::from_primitive(PrimitiveType::Float);
+        let cloned = resolved.clone();
+        assert_eq!(resolved.name, cloned.name);
+        assert_eq!(resolved.encoded_length, cloned.encoded_length);
+    }
+
+    #[test]
+    fn test_schema_ir_with_enum() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <enum name="Side" encodingType="uint8">
+            <validValue name="Buy">1</validValue>
+            <validValue name="Sell">2</validValue>
+        </enum>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="1">
+        <field name="side" id="1" type="Side" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let ir = SchemaIr::from_schema(&schema);
+
+        assert!(ir.types.contains_key("Side"));
+    }
+
+    #[test]
+    fn test_schema_ir_with_composite() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <composite name="Decimal">
+            <type name="mantissa" primitiveType="int64"/>
+            <type name="exponent" primitiveType="int8"/>
+        </composite>
+    </types>
+    <sbe:message name="Test" id="1" blockLength="9">
+        <field name="price" id="1" type="Decimal" offset="0"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let ir = SchemaIr::from_schema(&schema);
+
+        assert!(ir.types.contains_key("Decimal"));
     }
 }

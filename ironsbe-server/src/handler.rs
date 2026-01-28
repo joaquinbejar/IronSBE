@@ -110,3 +110,113 @@ where
         (self.handler)(session_id, buffer, responder);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn test_send_error_display() {
+        let err = SendError {
+            message: "connection lost".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("connection lost"));
+        assert!(msg.contains("send error"));
+    }
+
+    #[test]
+    fn test_send_error_clone() {
+        let err = SendError {
+            message: "test".to_string(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err.message, cloned.message);
+    }
+
+    #[test]
+    fn test_send_error_debug() {
+        let err = SendError {
+            message: "debug test".to_string(),
+        };
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("SendError"));
+        assert!(debug_str.contains("debug test"));
+    }
+
+    struct MockResponder;
+
+    impl Responder for MockResponder {
+        fn send(&self, _message: &[u8]) -> Result<(), SendError> {
+            Ok(())
+        }
+
+        fn send_to(&self, _session_id: u64, _message: &[u8]) -> Result<(), SendError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_fn_handler() {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = called.clone();
+
+        let handler = FnHandler::new(move |_session_id, _buffer, _responder| {
+            called_clone.store(true, Ordering::SeqCst);
+        });
+
+        let responder = MockResponder;
+        handler.handle(1, &[1, 2, 3], &responder);
+
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    struct TestMessageHandler {
+        session_started: Arc<AtomicBool>,
+        session_ended: Arc<AtomicBool>,
+        error_received: Arc<AtomicBool>,
+    }
+
+    impl MessageHandler for TestMessageHandler {
+        fn on_message(
+            &self,
+            _session_id: u64,
+            _header: &MessageHeader,
+            _buffer: &[u8],
+            _responder: &dyn Responder,
+        ) {
+        }
+
+        fn on_session_start(&self, _session_id: u64) {
+            self.session_started.store(true, Ordering::SeqCst);
+        }
+
+        fn on_session_end(&self, _session_id: u64) {
+            self.session_ended.store(true, Ordering::SeqCst);
+        }
+
+        fn on_error(&self, _session_id: u64, _error: &str) {
+            self.error_received.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_message_handler_callbacks() {
+        let handler = TestMessageHandler {
+            session_started: Arc::new(AtomicBool::new(false)),
+            session_ended: Arc::new(AtomicBool::new(false)),
+            error_received: Arc::new(AtomicBool::new(false)),
+        };
+
+        handler.on_session_start(1);
+        assert!(handler.session_started.load(Ordering::SeqCst));
+
+        handler.on_session_end(1);
+        assert!(handler.session_ended.load(Ordering::SeqCst));
+
+        handler.on_error(1, "test error");
+        assert!(handler.error_received.load(Ordering::SeqCst));
+    }
+}
