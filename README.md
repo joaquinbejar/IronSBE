@@ -43,17 +43,22 @@ SBE is the binary encoding standard used by major exchanges including CME, Eurex
 
 ## Performance
 
-Benchmarked on Intel Xeon Gold 6248 @ 2.5GHz, Linux 5.15:
+Benchmarked on Apple M4 Max 64GB, macOS Tahoe 26.2:
 
 | Operation | Latency (p50) | Latency (p99) | Throughput |
 |-----------|---------------|---------------|------------|
-| Encode NewOrderSingle | 45 ns | 62 ns | 22M msg/sec |
-| Decode NewOrderSingle | 28 ns | 41 ns | 35M msg/sec |
-| Encode MarketData (10 entries) | 180 ns | 245 ns | 5.5M msg/sec |
-| Decode MarketData (10 entries) | 95 ns | 130 ns | 10.5M msg/sec |
-| SPSC channel send | 12 ns | 18 ns | 83M msg/sec |
-| TCP round-trip (localhost) | 8.2 μs | 14 μs | 120K msg/sec |
-| UDP multicast receive | 850 ns | 1.4 μs | 1.1M msg/sec |
+| Encode NewOrderSingle | 3 ns | 4 ns | 342.8M msg/sec |
+| Decode NewOrderSingle | 1 ns | 1 ns | 1262.6M msg/sec |
+| Encode MarketData (10 entries) | 6 ns | 8 ns | 165.5M msg/sec |
+| Decode MarketData (10 entries) | 0 ns | 1 ns | 2178.6M msg/sec |
+| SPSC channel send | 2 ns | 2 ns | 648.5M msg/sec |
+| MPSC channel send | 7 ns | 9 ns | 145.5M msg/sec |
+| TCP round-trip (localhost) | 16.8 μs | 23.7 μs | 60K msg/sec |
+
+Run your own benchmarks:
+```bash
+cargo run --example benchmark_report --release
+```
 
 ---
 

@@ -13,7 +13,9 @@ categories = ["development-tools::profiling"]
 [dependencies]
 ironsbe-core = { workspace = true }
 ironsbe-channel = { workspace = true }
+ironsbe-transport = { workspace = true }
 criterion = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 
 [[bench]]
 name = "encoding"
@@ -21,4 +23,8 @@ harness = false
 
 [[bench]]
 name = "throughput"
+harness = false
+
+[[bench]]
+name = "performance"
 harness = false
