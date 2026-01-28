@@ -56,3 +56,63 @@ where
         duration,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_throughput_result_messages_per_second() {
+        let result = ThroughputResult {
+            messages: 1000,
+            bytes: 10000,
+            duration: Duration::from_secs(1),
+        };
+        assert!((result.messages_per_second() - 1000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_throughput_result_bytes_per_second() {
+        let result = ThroughputResult {
+            messages: 1000,
+            bytes: 10000,
+            duration: Duration::from_secs(1),
+        };
+        assert!((result.bytes_per_second() - 10000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_throughput_result_mb_per_second() {
+        let result = ThroughputResult {
+            messages: 1000,
+            bytes: 1024 * 1024,
+            duration: Duration::from_secs(1),
+        };
+        assert!((result.mb_per_second() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_run_throughput_benchmark() {
+        let mut counter = 0u64;
+        let result = run_throughput_benchmark(100, 64, || {
+            counter += 1;
+        });
+        assert_eq!(result.messages, 100);
+        assert_eq!(result.bytes, 6400);
+        assert_eq!(counter, 100);
+    }
+
+    #[test]
+    fn test_throughput_result_clone_debug() {
+        let result = ThroughputResult {
+            messages: 100,
+            bytes: 1000,
+            duration: Duration::from_millis(100),
+        };
+        let cloned = result.clone();
+        assert_eq!(result.messages, cloned.messages);
+
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("ThroughputResult"));
+    }
+}

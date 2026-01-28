@@ -233,3 +233,100 @@ pub enum ClientEvent {
     /// An error occurred.
     Error(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_client_builder_new() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let builder = ClientBuilder::new(addr);
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_client_builder_connect_timeout() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let builder = ClientBuilder::new(addr).connect_timeout(Duration::from_secs(10));
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_client_builder_reconnect() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let builder = ClientBuilder::new(addr).reconnect(true);
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_client_builder_reconnect_delay() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let builder = ClientBuilder::new(addr).reconnect_delay(Duration::from_millis(500));
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_client_builder_max_reconnect_attempts() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let builder = ClientBuilder::new(addr).max_reconnect_attempts(5);
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_client_builder_channel_capacity() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let builder = ClientBuilder::new(addr).channel_capacity(8192);
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_client_builder_build() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let (_client, _handle) = ClientBuilder::new(addr).build();
+    }
+
+    #[test]
+    fn test_client_command_debug() {
+        let cmd = ClientCommand::Send(vec![1, 2, 3]);
+        let debug_str = format!("{:?}", cmd);
+        assert!(debug_str.contains("Send"));
+
+        let cmd2 = ClientCommand::Disconnect;
+        let debug_str2 = format!("{:?}", cmd2);
+        assert!(debug_str2.contains("Disconnect"));
+    }
+
+    #[test]
+    fn test_client_event_clone_debug() {
+        let event = ClientEvent::Connected;
+        let cloned = event.clone();
+        let _ = cloned;
+
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("Connected"));
+
+        let event2 = ClientEvent::Message(vec![1, 2, 3]);
+        let debug_str2 = format!("{:?}", event2);
+        assert!(debug_str2.contains("Message"));
+
+        let event3 = ClientEvent::Error("test error".to_string());
+        let debug_str3 = format!("{:?}", event3);
+        assert!(debug_str3.contains("Error"));
+    }
+
+    #[test]
+    fn test_client_handle_disconnect() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let (_client, mut handle) = ClientBuilder::new(addr).build();
+        handle.disconnect();
+    }
+
+    #[test]
+    fn test_client_handle_poll() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let (_client, mut handle) = ClientBuilder::new(addr).build();
+        assert!(handle.poll().is_none());
+    }
+}

@@ -113,3 +113,79 @@ impl SharedMemory {
         self.mmap.flush_async()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_shared_memory_config_default() {
+        let config = SharedMemoryConfig::default();
+        assert_eq!(config.size, 1024 * 1024);
+        assert!(config.create);
+    }
+
+    #[test]
+    fn test_shared_memory_config_clone_debug() {
+        let config = SharedMemoryConfig {
+            size: 4096,
+            create: false,
+        };
+        let cloned = config.clone();
+        assert_eq!(config.size, cloned.size);
+        assert_eq!(config.create, cloned.create);
+
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("SharedMemoryConfig"));
+    }
+
+    #[test]
+    fn test_shared_memory_create() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_shm");
+
+        let mut shm = SharedMemory::create(&path, 4096).unwrap();
+        assert_eq!(shm.size(), 4096);
+        assert_eq!(shm.as_slice().len(), 4096);
+        assert!(shm.as_slice().iter().all(|&b| b == 0));
+
+        // Write some data
+        shm.as_mut_slice()[0] = 0xAB;
+        shm.as_mut_slice()[1] = 0xCD;
+        assert_eq!(shm.as_slice()[0], 0xAB);
+        assert_eq!(shm.as_slice()[1], 0xCD);
+
+        // Flush
+        shm.flush().unwrap();
+        shm.flush_async().unwrap();
+
+        // Cleanup
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_shared_memory_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_shm_open");
+
+        // Create first
+        {
+            let mut shm = SharedMemory::create(&path, 1024).unwrap();
+            shm.as_mut_slice()[0] = 0x42;
+            shm.flush().unwrap();
+        }
+
+        // Open existing
+        let config = SharedMemoryConfig {
+            size: 1024,
+            create: false,
+        };
+        let shm = SharedMemory::open(&path, config).unwrap();
+        assert_eq!(shm.size(), 1024);
+        assert_eq!(shm.as_slice()[0], 0x42);
+
+        fs::remove_file(&path).ok();
+    }
+}

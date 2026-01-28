@@ -18,3 +18,20 @@ impl Default for GroupGenerator {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_group_generator_new() {
+        let generator = GroupGenerator::new();
+        let _ = generator;
+    }
+
+    #[test]
+    fn test_group_generator_default() {
+        let generator = GroupGenerator;
+        let _ = generator;
+    }
+}

@@ -365,3 +365,166 @@ async fn handle_session<H: MessageHandler>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestHandler;
+
+    impl MessageHandler for TestHandler {
+        fn on_message(
+            &self,
+            _session_id: u64,
+            _header: &MessageHeader,
+            _data: &[u8],
+            _responder: &dyn Responder,
+        ) {
+        }
+    }
+
+    #[test]
+    fn test_server_builder_new() {
+        let builder = ServerBuilder::<TestHandler>::new();
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_server_builder_default() {
+        let builder = ServerBuilder::<TestHandler>::default();
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_server_builder_bind() {
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let builder = ServerBuilder::<TestHandler>::new().bind(addr);
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_server_builder_handler() {
+        let builder = ServerBuilder::new().handler(TestHandler);
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_server_builder_max_connections() {
+        let builder = ServerBuilder::<TestHandler>::new().max_connections(500);
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_server_builder_max_frame_size() {
+        let builder = ServerBuilder::<TestHandler>::new().max_frame_size(128 * 1024);
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_server_builder_channel_capacity() {
+        let builder = ServerBuilder::<TestHandler>::new().channel_capacity(8192);
+        let _ = builder;
+    }
+
+    #[test]
+    fn test_server_builder_build() {
+        let (_server, _handle) = ServerBuilder::new().handler(TestHandler).build();
+    }
+
+    #[test]
+    fn test_server_command_debug() {
+        let cmd = ServerCommand::Shutdown;
+        let debug_str = format!("{:?}", cmd);
+        assert!(debug_str.contains("Shutdown"));
+
+        let cmd2 = ServerCommand::CloseSession(42);
+        let debug_str2 = format!("{:?}", cmd2);
+        assert!(debug_str2.contains("CloseSession"));
+
+        let cmd3 = ServerCommand::Broadcast(vec![1, 2, 3]);
+        let debug_str3 = format!("{:?}", cmd3);
+        assert!(debug_str3.contains("Broadcast"));
+    }
+
+    #[test]
+    fn test_server_event_clone_debug() {
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let event = ServerEvent::SessionCreated(1, addr);
+        let cloned = event.clone();
+        let _ = cloned;
+
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("SessionCreated"));
+
+        let event2 = ServerEvent::SessionClosed(1);
+        let debug_str2 = format!("{:?}", event2);
+        assert!(debug_str2.contains("SessionClosed"));
+
+        let event3 = ServerEvent::Error("test error".to_string());
+        let debug_str3 = format!("{:?}", event3);
+        assert!(debug_str3.contains("Error"));
+    }
+
+    #[test]
+    fn test_server_handle_shutdown() {
+        let (_server, handle) = ServerBuilder::new().handler(TestHandler).build();
+        handle.shutdown();
+    }
+
+    #[test]
+    fn test_server_handle_close_session() {
+        let (_server, handle) = ServerBuilder::new().handler(TestHandler).build();
+        handle.close_session(1);
+    }
+
+    #[test]
+    fn test_server_handle_broadcast() {
+        let (_server, handle) = ServerBuilder::new().handler(TestHandler).build();
+        handle.broadcast(vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_sbe_frame_codec_new() {
+        let codec = SbeFrameCodec::new(64 * 1024);
+        assert_eq!(codec.max_frame_size, 64 * 1024);
+    }
+
+    #[test]
+    fn test_sbe_frame_codec_decode_incomplete() {
+        let mut codec = SbeFrameCodec::new(1024);
+        let mut buf = BytesMut::from(&[0u8, 0, 0][..]);
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_sbe_frame_codec_decode_complete() {
+        let mut codec = SbeFrameCodec::new(1024);
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&5u32.to_le_bytes());
+        buf.extend_from_slice(b"hello");
+
+        let result = codec.decode(&mut buf).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_ref(), b"hello");
+    }
+
+    #[test]
+    fn test_sbe_frame_codec_decode_too_large() {
+        let mut codec = SbeFrameCodec::new(10);
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&100u32.to_le_bytes());
+
+        let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sbe_frame_codec_encode() {
+        let mut codec = SbeFrameCodec::new(1024);
+        let mut buf = BytesMut::new();
+        codec.encode(b"hello", &mut buf).unwrap();
+
+        assert_eq!(&buf[0..4], &5u32.to_le_bytes());
+        assert_eq!(&buf[4..9], b"hello");
+    }
+}

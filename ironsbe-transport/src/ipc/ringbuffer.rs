@@ -254,9 +254,67 @@ impl SharedConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_shared_ring_buffer_header_size() {
         assert_eq!(SharedRingBuffer::HEADER_SIZE, 128);
+    }
+
+    #[test]
+    fn test_shared_ring_buffer_create() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_rb_create");
+
+        let mmap = SharedRingBuffer::create(&path, 1024).unwrap();
+        assert!(mmap.len() >= 1024 + SharedRingBuffer::HEADER_SIZE);
+    }
+
+    #[test]
+    fn test_shared_ring_buffer_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_rb_open");
+
+        // Create first
+        {
+            let _mmap = SharedRingBuffer::create(&path, 1024).unwrap();
+        }
+
+        // Open existing
+        let mmap = SharedRingBuffer::open(&path).unwrap();
+        assert!(mmap.len() >= 1024 + SharedRingBuffer::HEADER_SIZE);
+    }
+
+    #[test]
+    fn test_shared_producer_new() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_producer");
+
+        let mmap = SharedRingBuffer::create(&path, 1024).unwrap();
+        let producer = SharedProducer::new(mmap);
+        assert!(producer.available() > 0);
+    }
+
+    #[test]
+    fn test_shared_consumer_new() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_consumer");
+
+        let mmap = SharedRingBuffer::create(&path, 256).unwrap();
+        let consumer = SharedConsumer::new(mmap);
+
+        assert!(consumer.is_empty());
+        assert_eq!(consumer.available(), 0);
+    }
+
+    #[test]
+    fn test_shared_consumer_read_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_read_empty");
+
+        let mmap = SharedRingBuffer::create(&path, 256).unwrap();
+        let mut consumer = SharedConsumer::new(mmap);
+
+        assert!(consumer.read().is_none());
     }
 }

@@ -690,11 +690,11 @@ mod tests {
         data.put_i64_le(24, -9876543210);
         assert_eq!(data.get_i64_le(24), -9876543210);
 
-        data.put_f32_le(32, 3.14159);
-        assert!((data.get_f32_le(32) - 3.14159).abs() < 0.0001);
+        data.put_f32_le(32, 1.23456);
+        assert!((data.get_f32_le(32) - 1.23456).abs() < 0.0001);
 
-        data.put_f64_le(40, 2.718281828);
-        assert!((data.get_f64_le(40) - 2.718281828).abs() < 0.0000001);
+        data.put_f64_le(40, 9.87654321);
+        assert!((data.get_f64_le(40) - 9.87654321).abs() < 0.0000001);
 
         data.put_bytes(48, b"test");
         assert_eq!(data.get_bytes(48, 4), b"test");
