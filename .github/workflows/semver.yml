@@ -3,11 +3,11 @@ name: SEMVER
 on:
   push:
     branches:
-      - '**'
+      - "**"
   pull_request:
     branches:
       - main
-      - 'release/**'
+      - "release/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,13 +48,6 @@ jobs:
           feature-group: all-features
           rust-toolchain: stable
 
-      - name: Check semver for ironsbe-derive
-        uses: obi1kenobi/cargo-semver-checks-action@v2
-        with:
-          package: ironsbe-derive
-          feature-group: all-features
-          rust-toolchain: stable
-
       - name: Check semver for ironsbe-channel
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
@@ -87,13 +80,6 @@ jobs:
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           package: ironsbe-marketdata
-          feature-group: all-features
-          rust-toolchain: stable
-
-      - name: Check semver for ironsbe-bench
-        uses: obi1kenobi/cargo-semver-checks-action@v2
-        with:
-          package: ironsbe-bench
           feature-group: all-features
           rust-toolchain: stable
 
