@@ -1,6 +1,6 @@
 //! Enum and set code generation.
 
-use ironsbe_schema::ir::{SchemaIr, TypeKind, to_pascal_case};
+use ironsbe_schema::ir::{EnumVariant, SchemaIr, SetVariant, TypeKind, to_pascal_case};
 use ironsbe_schema::types::PrimitiveType;
 
 /// Generator for enum and set definitions.
@@ -21,12 +21,12 @@ impl<'a> EnumGenerator<'a> {
         let mut output = String::new();
 
         for resolved_type in self.ir.types.values() {
-            match resolved_type.kind {
-                TypeKind::Enum(encoding) => {
-                    output.push_str(&self.generate_enum(&resolved_type.name, encoding));
+            match &resolved_type.kind {
+                TypeKind::Enum { encoding, variants } => {
+                    output.push_str(&self.generate_enum(&resolved_type.name, *encoding, variants));
                 }
-                TypeKind::Set(encoding) => {
-                    output.push_str(&self.generate_set(&resolved_type.name, encoding));
+                TypeKind::Set { encoding, choices } => {
+                    output.push_str(&self.generate_set(&resolved_type.name, *encoding, choices));
                 }
                 _ => {}
             }
@@ -36,7 +36,12 @@ impl<'a> EnumGenerator<'a> {
     }
 
     /// Generates an enum definition.
-    fn generate_enum(&self, name: &str, encoding: PrimitiveType) -> String {
+    fn generate_enum(
+        &self,
+        name: &str,
+        encoding: PrimitiveType,
+        variants: &[EnumVariant],
+    ) -> String {
         let mut output = String::new();
         let rust_name = to_pascal_case(name);
         let rust_type = encoding.rust_type();
@@ -46,19 +51,36 @@ impl<'a> EnumGenerator<'a> {
         output.push_str(&format!("#[repr({})]\n", rust_type));
         output.push_str(&format!("pub enum {} {{\n", rust_name));
 
-        // We need to get the actual enum values from the schema
-        // For now, generate a placeholder
-        output.push_str("    // Values generated from schema\n");
+        // Generate enum variants from schema
+        for variant in variants {
+            let variant_name = to_pascal_case(&variant.name);
+            output.push_str(&format!("    /// {} variant.\n", variant_name));
+            output.push_str(&format!("    {} = {},\n", variant_name, variant.value));
+        }
+
         output.push_str("}\n\n");
 
-        // Implement From trait
+        // Implement From<primitive> -> Enum (safe match, no transmute)
         output.push_str(&format!("impl From<{}> for {} {{\n", rust_type, rust_name));
         output.push_str(&format!("    fn from(value: {}) -> Self {{\n", rust_type));
-        output.push_str("        // Match implementation\n");
-        output.push_str("        unsafe { std::mem::transmute(value) }\n");
+        output.push_str("        match value {\n");
+        for variant in variants {
+            let variant_name = to_pascal_case(&variant.name);
+            output.push_str(&format!(
+                "            {} => Self::{},\n",
+                variant.value, variant_name
+            ));
+        }
+        // Default to first variant for unknown values (or panic in debug)
+        if let Some(first) = variants.first() {
+            let first_name = to_pascal_case(&first.name);
+            output.push_str(&format!("            _ => Self::{},\n", first_name));
+        }
+        output.push_str("        }\n");
         output.push_str("    }\n");
         output.push_str("}\n\n");
 
+        // Implement From<Enum> -> primitive
         output.push_str(&format!("impl From<{}> for {} {{\n", rust_name, rust_type));
         output.push_str(&format!("    fn from(value: {}) -> Self {{\n", rust_name));
         output.push_str("        value as Self\n");
@@ -69,7 +91,7 @@ impl<'a> EnumGenerator<'a> {
     }
 
     /// Generates a set (bitfield) definition.
-    fn generate_set(&self, name: &str, encoding: PrimitiveType) -> String {
+    fn generate_set(&self, name: &str, encoding: PrimitiveType, choices: &[SetVariant]) -> String {
         let mut output = String::new();
         let rust_name = to_pascal_case(name);
         let rust_type = encoding.rust_type();
@@ -79,6 +101,23 @@ impl<'a> EnumGenerator<'a> {
         output.push_str(&format!("pub struct {}({});\n\n", rust_name, rust_type));
 
         output.push_str(&format!("impl {} {{\n", rust_name));
+
+        // Generate bit position constants for each choice
+        for choice in choices {
+            let const_name = to_screaming_snake_case(&choice.name);
+            output.push_str(&format!(
+                "    /// Bit position for {} choice.\n",
+                choice.name
+            ));
+            output.push_str(&format!(
+                "    pub const {}: u8 = {};\n",
+                const_name, choice.bit_position
+            ));
+        }
+        if !choices.is_empty() {
+            output.push('\n');
+        }
+
         output.push_str(&format!("    /// Creates a new empty {}.\n", rust_name));
         output.push_str("    #[must_use]\n");
         output.push_str("    pub const fn new() -> Self {\n");
@@ -119,10 +158,59 @@ impl<'a> EnumGenerator<'a> {
         output.push_str("        self.0 &= !(1 << bit);\n");
         output.push_str("    }\n");
 
+        // Generate named methods for each choice
+        for choice in choices {
+            let method_name = to_snake_case(&choice.name);
+            output.push_str(&format!("\n    /// Checks if {} is set.\n", choice.name));
+            output.push_str("    #[must_use]\n");
+            output.push_str(&format!(
+                "    pub const fn is_{}(&self) -> bool {{\n",
+                method_name
+            ));
+            output.push_str(&format!("        self.is_set({})\n", choice.bit_position));
+            output.push_str("    }\n");
+
+            output.push_str(&format!("\n    /// Sets {}.\n", choice.name));
+            output.push_str(&format!("    pub fn set_{}(&mut self) {{\n", method_name));
+            output.push_str(&format!("        self.set({});\n", choice.bit_position));
+            output.push_str("    }\n");
+
+            output.push_str(&format!("\n    /// Clears {}.\n", choice.name));
+            output.push_str(&format!("    pub fn clear_{}(&mut self) {{\n", method_name));
+            output.push_str(&format!("        self.clear({});\n", choice.bit_position));
+            output.push_str("    }\n");
+        }
+
         output.push_str("}\n\n");
 
         output
     }
+}
+
+/// Converts a string to snake_case.
+#[must_use]
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            result.push('_');
+        }
+        result.push(c.to_ascii_lowercase());
+    }
+    result
+}
+
+/// Converts a string to SCREAMING_SNAKE_CASE.
+#[must_use]
+fn to_screaming_snake_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            result.push('_');
+        }
+        result.push(c.to_ascii_uppercase());
+    }
+    result
 }
 
 #[cfg(test)]

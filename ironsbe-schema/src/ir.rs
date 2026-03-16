@@ -101,22 +101,50 @@ impl ResolvedType {
                 is_array: false,
                 array_length: None,
             },
-            TypeDef::Enum(e) => Self {
-                name: e.name.clone(),
-                kind: TypeKind::Enum(e.encoding_type),
-                encoded_length: e.encoding_type.size(),
-                rust_type: to_pascal_case(&e.name),
-                is_array: false,
-                array_length: None,
-            },
-            TypeDef::Set(s) => Self {
-                name: s.name.clone(),
-                kind: TypeKind::Set(s.encoding_type),
-                encoded_length: s.encoding_type.size(),
-                rust_type: to_pascal_case(&s.name),
-                is_array: false,
-                array_length: None,
-            },
+            TypeDef::Enum(e) => {
+                let variants = e
+                    .valid_values
+                    .iter()
+                    .filter_map(|v| {
+                        v.as_u64().map(|value| EnumVariant {
+                            name: v.name.clone(),
+                            value,
+                        })
+                    })
+                    .collect();
+                Self {
+                    name: e.name.clone(),
+                    kind: TypeKind::Enum {
+                        encoding: e.encoding_type,
+                        variants,
+                    },
+                    encoded_length: e.encoding_type.size(),
+                    rust_type: to_pascal_case(&e.name),
+                    is_array: false,
+                    array_length: None,
+                }
+            }
+            TypeDef::Set(s) => {
+                let choices = s
+                    .choices
+                    .iter()
+                    .map(|c| SetVariant {
+                        name: c.name.clone(),
+                        bit_position: c.bit_position,
+                    })
+                    .collect();
+                Self {
+                    name: s.name.clone(),
+                    kind: TypeKind::Set {
+                        encoding: s.encoding_type,
+                        choices,
+                    },
+                    encoded_length: s.encoding_type.size(),
+                    rust_type: to_pascal_case(&s.name),
+                    is_array: false,
+                    array_length: None,
+                }
+            }
         }
     }
 
@@ -134,17 +162,45 @@ impl ResolvedType {
     }
 }
 
+/// Enum variant with name and discriminant value.
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    /// Variant name (will be converted to PascalCase).
+    pub name: String,
+    /// Discriminant value.
+    pub value: u64,
+}
+
+/// Set choice with name and bit position.
+#[derive(Debug, Clone)]
+pub struct SetVariant {
+    /// Choice name (will be converted to PascalCase).
+    pub name: String,
+    /// Bit position (0-based).
+    pub bit_position: u8,
+}
+
 /// Type kind enumeration.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TypeKind {
     /// Primitive type.
     Primitive(PrimitiveType),
     /// Composite type.
     Composite,
-    /// Enum type with encoding.
-    Enum(PrimitiveType),
-    /// Set (bitfield) type with encoding.
-    Set(PrimitiveType),
+    /// Enum type with encoding and variants.
+    Enum {
+        /// Underlying encoding type.
+        encoding: PrimitiveType,
+        /// Enum variants with discriminant values.
+        variants: Vec<EnumVariant>,
+    },
+    /// Set (bitfield) type with encoding and choices.
+    Set {
+        /// Underlying encoding type.
+        encoding: PrimitiveType,
+        /// Bit choices.
+        choices: Vec<SetVariant>,
+    },
 }
 
 /// Resolved message information.
@@ -462,11 +518,17 @@ mod tests {
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Composite"));
 
-        let kind = TypeKind::Enum(PrimitiveType::Uint8);
+        let kind = TypeKind::Enum {
+            encoding: PrimitiveType::Uint8,
+            variants: vec![],
+        };
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Enum"));
 
-        let kind = TypeKind::Set(PrimitiveType::Uint16);
+        let kind = TypeKind::Set {
+            encoding: PrimitiveType::Uint16,
+            choices: vec![],
+        };
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Set"));
     }
