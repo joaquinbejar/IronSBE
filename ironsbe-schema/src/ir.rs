@@ -99,15 +99,13 @@ impl ResolvedType {
                     .fields
                     .iter()
                     .filter_map(|f| {
-                        f.primitive_type.map(|prim| {
-                            let field_offset = offset;
-                            offset += f.encoded_length;
-                            CompositeFieldInfo {
-                                name: f.name.clone(),
-                                primitive_type: prim,
-                                offset: field_offset,
-                                encoded_length: f.encoded_length,
-                            }
+                        let field_offset = offset;
+                        offset += f.encoded_length;
+                        f.primitive_type.map(|prim| CompositeFieldInfo {
+                            name: f.name.clone(),
+                            primitive_type: prim,
+                            offset: field_offset,
+                            encoded_length: f.encoded_length,
                         })
                     })
                     .collect();
