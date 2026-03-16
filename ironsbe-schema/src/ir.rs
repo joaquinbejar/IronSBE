@@ -101,7 +101,7 @@ impl ResolvedType {
                     .filter_map(|f| {
                         f.primitive_type.map(|prim| {
                             let field_offset = offset;
-                            offset = offset.saturating_add(f.encoded_length);
+                            offset += f.encoded_length;
                             CompositeFieldInfo {
                                 name: f.name.clone(),
                                 primitive_type: prim,
