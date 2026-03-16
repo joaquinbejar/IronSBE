@@ -93,30 +93,81 @@ impl ResolvedType {
                 is_array: p.is_array(),
                 array_length: p.length,
             },
-            TypeDef::Composite(c) => Self {
-                name: c.name.clone(),
-                kind: TypeKind::Composite,
-                encoded_length: c.encoded_length(),
-                rust_type: to_pascal_case(&c.name),
-                is_array: false,
-                array_length: None,
-            },
-            TypeDef::Enum(e) => Self {
-                name: e.name.clone(),
-                kind: TypeKind::Enum(e.encoding_type),
-                encoded_length: e.encoding_type.size(),
-                rust_type: to_pascal_case(&e.name),
-                is_array: false,
-                array_length: None,
-            },
-            TypeDef::Set(s) => Self {
-                name: s.name.clone(),
-                kind: TypeKind::Set(s.encoding_type),
-                encoded_length: s.encoding_type.size(),
-                rust_type: to_pascal_case(&s.name),
-                is_array: false,
-                array_length: None,
-            },
+            TypeDef::Composite(c) => {
+                let mut offset = 0usize;
+                let fields = c
+                    .fields
+                    .iter()
+                    .filter_map(|f| {
+                        let field_offset = offset;
+                        offset += f.encoded_length;
+                        f.primitive_type.map(|prim| CompositeFieldInfo {
+                            name: f.name.clone(),
+                            primitive_type: prim,
+                            offset: field_offset,
+                            encoded_length: f.encoded_length,
+                        })
+                    })
+                    .collect();
+                Self {
+                    name: c.name.clone(),
+                    kind: TypeKind::Composite { fields },
+                    encoded_length: c.encoded_length(),
+                    rust_type: to_pascal_case(&c.name),
+                    is_array: false,
+                    array_length: None,
+                }
+            }
+            TypeDef::Enum(e) => {
+                let variants: Vec<EnumVariant> = e
+                    .valid_values
+                    .iter()
+                    .filter_map(|v| {
+                        // Use signed parsing for signed types, unsigned for others
+                        let value = if e.encoding_type.is_signed() {
+                            v.as_i64()
+                        } else {
+                            v.as_u64().map(|u| u as i64)
+                        };
+                        value.map(|val| EnumVariant {
+                            name: v.name.clone(),
+                            value: val,
+                        })
+                    })
+                    .collect();
+                Self {
+                    name: e.name.clone(),
+                    kind: TypeKind::Enum {
+                        encoding: e.encoding_type,
+                        variants,
+                    },
+                    encoded_length: e.encoding_type.size(),
+                    rust_type: to_pascal_case(&e.name),
+                    is_array: false,
+                    array_length: None,
+                }
+            }
+            TypeDef::Set(s) => {
+                let choices = s
+                    .choices
+                    .iter()
+                    .map(|c| SetVariant {
+                        name: c.name.clone(),
+                        bit_position: c.bit_position,
+                    })
+                    .collect();
+                Self {
+                    name: s.name.clone(),
+                    kind: TypeKind::Set {
+                        encoding: s.encoding_type,
+                        choices,
+                    },
+                    encoded_length: s.encoding_type.size(),
+                    rust_type: to_pascal_case(&s.name),
+                    is_array: false,
+                    array_length: None,
+                }
+            }
         }
     }
 
@@ -134,17 +185,61 @@ impl ResolvedType {
     }
 }
 
+/// Enum variant with name and discriminant value.
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    /// Variant name (will be converted to PascalCase).
+    pub name: String,
+    /// Discriminant value (i64 to support signed encodings).
+    pub value: i64,
+}
+
+/// Set choice with name and bit position.
+#[derive(Debug, Clone)]
+pub struct SetVariant {
+    /// Choice name (will be converted to PascalCase).
+    pub name: String,
+    /// Bit position (0-based).
+    pub bit_position: u8,
+}
+
+/// Composite field information for code generation.
+#[derive(Debug, Clone)]
+pub struct CompositeFieldInfo {
+    /// Field name.
+    pub name: String,
+    /// Primitive type of this field.
+    pub primitive_type: PrimitiveType,
+    /// Offset within the composite.
+    pub offset: usize,
+    /// Encoded length in bytes.
+    pub encoded_length: usize,
+}
+
 /// Type kind enumeration.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TypeKind {
     /// Primitive type.
     Primitive(PrimitiveType),
-    /// Composite type.
-    Composite,
-    /// Enum type with encoding.
-    Enum(PrimitiveType),
-    /// Set (bitfield) type with encoding.
-    Set(PrimitiveType),
+    /// Composite type with fields.
+    Composite {
+        /// Fields in the composite.
+        fields: Vec<CompositeFieldInfo>,
+    },
+    /// Enum type with encoding and variants.
+    Enum {
+        /// Underlying encoding type.
+        encoding: PrimitiveType,
+        /// Enum variants with discriminant values.
+        variants: Vec<EnumVariant>,
+    },
+    /// Set (bitfield) type with encoding and choices.
+    Set {
+        /// Underlying encoding type.
+        encoding: PrimitiveType,
+        /// Bit choices.
+        choices: Vec<SetVariant>,
+    },
 }
 
 /// Resolved message information.
@@ -263,8 +358,8 @@ impl ResolvedField {
                     rt.rust_type.clone(),
                     rt.is_array,
                     rt.array_length,
-                    match rt.kind {
-                        TypeKind::Primitive(p) => Some(p),
+                    match &rt.kind {
+                        TypeKind::Primitive(p) => Some(*p),
                         _ => None,
                     },
                 )
@@ -370,14 +465,49 @@ pub struct ResolvedVarData {
 }
 
 /// Converts a string to snake_case.
+/// Treats `-` as a word separator and normalizes to `_`.
 #[must_use]
 pub fn to_snake_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);
+    let mut last_was_separator = false;
     for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
+        if c == '-' {
+            if !last_was_separator {
+                result.push('_');
+            }
+            last_was_separator = true;
+        } else if c.is_uppercase() && i > 0 && !last_was_separator {
             result.push('_');
+            result.push(c.to_ascii_lowercase());
+            last_was_separator = false;
+        } else {
+            result.push(c.to_ascii_lowercase());
+            last_was_separator = false;
         }
-        result.push(c.to_ascii_lowercase());
+    }
+    result
+}
+
+/// Converts a string to SCREAMING_SNAKE_CASE.
+/// Treats `-` as a word separator and normalizes to `_`.
+#[must_use]
+pub fn to_screaming_snake_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    let mut last_was_separator = false;
+    for (i, c) in s.chars().enumerate() {
+        if c == '-' {
+            if !last_was_separator {
+                result.push('_');
+            }
+            last_was_separator = true;
+        } else if c.is_uppercase() && i > 0 && !last_was_separator {
+            result.push('_');
+            result.push(c.to_ascii_uppercase());
+            last_was_separator = false;
+        } else {
+            result.push(c.to_ascii_uppercase());
+            last_was_separator = false;
+        }
     }
     result
 }
@@ -412,6 +542,21 @@ mod tests {
         assert_eq!(to_snake_case("clOrdId"), "cl_ord_id");
         assert_eq!(to_snake_case("symbol"), "symbol");
         assert_eq!(to_snake_case("MDEntryPx"), "m_d_entry_px");
+        assert_eq!(to_snake_case("some-hyphenated"), "some_hyphenated");
+        // Hyphen followed by uppercase should not produce double underscore
+        assert_eq!(to_snake_case("some-Hyphen"), "some_hyphen");
+    }
+
+    #[test]
+    fn test_to_screaming_snake_case() {
+        assert_eq!(to_screaming_snake_case("clOrdId"), "CL_ORD_ID");
+        assert_eq!(to_screaming_snake_case("symbol"), "SYMBOL");
+        assert_eq!(
+            to_screaming_snake_case("some-hyphenated"),
+            "SOME_HYPHENATED"
+        );
+        // Hyphen followed by uppercase should not produce double underscore
+        assert_eq!(to_screaming_snake_case("some-Hyphen"), "SOME_HYPHEN");
     }
 
     #[test]
@@ -458,15 +603,21 @@ mod tests {
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Primitive"));
 
-        let kind = TypeKind::Composite;
+        let kind = TypeKind::Composite { fields: vec![] };
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Composite"));
 
-        let kind = TypeKind::Enum(PrimitiveType::Uint8);
+        let kind = TypeKind::Enum {
+            encoding: PrimitiveType::Uint8,
+            variants: vec![],
+        };
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Enum"));
 
-        let kind = TypeKind::Set(PrimitiveType::Uint16);
+        let kind = TypeKind::Set {
+            encoding: PrimitiveType::Uint16,
+            choices: vec![],
+        };
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Set"));
     }
