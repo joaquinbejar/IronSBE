@@ -93,14 +93,33 @@ impl ResolvedType {
                 is_array: p.is_array(),
                 array_length: p.length,
             },
-            TypeDef::Composite(c) => Self {
-                name: c.name.clone(),
-                kind: TypeKind::Composite,
-                encoded_length: c.encoded_length(),
-                rust_type: to_pascal_case(&c.name),
-                is_array: false,
-                array_length: None,
-            },
+            TypeDef::Composite(c) => {
+                let mut offset = 0usize;
+                let fields = c
+                    .fields
+                    .iter()
+                    .filter_map(|f| {
+                        f.primitive_type.map(|prim| {
+                            let field_offset = offset;
+                            offset = offset.saturating_add(f.encoded_length);
+                            CompositeFieldInfo {
+                                name: f.name.clone(),
+                                primitive_type: prim,
+                                offset: field_offset,
+                                encoded_length: f.encoded_length,
+                            }
+                        })
+                    })
+                    .collect();
+                Self {
+                    name: c.name.clone(),
+                    kind: TypeKind::Composite { fields },
+                    encoded_length: c.encoded_length(),
+                    rust_type: to_pascal_case(&c.name),
+                    is_array: false,
+                    array_length: None,
+                }
+            }
             TypeDef::Enum(e) => {
                 let variants: Vec<EnumVariant> = e
                     .valid_values
@@ -186,13 +205,29 @@ pub struct SetVariant {
     pub bit_position: u8,
 }
 
+/// Composite field information for code generation.
+#[derive(Debug, Clone)]
+pub struct CompositeFieldInfo {
+    /// Field name.
+    pub name: String,
+    /// Primitive type of this field.
+    pub primitive_type: PrimitiveType,
+    /// Offset within the composite.
+    pub offset: usize,
+    /// Encoded length in bytes.
+    pub encoded_length: usize,
+}
+
 /// Type kind enumeration.
 #[derive(Debug, Clone)]
 pub enum TypeKind {
     /// Primitive type.
     Primitive(PrimitiveType),
-    /// Composite type.
-    Composite,
+    /// Composite type with fields.
+    Composite {
+        /// Fields in the composite.
+        fields: Vec<CompositeFieldInfo>,
+    },
     /// Enum type with encoding and variants.
     Enum {
         /// Underlying encoding type.
@@ -570,7 +605,7 @@ mod tests {
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Primitive"));
 
-        let kind = TypeKind::Composite;
+        let kind = TypeKind::Composite { fields: vec![] };
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Composite"));
 

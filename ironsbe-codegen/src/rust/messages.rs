@@ -216,8 +216,20 @@ impl<'a> MessageGenerator<'a> {
                     ));
                     output.push_str("    }\n\n");
                 }
+                Some(TypeKind::Composite { .. }) => {
+                    // Composite field - return wrapper struct
+                    output.push_str(&format!(
+                        "    pub fn {}(&self) -> {}<'a> {{\n",
+                        field.getter_name, rust_type
+                    ));
+                    output.push_str(&format!(
+                        "        {}::wrap(self.buffer, self.offset + {})\n",
+                        rust_type, field.offset
+                    ));
+                    output.push_str("    }\n\n");
+                }
                 _ => {
-                    // Primitive or composite field
+                    // Primitive field
                     let read_method = get_read_method(field.primitive_type);
                     output.push_str(&format!(
                         "    pub fn {}(&self) -> {} {{\n",
@@ -390,8 +402,20 @@ impl<'a> MessageGenerator<'a> {
                     output.push_str("        self\n");
                     output.push_str("    }\n\n");
                 }
+                Some(TypeKind::Composite { .. }) => {
+                    // Composite field - return encoder for nested writes
+                    output.push_str(&format!(
+                        "    pub fn {}(&mut self) -> {}Encoder<'_> {{\n",
+                        field.setter_name, rust_type
+                    ));
+                    output.push_str(&format!(
+                        "        {}Encoder::wrap(self.buffer, self.offset + {})\n",
+                        rust_type, field_offset
+                    ));
+                    output.push_str("    }\n\n");
+                }
                 _ => {
-                    // Primitive or composite field
+                    // Primitive field
                     let write_method = get_write_method(field.primitive_type);
                     output.push_str(&format!(
                         "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
