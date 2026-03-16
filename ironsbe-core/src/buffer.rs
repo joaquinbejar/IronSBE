@@ -308,6 +308,14 @@ impl ReadBuffer for [u8] {
     }
 }
 
+/// Implement WriteBuffer for byte slices.
+impl WriteBuffer for [u8] {
+    #[inline(always)]
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        self
+    }
+}
+
 /// Implement ReadBuffer for `Vec<u8>`.
 impl ReadBuffer for Vec<u8> {
     #[inline(always)]

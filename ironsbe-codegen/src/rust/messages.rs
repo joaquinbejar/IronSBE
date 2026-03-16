@@ -1,6 +1,8 @@
 //! Message encoder/decoder code generation.
 
-use ironsbe_schema::ir::{ResolvedField, ResolvedGroup, ResolvedMessage, SchemaIr, to_snake_case};
+use ironsbe_schema::ir::{
+    ResolvedField, ResolvedGroup, ResolvedMessage, SchemaIr, TypeKind, to_snake_case,
+};
 use ironsbe_schema::types::PrimitiveType;
 
 /// Generator for message encoders and decoders.
@@ -183,19 +185,51 @@ impl<'a> MessageGenerator<'a> {
                 output.push_str("    }\n\n");
             }
         } else {
-            // Scalar field
+            // Scalar field - check if it's an enum/set type
             let rust_type = &field.rust_type;
-            let read_method = get_read_method(field.primitive_type);
+            let resolved_type = self.ir.get_type(&field.type_name);
 
-            output.push_str(&format!(
-                "    pub fn {}(&self) -> {} {{\n",
-                field.getter_name, rust_type
-            ));
-            output.push_str(&format!(
-                "        self.buffer.{}(self.offset + {})\n",
-                read_method, field.offset
-            ));
-            output.push_str("    }\n\n");
+            match resolved_type.map(|t| &t.kind) {
+                Some(TypeKind::Enum { encoding, .. }) => {
+                    // Enum field - use encoding primitive and wrap with From
+                    let read_method = get_read_method(Some(*encoding));
+                    output.push_str(&format!(
+                        "    pub fn {}(&self) -> {} {{\n",
+                        field.getter_name, rust_type
+                    ));
+                    output.push_str(&format!(
+                        "        {}::from(self.buffer.{}(self.offset + {}))\n",
+                        rust_type, read_method, field.offset
+                    ));
+                    output.push_str("    }\n\n");
+                }
+                Some(TypeKind::Set { encoding, .. }) => {
+                    // Set field - use encoding primitive and wrap with from_raw
+                    let read_method = get_read_method(Some(*encoding));
+                    output.push_str(&format!(
+                        "    pub fn {}(&self) -> {} {{\n",
+                        field.getter_name, rust_type
+                    ));
+                    output.push_str(&format!(
+                        "        {}::from_raw(self.buffer.{}(self.offset + {}))\n",
+                        rust_type, read_method, field.offset
+                    ));
+                    output.push_str("    }\n\n");
+                }
+                _ => {
+                    // Primitive or composite field
+                    let read_method = get_read_method(field.primitive_type);
+                    output.push_str(&format!(
+                        "    pub fn {}(&self) -> {} {{\n",
+                        field.getter_name, rust_type
+                    ));
+                    output.push_str(&format!(
+                        "        self.buffer.{}(self.offset + {})\n",
+                        read_method, field.offset
+                    ));
+                    output.push_str("    }\n\n");
+                }
+            }
         }
 
         output
@@ -322,20 +356,55 @@ impl<'a> MessageGenerator<'a> {
             output.push_str("        self\n");
             output.push_str("    }\n\n");
         } else {
-            // Scalar field
+            // Scalar field - check if it's an enum/set type
             let rust_type = &field.rust_type;
-            let write_method = get_write_method(field.primitive_type);
+            let resolved_type = self.ir.get_type(&field.type_name);
 
-            output.push_str(&format!(
-                "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
-                field.setter_name, rust_type
-            ));
-            output.push_str(&format!(
-                "        self.buffer.{}(self.offset + {}, value);\n",
-                write_method, field_offset
-            ));
-            output.push_str("        self\n");
-            output.push_str("    }\n\n");
+            match resolved_type.map(|t| &t.kind) {
+                Some(TypeKind::Enum { encoding, .. }) => {
+                    // Enum field - convert enum to primitive before writing
+                    let write_method = get_write_method(Some(*encoding));
+                    let prim_type = encoding.rust_type();
+                    output.push_str(&format!(
+                        "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
+                        field.setter_name, rust_type
+                    ));
+                    output.push_str(&format!(
+                        "        self.buffer.{}(self.offset + {}, {}::from(value));\n",
+                        write_method, field_offset, prim_type
+                    ));
+                    output.push_str("        self\n");
+                    output.push_str("    }\n\n");
+                }
+                Some(TypeKind::Set { encoding, .. }) => {
+                    // Set field - use raw() to get the primitive value
+                    let write_method = get_write_method(Some(*encoding));
+                    output.push_str(&format!(
+                        "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
+                        field.setter_name, rust_type
+                    ));
+                    output.push_str(&format!(
+                        "        self.buffer.{}(self.offset + {}, value.raw());\n",
+                        write_method, field_offset
+                    ));
+                    output.push_str("        self\n");
+                    output.push_str("    }\n\n");
+                }
+                _ => {
+                    // Primitive or composite field
+                    let write_method = get_write_method(field.primitive_type);
+                    output.push_str(&format!(
+                        "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
+                        field.setter_name, rust_type
+                    ));
+                    output.push_str(&format!(
+                        "        self.buffer.{}(self.offset + {}, value);\n",
+                        write_method, field_offset
+                    ));
+                    output.push_str("        self\n");
+                    output.push_str("    }\n\n");
+                }
+            }
         }
 
         output
