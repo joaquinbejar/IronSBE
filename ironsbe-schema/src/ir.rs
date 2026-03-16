@@ -325,8 +325,8 @@ impl ResolvedField {
                     rt.rust_type.clone(),
                     rt.is_array,
                     rt.array_length,
-                    match rt.kind {
-                        TypeKind::Primitive(p) => Some(p),
+                    match &rt.kind {
+                        TypeKind::Primitive(p) => Some(*p),
                         _ => None,
                     },
                 )
@@ -436,14 +436,20 @@ pub struct ResolvedVarData {
 #[must_use]
 pub fn to_snake_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);
+    let mut last_was_separator = false;
     for (i, c) in s.chars().enumerate() {
         if c == '-' {
-            result.push('_');
-        } else if c.is_uppercase() && i > 0 {
+            if !last_was_separator {
+                result.push('_');
+            }
+            last_was_separator = true;
+        } else if c.is_uppercase() && i > 0 && !last_was_separator {
             result.push('_');
             result.push(c.to_ascii_lowercase());
+            last_was_separator = false;
         } else {
             result.push(c.to_ascii_lowercase());
+            last_was_separator = false;
         }
     }
     result
@@ -454,14 +460,20 @@ pub fn to_snake_case(s: &str) -> String {
 #[must_use]
 pub fn to_screaming_snake_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);
+    let mut last_was_separator = false;
     for (i, c) in s.chars().enumerate() {
         if c == '-' {
-            result.push('_');
-        } else if c.is_uppercase() && i > 0 {
+            if !last_was_separator {
+                result.push('_');
+            }
+            last_was_separator = true;
+        } else if c.is_uppercase() && i > 0 && !last_was_separator {
             result.push('_');
             result.push(c.to_ascii_uppercase());
+            last_was_separator = false;
         } else {
             result.push(c.to_ascii_uppercase());
+            last_was_separator = false;
         }
     }
     result
@@ -498,6 +510,8 @@ mod tests {
         assert_eq!(to_snake_case("symbol"), "symbol");
         assert_eq!(to_snake_case("MDEntryPx"), "m_d_entry_px");
         assert_eq!(to_snake_case("some-hyphenated"), "some_hyphenated");
+        // Hyphen followed by uppercase should not produce double underscore
+        assert_eq!(to_snake_case("some-Hyphen"), "some_hyphen");
     }
 
     #[test]
@@ -508,6 +522,8 @@ mod tests {
             to_screaming_snake_case("some-hyphenated"),
             "SOME_HYPHENATED"
         );
+        // Hyphen followed by uppercase should not produce double underscore
+        assert_eq!(to_screaming_snake_case("some-Hyphen"), "SOME_HYPHEN");
     }
 
     #[test]

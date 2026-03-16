@@ -268,10 +268,35 @@ mod tests {
         let generator = EnumGenerator::new(&ir);
         let output = generator.generate();
 
+        // Check struct and basic methods
         assert!(output.contains("struct"));
         assert!(output.contains("is_set"));
         assert!(output.contains("set"));
         assert!(output.contains("clear"));
+
+        // Check specific bit position constants are generated
+        assert!(
+            output.contains("pub const ACTIVE: u8 = 0"),
+            "Should generate ACTIVE constant with bit position 0"
+        );
+        assert!(
+            output.contains("pub const VISIBLE: u8 = 1"),
+            "Should generate VISIBLE constant with bit position 1"
+        );
+
+        // Check specific named methods are generated
+        assert!(
+            output.contains("fn is_active(&self)"),
+            "Should generate is_active method"
+        );
+        assert!(
+            output.contains("fn set_active(&mut self)"),
+            "Should generate set_active method"
+        );
+        assert!(
+            output.contains("fn clear_active(&mut self)"),
+            "Should generate clear_active method"
+        );
     }
 
     #[test]
