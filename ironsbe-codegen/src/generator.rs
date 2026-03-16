@@ -50,8 +50,6 @@ impl<'a> Generator<'a> {
             self.ir.package, self.ir.schema_version
         ));
         output.push('\n');
-        output.push_str("#![allow(dead_code, unused_imports, clippy::too_many_arguments)]\n");
-        output.push('\n');
         output.push_str("use ironsbe_core::{\n");
         output.push_str("    buffer::{ReadBuffer, WriteBuffer},\n");
         output.push_str("    header::{MessageHeader, GroupHeader, VarDataHeader},\n");
