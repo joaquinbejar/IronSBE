@@ -102,13 +102,19 @@ impl ResolvedType {
                 array_length: None,
             },
             TypeDef::Enum(e) => {
-                let variants = e
+                let variants: Vec<EnumVariant> = e
                     .valid_values
                     .iter()
                     .filter_map(|v| {
-                        v.as_u64().map(|value| EnumVariant {
+                        // Use signed parsing for signed types, unsigned for others
+                        let value = if e.encoding_type.is_signed() {
+                            v.as_i64()
+                        } else {
+                            v.as_u64().map(|u| u as i64)
+                        };
+                        value.map(|val| EnumVariant {
                             name: v.name.clone(),
-                            value,
+                            value: val,
                         })
                     })
                     .collect();
@@ -167,8 +173,8 @@ impl ResolvedType {
 pub struct EnumVariant {
     /// Variant name (will be converted to PascalCase).
     pub name: String,
-    /// Discriminant value.
-    pub value: u64,
+    /// Discriminant value (i64 to support signed encodings).
+    pub value: i64,
 }
 
 /// Set choice with name and bit position.
@@ -426,14 +432,37 @@ pub struct ResolvedVarData {
 }
 
 /// Converts a string to snake_case.
+/// Treats `-` as a word separator and normalizes to `_`.
 #[must_use]
 pub fn to_snake_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);
     for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
+        if c == '-' {
             result.push('_');
+        } else if c.is_uppercase() && i > 0 {
+            result.push('_');
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c.to_ascii_lowercase());
         }
-        result.push(c.to_ascii_lowercase());
+    }
+    result
+}
+
+/// Converts a string to SCREAMING_SNAKE_CASE.
+/// Treats `-` as a word separator and normalizes to `_`.
+#[must_use]
+pub fn to_screaming_snake_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c == '-' {
+            result.push('_');
+        } else if c.is_uppercase() && i > 0 {
+            result.push('_');
+            result.push(c.to_ascii_uppercase());
+        } else {
+            result.push(c.to_ascii_uppercase());
+        }
     }
     result
 }
@@ -468,6 +497,17 @@ mod tests {
         assert_eq!(to_snake_case("clOrdId"), "cl_ord_id");
         assert_eq!(to_snake_case("symbol"), "symbol");
         assert_eq!(to_snake_case("MDEntryPx"), "m_d_entry_px");
+        assert_eq!(to_snake_case("some-hyphenated"), "some_hyphenated");
+    }
+
+    #[test]
+    fn test_to_screaming_snake_case() {
+        assert_eq!(to_screaming_snake_case("clOrdId"), "CL_ORD_ID");
+        assert_eq!(to_screaming_snake_case("symbol"), "SYMBOL");
+        assert_eq!(
+            to_screaming_snake_case("some-hyphenated"),
+            "SOME_HYPHENATED"
+        );
     }
 
     #[test]

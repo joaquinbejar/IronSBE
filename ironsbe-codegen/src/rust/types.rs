@@ -20,7 +20,7 @@ impl<'a> TypeGenerator<'a> {
         let output = String::new();
 
         for resolved_type in self.ir.types.values() {
-            if let TypeKind::Composite = resolved_type.kind {
+            if matches!(&resolved_type.kind, TypeKind::Composite) {
                 // Generate composite type struct
                 // For now, composites are handled inline in field accessors
             }

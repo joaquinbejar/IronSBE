@@ -1,6 +1,9 @@
 //! Enum and set code generation.
 
-use ironsbe_schema::ir::{EnumVariant, SchemaIr, SetVariant, TypeKind, to_pascal_case};
+use ironsbe_schema::ir::{
+    EnumVariant, SchemaIr, SetVariant, TypeKind, to_pascal_case, to_screaming_snake_case,
+    to_snake_case,
+};
 use ironsbe_schema::types::PrimitiveType;
 
 /// Generator for enum and set definitions.
@@ -61,31 +64,34 @@ impl<'a> EnumGenerator<'a> {
         output.push_str("}\n\n");
 
         // Implement From<primitive> -> Enum (safe match, no transmute)
-        output.push_str(&format!("impl From<{}> for {} {{\n", rust_type, rust_name));
-        output.push_str(&format!("    fn from(value: {}) -> Self {{\n", rust_type));
-        output.push_str("        match value {\n");
-        for variant in variants {
-            let variant_name = to_pascal_case(&variant.name);
-            output.push_str(&format!(
-                "            {} => Self::{},\n",
-                variant.value, variant_name
-            ));
-        }
-        // Default to first variant for unknown values (or panic in debug)
-        if let Some(first) = variants.first() {
-            let first_name = to_pascal_case(&first.name);
+        // Only generate if variants exist to avoid empty match
+        if !variants.is_empty() {
+            output.push_str(&format!("impl From<{}> for {} {{\n", rust_type, rust_name));
+            output.push_str(&format!("    fn from(value: {}) -> Self {{\n", rust_type));
+            output.push_str("        match value {\n");
+            for variant in variants {
+                let variant_name = to_pascal_case(&variant.name);
+                output.push_str(&format!(
+                    "            {} => Self::{},\n",
+                    variant.value, variant_name
+                ));
+            }
+            // Default to first variant for unknown values
+            let first_name = to_pascal_case(&variants[0].name);
             output.push_str(&format!("            _ => Self::{},\n", first_name));
+            output.push_str("        }\n");
+            output.push_str("    }\n");
+            output.push_str("}\n\n");
         }
-        output.push_str("        }\n");
-        output.push_str("    }\n");
-        output.push_str("}\n\n");
 
         // Implement From<Enum> -> primitive
-        output.push_str(&format!("impl From<{}> for {} {{\n", rust_name, rust_type));
-        output.push_str(&format!("    fn from(value: {}) -> Self {{\n", rust_name));
-        output.push_str("        value as Self\n");
-        output.push_str("    }\n");
-        output.push_str("}\n\n");
+        if !variants.is_empty() {
+            output.push_str(&format!("impl From<{}> for {} {{\n", rust_name, rust_type));
+            output.push_str(&format!("    fn from(value: {}) -> Self {{\n", rust_name));
+            output.push_str("        value as Self\n");
+            output.push_str("    }\n");
+            output.push_str("}\n\n");
+        }
 
         output
     }
@@ -187,32 +193,6 @@ impl<'a> EnumGenerator<'a> {
     }
 }
 
-/// Converts a string to snake_case.
-#[must_use]
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 4);
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            result.push('_');
-        }
-        result.push(c.to_ascii_lowercase());
-    }
-    result
-}
-
-/// Converts a string to SCREAMING_SNAKE_CASE.
-#[must_use]
-fn to_screaming_snake_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 4);
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            result.push('_');
-        }
-        result.push(c.to_ascii_uppercase());
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,8 +250,16 @@ mod tests {
         let generator = EnumGenerator::new(&ir);
         let output = generator.generate();
 
-        assert!(output.contains("enum"));
-        assert!(output.contains("impl From"));
+        // Check enum structure
+        assert!(output.contains("pub enum Side"));
+        assert!(output.contains("Buy = 1"));
+        assert!(output.contains("Sell = 2"));
+
+        // Check From impl with match arms
+        assert!(output.contains("impl From<u8> for Side"));
+        assert!(output.contains("1 => Self::Buy"));
+        assert!(output.contains("2 => Self::Sell"));
+        assert!(output.contains("_ => Self::Buy")); // fallback to first variant
     }
 
     #[test]
