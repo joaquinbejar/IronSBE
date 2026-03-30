@@ -26,9 +26,16 @@ impl<'a> MessageGenerator<'a> {
             output.push_str(&self.generate_decoder(msg));
             output.push_str(&self.generate_encoder(msg));
 
-            // Generate group decoders/encoders
-            for group in &msg.groups {
-                output.push_str(&self.generate_group_decoder(group));
+            // Generate group decoders/encoders in a message-scoped module
+            if !msg.groups.is_empty() {
+                let mod_name = to_snake_case(&msg.name);
+                output.push_str(&format!("/// Types for {} repeating groups.\n", msg.name));
+                output.push_str(&format!("pub mod {} {{\n", mod_name));
+                output.push_str("    use super::*;\n\n");
+                for group in &msg.groups {
+                    output.push_str(&self.generate_group_decoder(group));
+                }
+                output.push_str("}\n\n");
             }
         }
 
@@ -87,7 +94,7 @@ impl<'a> MessageGenerator<'a> {
         // Group accessors
         let mut group_offset = msg.block_length as usize;
         for group in &msg.groups {
-            output.push_str(&self.generate_group_accessor(group, group_offset));
+            output.push_str(&self.generate_group_accessor(group, group_offset, &msg.name));
             group_offset += 4; // Group header size
         }
 
@@ -248,9 +255,14 @@ impl<'a> MessageGenerator<'a> {
     }
 
     /// Generates a group accessor method.
-    fn generate_group_accessor(&self, group: &ResolvedGroup, offset: usize) -> String {
+    fn generate_group_accessor(
+        &self,
+        group: &ResolvedGroup,
+        offset: usize,
+        msg_name: &str,
+    ) -> String {
         let mut output = String::new();
-        let group_decoder = group.decoder_name();
+        let qualified = format!("{}::{}", to_snake_case(msg_name), group.decoder_name());
 
         output.push_str(&format!("    /// Access {} repeating group.\n", group.name));
         output.push_str("    #[inline]\n");
@@ -258,11 +270,11 @@ impl<'a> MessageGenerator<'a> {
         output.push_str(&format!(
             "    pub fn {}(&self) -> {}<'a> {{\n",
             to_snake_case(&group.name),
-            group_decoder
+            qualified
         ));
         output.push_str(&format!(
             "        {}::wrap(self.buffer, self.offset + {})\n",
-            group_decoder, offset
+            qualified, offset
         ));
         output.push_str("    }\n\n");
 
@@ -576,5 +588,76 @@ fn get_write_method(prim: Option<PrimitiveType>) -> &'static str {
         Some(PrimitiveType::Float) => "put_f32_le",
         Some(PrimitiveType::Double) => "put_f64_le",
         None => "put_u64_le",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironsbe_schema::{SchemaIr, parse_schema};
+
+    fn schema_with_shared_group_name() -> String {
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <type name="uint64" primitiveType="uint64"/>
+    </types>
+    <sbe:message name="CreateRfqResponse" id="21" blockLength="8">
+        <field name="value" id="1" type="uint64" offset="0"/>
+        <group name="quotes" id="100" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="price" id="200" type="uint64" offset="0"/>
+        </group>
+    </sbe:message>
+    <sbe:message name="GetRfqResponse" id="23" blockLength="8">
+        <field name="value" id="1" type="uint64" offset="0"/>
+        <group name="quotes" id="100" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="price" id="200" type="uint64" offset="0"/>
+        </group>
+    </sbe:message>
+</sbe:messageSchema>"#
+            .to_string()
+    }
+
+    #[test]
+    fn test_duplicate_group_name_generates_scoped_modules() {
+        let xml = schema_with_shared_group_name();
+        let schema = parse_schema(&xml).expect("Failed to parse schema");
+        let ir = SchemaIr::from_schema(&schema);
+        let msg_gen = MessageGenerator::new(&ir);
+        let code = msg_gen.generate();
+
+        assert!(
+            code.contains("pub mod create_rfq_response {"),
+            "expected module for CreateRfqResponse groups"
+        );
+        assert!(
+            code.contains("pub mod get_rfq_response {"),
+            "expected module for GetRfqResponse groups"
+        );
+
+        let occurrences = code.matches("pub struct QuotesGroupDecoder").count();
+        assert_eq!(
+            occurrences, 2,
+            "expected one QuotesGroupDecoder per message module, got {occurrences}"
+        );
+    }
+
+    #[test]
+    fn test_group_accessor_uses_qualified_path() {
+        let xml = schema_with_shared_group_name();
+        let schema = parse_schema(&xml).expect("Failed to parse schema");
+        let ir = SchemaIr::from_schema(&schema);
+        let msg_gen = MessageGenerator::new(&ir);
+        let code = msg_gen.generate();
+
+        assert!(
+            code.contains("create_rfq_response::QuotesGroupDecoder"),
+            "accessor in CreateRfqResponse must reference module-qualified type"
+        );
+        assert!(
+            code.contains("get_rfq_response::QuotesGroupDecoder"),
+            "accessor in GetRfqResponse must reference module-qualified type"
+        );
     }
 }
