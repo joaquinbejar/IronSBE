@@ -451,6 +451,18 @@ impl ResolvedGroup {
     pub fn entry_decoder_name(&self) -> String {
         format!("{}EntryDecoder", to_pascal_case(&self.name))
     }
+
+    /// Returns the encoder struct name.
+    #[must_use]
+    pub fn encoder_name(&self) -> String {
+        format!("{}GroupEncoder", to_pascal_case(&self.name))
+    }
+
+    /// Returns the entry encoder struct name.
+    #[must_use]
+    pub fn entry_encoder_name(&self) -> String {
+        format!("{}EntryEncoder", to_pascal_case(&self.name))
+    }
 }
 
 /// Resolved variable data field.
@@ -489,8 +501,8 @@ pub fn to_snake_case(s: &str) -> String {
                 let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
 
                 // Word boundary: lowercase->uppercase OR acronym end (XXXy -> XXX_Y)
-                let boundary = (prev_lower && is_upper)
-                    || (prev.is_uppercase() && is_upper && next_is_lower);
+                let boundary =
+                    (prev_lower && is_upper) || (prev.is_uppercase() && is_upper && next_is_lower);
 
                 if boundary {
                     if !first {
@@ -580,8 +592,14 @@ mod tests {
         assert_eq!(to_snake_case("some-Hyphen"), "some_hyphen");
         // Underscores are treated as word separators
         assert_eq!(to_snake_case("some_underscore"), "some_underscore");
-        assert_eq!(to_snake_case("some-mixed_separator"), "some_mixed_separator");
-        assert_eq!(to_snake_case("some__double_underscore"), "some_double_underscore");
+        assert_eq!(
+            to_snake_case("some-mixed_separator"),
+            "some_mixed_separator"
+        );
+        assert_eq!(
+            to_snake_case("some__double_underscore"),
+            "some_double_underscore"
+        );
         assert_eq!(to_snake_case("some--double-hyphen"), "some_double_hyphen");
         // Leading uppercase with underscore
         assert_eq!(to_snake_case("AB_C"), "ab_c");
