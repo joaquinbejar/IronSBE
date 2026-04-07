@@ -570,6 +570,18 @@ impl<'a> MessageGenerator<'a> {
         let encoder_name = group.encoder_name();
         let entry_name = group.entry_encoder_name();
 
+        // Compute effective block length: use XML value if nonzero, else derive from fields
+        let effective_block_length = if group.block_length > 0 {
+            group.block_length
+        } else {
+            group
+                .fields
+                .iter()
+                .map(|f| f.offset + f.encoded_length)
+                .max()
+                .unwrap_or(0) as u16
+        };
+
         // Group encoder struct
         output.push_str(&format!("/// {} Group Encoder.\n", group.name));
         output.push_str(&format!("pub struct {}<'a> {{\n", encoder_name));
@@ -584,7 +596,7 @@ impl<'a> MessageGenerator<'a> {
         output.push_str(&format!(
             "    /// Block length of each entry.\n\
              pub const BLOCK_LENGTH: u16 = {};\n\n",
-            group.block_length
+            effective_block_length
         ));
 
         // wrap constructor
@@ -661,7 +673,7 @@ impl<'a> MessageGenerator<'a> {
         output.push_str("}\n\n");
 
         output.push_str(&format!("impl<'a> {}<'a> {{\n", entry_name));
-        output.push_str("    fn wrap(buffer: &'a mut [u8], offset: usize) -> Self {\n");
+        output.push_str("    pub fn wrap(buffer: &'a mut [u8], offset: usize) -> Self {\n");
         output.push_str("        Self { buffer, offset }\n");
         output.push_str("    }\n\n");
 
@@ -1158,6 +1170,140 @@ mod tests {
         assert!(
             entry_code.contains("self.offset + 12,"),
             "set_quantity should write at offset 12"
+        );
+    }
+
+    fn schema_with_group_zero_block_length() -> String {
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <type name="uint64" primitiveType="uint64"/>
+        <type name="uint32" primitiveType="uint32"/>
+    </types>
+    <sbe:message name="ListOrders" id="19" blockLength="0">
+        <group name="orders" id="100" dimensionType="groupSizeEncoding" blockLength="0">
+            <field name="orderId" id="1" type="uint64" offset="0"/>
+            <field name="instrumentId" id="2" type="uint32"/>
+            <field name="quantity" id="3" type="uint64"/>
+        </group>
+    </sbe:message>
+</sbe:messageSchema>"#
+            .to_string()
+    }
+
+    #[test]
+    fn test_group_encoder_block_length_from_xml() {
+        let xml = schema_with_group_no_offsets();
+        let schema = parse_schema(&xml).expect("Failed to parse schema");
+        let ir = SchemaIr::from_schema(&schema);
+        let msg_gen = MessageGenerator::new(&ir);
+        let code = msg_gen.generate();
+
+        assert!(
+            code.contains("BLOCK_LENGTH: u16 = 20"),
+            "BLOCK_LENGTH should use the explicit XML blockLength=20"
+        );
+    }
+
+    #[test]
+    fn test_group_encoder_block_length_computed() {
+        let xml = schema_with_group_zero_block_length();
+        let schema = parse_schema(&xml).expect("Failed to parse schema");
+        let ir = SchemaIr::from_schema(&schema);
+        let msg_gen = MessageGenerator::new(&ir);
+        let code = msg_gen.generate();
+
+        // uint64(8) + uint32(4) + uint64(8) = 20 bytes total
+        assert!(
+            code.contains("BLOCK_LENGTH: u16 = 20"),
+            "BLOCK_LENGTH should be auto-computed as 20 when XML blockLength=0"
+        );
+    }
+
+    #[test]
+    fn test_entry_encoder_wrap_is_pub() {
+        let xml = schema_with_group_no_offsets();
+        let schema = parse_schema(&xml).expect("Failed to parse schema");
+        let ir = SchemaIr::from_schema(&schema);
+        let msg_gen = MessageGenerator::new(&ir);
+        let code = msg_gen.generate();
+
+        let entry_pos = code
+            .find("impl<'a> OrdersEntryEncoder<'a>")
+            .expect("EntryEncoder impl not found");
+        let entry_section = &code[entry_pos..];
+
+        assert!(
+            entry_section.contains("pub fn wrap("),
+            "EntryEncoder::wrap should be pub"
+        );
+    }
+
+    #[test]
+    fn test_roundtrip_multi_entry_codegen() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <type name="uint64" primitiveType="uint64"/>
+        <type name="uint32" primitiveType="uint32"/>
+    </types>
+    <sbe:message name="ListOrders" id="19" blockLength="8">
+        <field name="requestId" id="1" type="uint64" offset="0"/>
+        <group name="orders" id="100" dimensionType="groupSizeEncoding" blockLength="0">
+            <field name="orderId" id="10" type="uint64" offset="0"/>
+            <field name="instrumentId" id="11" type="uint32"/>
+            <field name="quantity" id="12" type="uint64"/>
+        </group>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse schema");
+        let ir = SchemaIr::from_schema(&schema);
+        let msg_gen = MessageGenerator::new(&ir);
+        let code = msg_gen.generate();
+
+        // BLOCK_LENGTH should be auto-computed: uint64(8) + uint32(4) + uint64(8) = 20
+        assert!(
+            code.contains("BLOCK_LENGTH: u16 = 20"),
+            "group encoder BLOCK_LENGTH should be 20, not 0"
+        );
+
+        // next_entry advances by BLOCK_LENGTH (not 0)
+        assert!(
+            code.contains("self.offset += Self::BLOCK_LENGTH as usize"),
+            "next_entry should advance offset by BLOCK_LENGTH"
+        );
+
+        // encoded_length uses BLOCK_LENGTH * count
+        assert!(
+            code.contains(
+                "GroupHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize * self.count as usize"
+            ),
+            "encoded_length should use BLOCK_LENGTH * count"
+        );
+
+        // GroupHeader written with BLOCK_LENGTH
+        assert!(
+            code.contains("GroupHeader::new(Self::BLOCK_LENGTH, count)"),
+            "group header should be written with BLOCK_LENGTH"
+        );
+
+        // Parent encoder accessor exists
+        assert!(
+            code.contains("fn orders_count(&mut self, count: u16)"),
+            "parent encoder should have group accessor"
+        );
+
+        // Entry encoder wrap is public
+        let entry_pos = code
+            .find("impl<'a> OrdersEntryEncoder<'a>")
+            .expect("EntryEncoder impl not found");
+        let entry_section = &code[entry_pos..];
+        assert!(
+            entry_section.contains("pub fn wrap("),
+            "EntryEncoder::wrap should be pub for external consumers"
         );
     }
 }
