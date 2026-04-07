@@ -486,7 +486,7 @@ pub fn to_snake_case(s: &str) -> String {
 
             if i > 0 {
                 let prev = chars[i - 1];
-                let next_is_lower = chars.get(i + 1).map_or(false, |n| n.is_lowercase());
+                let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
 
                 // Word boundary: lowercase->uppercase OR acronym end (XXXy -> XXX_Y)
                 let boundary = (prev_lower && is_upper)
