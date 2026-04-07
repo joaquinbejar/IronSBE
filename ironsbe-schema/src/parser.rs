@@ -633,6 +633,8 @@ fn parse_message(
         buf.clear();
     }
 
+    auto_compute_field_offsets(&mut msg.fields);
+
     Ok(msg)
 }
 
@@ -770,7 +772,25 @@ fn parse_group(
         buf.clear();
     }
 
+    auto_compute_field_offsets(&mut group.fields);
+
     Ok(group)
+}
+
+/// Auto-computes field offsets for fields that did not specify an explicit offset.
+///
+/// In SBE, the `offset` attribute on `<field>` elements is optional. When absent
+/// the parser defaults the offset to 0, which is only correct for the first field.
+/// This function walks the field list and, for any non-first field whose offset is
+/// still 0, assigns it the byte position immediately after the previous field.
+fn auto_compute_field_offsets(fields: &mut [FieldDef]) {
+    let mut running_offset = 0usize;
+    for field in fields.iter_mut() {
+        if running_offset > 0 && field.offset == 0 {
+            field.offset = running_offset;
+        }
+        running_offset = field.offset + field.encoded_length;
+    }
 }
 
 /// Parses a data (variable-length) field definition.
@@ -895,5 +915,58 @@ mod tests {
         assert_eq!(msg.id, 1);
         assert_eq!(msg.block_length, 16);
         assert_eq!(msg.fields.len(), 2);
+    }
+
+    #[test]
+    fn test_group_field_offsets_auto_computed() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <type name="uint64" primitiveType="uint64"/>
+        <type name="uint32" primitiveType="uint32"/>
+    </types>
+    <sbe:message name="TestMsg" id="1" blockLength="0">
+        <group name="entries" id="100" dimensionType="groupSizeEncoding" blockLength="20">
+            <field name="orderId" id="1" type="uint64" offset="0"/>
+            <field name="instrumentId" id="2" type="uint32"/>
+            <field name="quantity" id="3" type="uint64"/>
+        </group>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse schema");
+        let group = &schema.messages[0].groups[0];
+        assert_eq!(group.fields[0].name, "orderId");
+        assert_eq!(group.fields[0].offset, 0);
+        assert_eq!(group.fields[1].name, "instrumentId");
+        assert_eq!(group.fields[1].offset, 8);
+        assert_eq!(group.fields[2].name, "quantity");
+        assert_eq!(group.fields[2].offset, 12);
+    }
+
+    #[test]
+    fn test_group_field_offsets_explicit_preserved() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>
+        <type name="uint64" primitiveType="uint64"/>
+        <type name="uint32" primitiveType="uint32"/>
+    </types>
+    <sbe:message name="TestMsg" id="1" blockLength="0">
+        <group name="entries" id="100" dimensionType="groupSizeEncoding" blockLength="24">
+            <field name="orderId" id="1" type="uint64" offset="0"/>
+            <field name="instrumentId" id="2" type="uint32" offset="8"/>
+            <field name="quantity" id="3" type="uint64" offset="16"/>
+        </group>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
+        let schema = parse_schema(xml).expect("Failed to parse schema");
+        let group = &schema.messages[0].groups[0];
+        assert_eq!(group.fields[0].offset, 0);
+        assert_eq!(group.fields[1].offset, 8);
+        assert_eq!(group.fields[2].offset, 16);
     }
 }
