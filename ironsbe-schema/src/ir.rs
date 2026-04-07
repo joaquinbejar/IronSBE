@@ -604,6 +604,9 @@ mod tests {
         // Leading uppercase with underscore
         assert_eq!(to_snake_case("AB_C"), "ab_c");
         assert_eq!(to_snake_case("ABC"), "abc");
+        // Issue #7: set choice names with underscores
+        assert_eq!(to_snake_case("REDUCE_ONLY"), "reduce_only");
+        assert_eq!(to_snake_case("DISABLE_SELF_TRADE"), "disable_self_trade");
     }
 
     #[test]
