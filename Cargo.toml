@@ -29,7 +29,7 @@ categories = ["finance", "encoding", "network-programming"]
 ironsbe = { path = "ironsbe", version = "0.2.1" }
 ironsbe-core = { path = "ironsbe-core", version = "0.2.1" }
 ironsbe-schema = { path = "ironsbe-schema", version = "0.2.1" }
-ironsbe-codegen = { path = "ironsbe-codegen", version = "0.2.1" }
+ironsbe-codegen = { path = "ironsbe-codegen", version = "0.2.2" }
 ironsbe-derive = { path = "ironsbe-derive", version = "0.2.1" }
 ironsbe-channel = { path = "ironsbe-channel", version = "0.2.1" }
 ironsbe-transport = { path = "ironsbe-transport", version = "0.2.1" }
