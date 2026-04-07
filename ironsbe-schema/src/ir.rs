@@ -465,26 +465,59 @@ pub struct ResolvedVarData {
 }
 
 /// Converts a string to snake_case.
-/// Treats `-` as a word separator and normalizes to `_`.
 #[must_use]
 pub fn to_snake_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);
-    let mut last_was_separator = false;
-    for (i, c) in s.chars().enumerate() {
-        if c == '-' {
-            if !last_was_separator {
-                result.push('_');
-            }
-            last_was_separator = true;
-        } else if c.is_uppercase() && i > 0 && !last_was_separator {
-            result.push('_');
-            result.push(c.to_ascii_lowercase());
-            last_was_separator = false;
-        } else {
-            result.push(c.to_ascii_lowercase());
-            last_was_separator = false;
+    let mut prev_lower = false;
+    let mut start = 0;
+    let mut first = true;
+
+    for segment in s.split(|c: char| !c.is_alphanumeric()) {
+        if segment.is_empty() {
+            continue;
         }
+        let chars: Vec<char> = segment.chars().collect();
+        let len = chars.len();
+
+        for i in 0..len {
+            let c = chars[i];
+            let is_lower = c.is_lowercase();
+            let is_upper = c.is_uppercase();
+
+            if i > 0 {
+                let prev = chars[i - 1];
+                let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+
+                // Word boundary: lowercase->uppercase OR acronym end (XXXy -> XXX_Y)
+                let boundary = (prev_lower && is_upper)
+                    || (prev.is_uppercase() && is_upper && next_is_lower);
+
+                if boundary {
+                    if !first {
+                        result.push('_');
+                    }
+                    for wc in &chars[start..i] {
+                        result.push(wc.to_ascii_lowercase());
+                    }
+                    start = i;
+                    first = false;
+                }
+            }
+
+            prev_lower = is_lower;
+        }
+
+        // Output remaining chars
+        if !first {
+            result.push('_');
+        }
+        for wc in &chars[start..] {
+            result.push(wc.to_ascii_lowercase());
+        }
+        first = false;
+        start = 0;
     }
+
     result
 }
 
@@ -541,10 +574,18 @@ mod tests {
     fn test_to_snake_case() {
         assert_eq!(to_snake_case("clOrdId"), "cl_ord_id");
         assert_eq!(to_snake_case("symbol"), "symbol");
-        assert_eq!(to_snake_case("MDEntryPx"), "m_d_entry_px");
+        assert_eq!(to_snake_case("MDEntryPx"), "md_entry_px");
         assert_eq!(to_snake_case("some-hyphenated"), "some_hyphenated");
         // Hyphen followed by uppercase should not produce double underscore
         assert_eq!(to_snake_case("some-Hyphen"), "some_hyphen");
+        // Underscores are treated as word separators
+        assert_eq!(to_snake_case("some_underscore"), "some_underscore");
+        assert_eq!(to_snake_case("some-mixed_separator"), "some_mixed_separator");
+        assert_eq!(to_snake_case("some__double_underscore"), "some_double_underscore");
+        assert_eq!(to_snake_case("some--double-hyphen"), "some_double_hyphen");
+        // Leading uppercase with underscore
+        assert_eq!(to_snake_case("AB_C"), "ab_c");
+        assert_eq!(to_snake_case("ABC"), "abc");
     }
 
     #[test]
