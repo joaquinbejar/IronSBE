@@ -5,7 +5,9 @@ use crate::reconnect::{ReconnectConfig, ReconnectState};
 use crate::session::ClientSession;
 use ironsbe_channel::spsc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 
 /// Builder for configuring and creating a client.
 pub struct ClientBuilder {
@@ -68,15 +70,25 @@ impl ClientBuilder {
         let (cmd_tx, cmd_rx) = spsc::channel(self.channel_capacity);
         let (event_tx, event_rx) = spsc::channel(self.channel_capacity);
 
+        let cmd_notify = Arc::new(Notify::new());
+        let event_notify = Arc::new(Notify::new());
+
         let client = Client {
             server_addr: self.server_addr,
             connect_timeout: self.connect_timeout,
             reconnect_state: ReconnectState::new(self.reconnect_config),
             cmd_rx,
             event_tx,
+            cmd_notify: Arc::clone(&cmd_notify),
+            event_notify: Arc::clone(&event_notify),
         };
 
-        let handle = ClientHandle { cmd_tx, event_rx };
+        let handle = ClientHandle {
+            cmd_tx,
+            event_rx,
+            cmd_notify,
+            event_notify,
+        };
 
         (client, handle)
     }
@@ -89,6 +101,8 @@ pub struct Client {
     reconnect_state: ReconnectState,
     cmd_rx: spsc::SpscReceiver<ClientCommand>,
     event_tx: spsc::SpscSender<ClientEvent>,
+    cmd_notify: Arc<Notify>,
+    event_notify: Arc<Notify>,
 }
 
 impl Client {
@@ -108,6 +122,7 @@ impl Client {
 
                     if let Some(delay) = self.reconnect_state.on_failure() {
                         let _ = self.event_tx.send(ClientEvent::Disconnected);
+                        self.event_notify.notify_one();
                         tracing::info!("Reconnecting in {:?}...", delay);
                         tokio::time::sleep(delay).await;
                     } else {
@@ -132,23 +147,23 @@ impl Client {
         self.reconnect_state.on_success();
 
         let _ = self.event_tx.send(ClientEvent::Connected);
+        self.event_notify.notify_one();
         tracing::info!("Connected to {}", self.server_addr);
 
         let mut session = ClientSession::new(stream);
 
         loop {
             tokio::select! {
-                cmd = async { self.cmd_rx.recv() } => {
-                    match cmd {
-                        Some(ClientCommand::Send(msg)) => {
-                            session.send(&msg).await?;
-                        }
-                        Some(ClientCommand::Disconnect) => {
-                            return Ok(());
-                        }
-                        None => {
-                            // Channel closed, check again
-                            tokio::task::yield_now().await;
+                _ = self.cmd_notify.notified() => {
+                    // Drain all available commands after notification.
+                    while let Some(cmd) = self.cmd_rx.recv() {
+                        match cmd {
+                            ClientCommand::Send(msg) => {
+                                session.send(&msg).await?;
+                            }
+                            ClientCommand::Disconnect => {
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -157,6 +172,7 @@ impl Client {
                     match result {
                         Ok(Some(msg)) => {
                             let _ = self.event_tx.send(ClientEvent::Message(msg.to_vec()));
+                            self.event_notify.notify_one();
                         }
                         Ok(None) => {
                             return Err(ClientError::ConnectionClosed);
@@ -175,6 +191,8 @@ impl Client {
 pub struct ClientHandle {
     cmd_tx: spsc::SpscSender<ClientCommand>,
     event_rx: spsc::SpscReceiver<ClientEvent>,
+    cmd_notify: Arc<Notify>,
+    event_notify: Arc<Notify>,
 }
 
 impl ClientHandle {
@@ -186,12 +204,15 @@ impl ClientHandle {
     pub fn send(&mut self, message: Vec<u8>) -> Result<(), ClientError> {
         self.cmd_tx
             .send(ClientCommand::Send(message))
-            .map_err(|_| ClientError::Channel)
+            .map_err(|_| ClientError::Channel)?;
+        self.cmd_notify.notify_one();
+        Ok(())
     }
 
     /// Disconnects from the server.
     pub fn disconnect(&mut self) {
         let _ = self.cmd_tx.send(ClientCommand::Disconnect);
+        self.cmd_notify.notify_one();
     }
 
     /// Polls for events (non-blocking).
@@ -209,6 +230,32 @@ impl ClientHandle {
     /// Drains all available events.
     pub fn drain(&mut self) -> impl Iterator<Item = ClientEvent> + '_ {
         self.event_rx.drain()
+    }
+
+    /// Asynchronously waits for the next event.
+    ///
+    /// Returns `Some(event)` when an event is available, or keeps waiting.
+    /// Returns `None` only if the sender (client) has been dropped.
+    pub async fn wait_event(&mut self) -> Option<ClientEvent> {
+        loop {
+            if let Some(event) = self.event_rx.recv() {
+                return Some(event);
+            }
+            if !self.event_rx.is_connected() {
+                return None;
+            }
+            self.event_notify.notified().await;
+        }
+    }
+
+    /// Returns a clone of the event notification handle.
+    ///
+    /// Use this to await event availability when holding the handle behind
+    /// a `Mutex` — await the notifier *outside* the lock, then lock and
+    /// drain with \[`poll`\].
+    #[must_use]
+    pub fn event_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.event_notify)
     }
 }
 
