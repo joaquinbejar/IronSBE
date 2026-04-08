@@ -252,7 +252,7 @@ impl ClientHandle {
     ///
     /// Use this to await event availability when holding the handle behind
     /// a `Mutex` — await the notifier *outside* the lock, then lock and
-    /// drain with [`poll`].
+    /// drain with \[`poll`\].
     #[must_use]
     pub fn event_notifier(&self) -> Arc<Notify> {
         Arc::clone(&self.event_notify)
