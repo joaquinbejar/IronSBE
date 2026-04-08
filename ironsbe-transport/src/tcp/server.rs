@@ -1,6 +1,7 @@
 //! TCP server implementation.
 
 use super::framing::SbeFrameCodec;
+use crate::traits;
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -86,7 +87,7 @@ impl TcpServer {
     ///
     /// # Errors
     /// Returns IO error if accept fails.
-    pub async fn accept(&self) -> std::io::Result<TcpConnection> {
+    pub async fn accept(&mut self) -> std::io::Result<TcpConnection> {
         let (stream, addr) = self.listener.accept().await?;
         stream.set_nodelay(self.config.tcp_nodelay)?;
 
@@ -109,6 +110,12 @@ pub struct TcpConnection {
 }
 
 impl TcpConnection {
+    /// Creates a `TcpConnection` from an already-framed stream.
+    #[must_use]
+    pub fn from_framed(framed: Framed<TcpStream, SbeFrameCodec>, peer_addr: SocketAddr) -> Self {
+        Self { framed, peer_addr }
+    }
+
     /// Returns the peer address.
     #[must_use]
     pub fn peer_addr(&self) -> SocketAddr {
@@ -129,14 +136,50 @@ impl TcpConnection {
     /// Receives a message from the client.
     ///
     /// # Returns
-    /// `Some(Ok(bytes))` if a message was received, `None` if connection closed.
-    pub async fn recv(&mut self) -> Option<std::io::Result<BytesMut>> {
-        self.framed.next().await
+    /// `Ok(Some(bytes))` if a message was received, `Ok(None)` if connection
+    /// closed.
+    ///
+    /// # Errors
+    /// Returns IO error if receive fails.
+    pub async fn recv(&mut self) -> std::io::Result<Option<BytesMut>> {
+        match self.framed.next().await {
+            Some(result) => result.map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Closes the connection.
     pub async fn close(mut self) -> std::io::Result<()> {
         SinkExt::<&[u8]>::close(&mut self.framed).await
+    }
+}
+
+impl traits::Listener for TcpServer {
+    type Connection = TcpConnection;
+    type Error = std::io::Error;
+
+    async fn accept(&mut self) -> Result<TcpConnection, std::io::Error> {
+        TcpServer::accept(self).await
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        TcpServer::local_addr(self)
+    }
+}
+
+impl traits::Connection for TcpConnection {
+    type Error = std::io::Error;
+
+    async fn recv(&mut self) -> Result<Option<BytesMut>, std::io::Error> {
+        TcpConnection::recv(self).await
+    }
+
+    async fn send<'a>(&'a mut self, msg: &'a [u8]) -> Result<(), std::io::Error> {
+        TcpConnection::send(self, msg).await
+    }
+
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        Ok(self.peer_addr)
     }
 }
 

@@ -10,13 +10,17 @@ homepage.workspace = true
 keywords = ["transport", "tcp", "udp", "multicast", "ipc"]
 categories = ["network-programming", "asynchronous"]
 
+[features]
+default = ["tcp-tokio"]
+tcp-tokio = ["dep:tokio-util", "dep:futures"]
+
 [dependencies]
 ironsbe-core = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
-futures = { workspace = true }
+tokio-util = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
 lru = { workspace = true }

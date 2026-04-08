@@ -2,6 +2,7 @@
 
 use super::framing::SbeFrameCodec;
 use crate::error::TransportError;
+use crate::traits;
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -140,6 +141,22 @@ impl TcpClient {
         SinkExt::<&[u8]>::close(&mut self.framed)
             .await
             .map_err(TransportError::Io)
+    }
+}
+
+impl traits::Connection for TcpClient {
+    type Error = TransportError;
+
+    async fn recv(&mut self) -> Result<Option<BytesMut>, TransportError> {
+        TcpClient::recv(self).await
+    }
+
+    async fn send<'a>(&'a mut self, msg: &'a [u8]) -> Result<(), TransportError> {
+        TcpClient::send(self, msg).await
+    }
+
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        Ok(self.peer_addr)
     }
 }
 

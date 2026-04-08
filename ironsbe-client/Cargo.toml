@@ -10,6 +10,10 @@ homepage.workspace = true
 keywords = ["client", "sbe", "messaging", "low-latency"]
 categories = ["network-programming", "asynchronous"]
 
+[features]
+default = ["tcp-tokio"]
+tcp-tokio = ["ironsbe-transport/tcp-tokio"]
+
 [dependencies]
 ironsbe-core = { workspace = true }
 ironsbe-channel = { workspace = true }

@@ -4,20 +4,28 @@ use crate::error::ClientError;
 use crate::reconnect::{ReconnectConfig, ReconnectState};
 use crate::session::ClientSession;
 use ironsbe_channel::spsc;
+use ironsbe_transport::traits::Transport;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 
 /// Builder for configuring and creating a client.
-pub struct ClientBuilder {
+///
+/// The type parameter `T` selects the transport backend.  When using the
+/// default feature set (`tcp-tokio`), `T` defaults to
+/// [`ironsbe_transport::DefaultTransport`] so existing call-sites compile
+/// without changes.
+pub struct ClientBuilder<T: Transport = ironsbe_transport::DefaultTransport> {
     server_addr: SocketAddr,
     connect_timeout: Duration,
     reconnect_config: ReconnectConfig,
     channel_capacity: usize,
+    _transport: PhantomData<T>,
 }
 
-impl ClientBuilder {
+impl<T: Transport> ClientBuilder<T> {
     /// Creates a new client builder for the specified server address.
     #[must_use]
     pub fn new(server_addr: SocketAddr) -> Self {
@@ -26,6 +34,7 @@ impl ClientBuilder {
             connect_timeout: Duration::from_secs(5),
             reconnect_config: ReconnectConfig::default(),
             channel_capacity: 4096,
+            _transport: PhantomData,
         }
     }
 
@@ -66,7 +75,7 @@ impl ClientBuilder {
 
     /// Builds the client and handle.
     #[must_use]
-    pub fn build(self) -> (Client, ClientHandle) {
+    pub fn build(self) -> (Client<T>, ClientHandle) {
         let (cmd_tx, cmd_rx) = spsc::channel(self.channel_capacity);
         let (event_tx, event_rx) = spsc::channel(self.channel_capacity);
 
@@ -81,6 +90,7 @@ impl ClientBuilder {
             event_tx,
             cmd_notify: Arc::clone(&cmd_notify),
             event_notify: Arc::clone(&event_notify),
+            _transport: PhantomData,
         };
 
         let handle = ClientHandle {
@@ -94,8 +104,24 @@ impl ClientBuilder {
     }
 }
 
+#[cfg(feature = "tcp-tokio")]
+impl ClientBuilder {
+    /// Creates a new client builder using the default transport backend.
+    ///
+    /// This is a convenience constructor that resolves the transport type
+    /// parameter to [`ironsbe_transport::DefaultTransport`], keeping existing
+    /// call-sites like `ClientBuilder::with_default_transport(addr).build()`
+    /// working without turbofish syntax.
+    #[must_use]
+    pub fn with_default_transport(server_addr: SocketAddr) -> Self {
+        Self::new(server_addr)
+    }
+}
+
 /// The main client instance.
-pub struct Client {
+///
+/// Generic over transport backend `T`.
+pub struct Client<T: Transport = ironsbe_transport::DefaultTransport> {
     server_addr: SocketAddr,
     connect_timeout: Duration,
     reconnect_state: ReconnectState,
@@ -103,9 +129,10 @@ pub struct Client {
     event_tx: spsc::SpscSender<ClientEvent>,
     cmd_notify: Arc<Notify>,
     event_notify: Arc<Notify>,
+    _transport: PhantomData<T>,
 }
 
-impl Client {
+impl<T: Transport> Client<T> {
     /// Runs the client, connecting to the server and processing messages.
     ///
     /// # Errors
@@ -135,22 +162,18 @@ impl Client {
     }
 
     async fn connect_and_run(&mut self) -> Result<(), ClientError> {
-        let stream = tokio::time::timeout(
-            self.connect_timeout,
-            tokio::net::TcpStream::connect(self.server_addr),
-        )
-        .await
-        .map_err(|_| ClientError::ConnectTimeout)?
-        .map_err(ClientError::Io)?;
+        let conn = tokio::time::timeout(self.connect_timeout, T::connect(self.server_addr))
+            .await
+            .map_err(|_| ClientError::ConnectTimeout)?
+            .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
 
-        stream.set_nodelay(true)?;
         self.reconnect_state.on_success();
 
         let _ = self.event_tx.send(ClientEvent::Connected);
         self.event_notify.notify_one();
         tracing::info!("Connected to {}", self.server_addr);
 
-        let mut session = ClientSession::new(stream);
+        let mut session = ClientSession::new(conn);
 
         loop {
             tokio::select! {
@@ -286,52 +309,54 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    type DefaultClientBuilder = ClientBuilder<ironsbe_transport::DefaultTransport>;
+
     #[test]
     fn test_client_builder_new() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let builder = ClientBuilder::new(addr);
+        let builder = DefaultClientBuilder::new(addr);
         let _ = builder;
     }
 
     #[test]
     fn test_client_builder_connect_timeout() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let builder = ClientBuilder::new(addr).connect_timeout(Duration::from_secs(10));
+        let builder = DefaultClientBuilder::new(addr).connect_timeout(Duration::from_secs(10));
         let _ = builder;
     }
 
     #[test]
     fn test_client_builder_reconnect() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let builder = ClientBuilder::new(addr).reconnect(true);
+        let builder = DefaultClientBuilder::new(addr).reconnect(true);
         let _ = builder;
     }
 
     #[test]
     fn test_client_builder_reconnect_delay() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let builder = ClientBuilder::new(addr).reconnect_delay(Duration::from_millis(500));
+        let builder = DefaultClientBuilder::new(addr).reconnect_delay(Duration::from_millis(500));
         let _ = builder;
     }
 
     #[test]
     fn test_client_builder_max_reconnect_attempts() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let builder = ClientBuilder::new(addr).max_reconnect_attempts(5);
+        let builder = DefaultClientBuilder::new(addr).max_reconnect_attempts(5);
         let _ = builder;
     }
 
     #[test]
     fn test_client_builder_channel_capacity() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let builder = ClientBuilder::new(addr).channel_capacity(8192);
+        let builder = DefaultClientBuilder::new(addr).channel_capacity(8192);
         let _ = builder;
     }
 
     #[test]
     fn test_client_builder_build() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let (_client, _handle) = ClientBuilder::new(addr).build();
+        let (_client, _handle) = DefaultClientBuilder::new(addr).build();
     }
 
     #[test]
@@ -366,14 +391,14 @@ mod tests {
     #[test]
     fn test_client_handle_disconnect() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let (_client, mut handle) = ClientBuilder::new(addr).build();
+        let (_client, mut handle) = DefaultClientBuilder::new(addr).build();
         handle.disconnect();
     }
 
     #[test]
     fn test_client_handle_poll() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let (_client, mut handle) = ClientBuilder::new(addr).build();
+        let (_client, mut handle) = DefaultClientBuilder::new(addr).build();
         assert!(handle.poll().is_none());
     }
 }

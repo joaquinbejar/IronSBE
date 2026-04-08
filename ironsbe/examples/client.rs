@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Connecting to IronSBE server at {}", addr);
 
-    let (mut client, mut handle) = ClientBuilder::new(addr)
+    let (mut client, mut handle) = ClientBuilder::with_default_transport(addr)
         .connect_timeout(Duration::from_secs(5))
         .max_reconnect_attempts(3)
         .build();

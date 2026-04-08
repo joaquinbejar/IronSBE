@@ -3,27 +3,29 @@
 use crate::error::ServerError;
 use crate::handler::{MessageHandler, Responder, SendError};
 use crate::session::SessionManager;
-use bytes::BytesMut;
-use futures::SinkExt;
 use ironsbe_channel::mpsc::{MpscChannel, MpscReceiver, MpscSender};
 use ironsbe_core::header::MessageHeader;
+use ironsbe_transport::traits::{Connection, Listener, Transport};
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc as tokio_mpsc};
-use tokio_stream::StreamExt;
-use tokio_util::codec::{Decoder, Encoder, Framed};
 
 /// Builder for configuring and creating a server.
-pub struct ServerBuilder<H> {
+///
+/// The type parameter `T` selects the transport backend.  When using the
+/// default feature set (`tcp-tokio`), `T` defaults to
+/// [`ironsbe_transport::DefaultTransport`] so existing call-sites compile
+/// without changes.
+pub struct ServerBuilder<H, T: Transport = ironsbe_transport::DefaultTransport> {
     bind_addr: SocketAddr,
     handler: Option<H>,
     max_connections: usize,
-    max_frame_size: usize,
     channel_capacity: usize,
+    _transport: PhantomData<T>,
 }
 
-impl<H: MessageHandler> ServerBuilder<H> {
+impl<H: MessageHandler, T: Transport> ServerBuilder<H, T> {
     /// Creates a new server builder with default settings.
     #[must_use]
     pub fn new() -> Self {
@@ -31,8 +33,8 @@ impl<H: MessageHandler> ServerBuilder<H> {
             bind_addr: "0.0.0.0:9000".parse().unwrap(),
             handler: None,
             max_connections: 1000,
-            max_frame_size: 64 * 1024,
             channel_capacity: 4096,
+            _transport: PhantomData,
         }
     }
 
@@ -57,13 +59,6 @@ impl<H: MessageHandler> ServerBuilder<H> {
         self
     }
 
-    /// Sets the maximum frame size.
-    #[must_use]
-    pub fn max_frame_size(mut self, size: usize) -> Self {
-        self.max_frame_size = size;
-        self
-    }
-
     /// Sets the channel capacity.
     #[must_use]
     pub fn channel_capacity(mut self, capacity: usize) -> Self {
@@ -76,7 +71,7 @@ impl<H: MessageHandler> ServerBuilder<H> {
     /// # Panics
     /// Panics if no handler was set.
     #[must_use]
-    pub fn build(self) -> (Server<H>, ServerHandle) {
+    pub fn build(self) -> (Server<H, T>, ServerHandle) {
         let handler = self.handler.expect("Handler required");
         let (cmd_tx, cmd_rx) = MpscChannel::bounded(self.channel_capacity);
         let (event_tx, event_rx) = MpscChannel::bounded(self.channel_capacity);
@@ -87,11 +82,11 @@ impl<H: MessageHandler> ServerBuilder<H> {
             bind_addr: self.bind_addr,
             handler: Arc::new(handler),
             max_connections: self.max_connections,
-            max_frame_size: self.max_frame_size,
             cmd_rx,
             event_tx,
             sessions: SessionManager::new(),
             cmd_notify: Arc::clone(&cmd_notify),
+            _transport: PhantomData,
         };
 
         let handle = ServerHandle {
@@ -104,40 +99,68 @@ impl<H: MessageHandler> ServerBuilder<H> {
     }
 }
 
-impl<H: MessageHandler> Default for ServerBuilder<H> {
+impl<H: MessageHandler, T: Transport> Default for ServerBuilder<H, T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "tcp-tokio")]
+impl<H: MessageHandler> ServerBuilder<H> {
+    /// Creates a new server builder using the default transport backend.
+    ///
+    /// This is a convenience constructor that resolves the transport type
+    /// parameter to [`ironsbe_transport::DefaultTransport`], keeping existing
+    /// call-sites like `ServerBuilder::new().handler(h).build()` working
+    /// without turbofish syntax.
+    #[must_use]
+    pub fn with_default_transport() -> Self {
+        <Self as Default>::default()
+    }
+}
+
 /// The main server instance.
+///
+/// Generic over handler `H` and transport backend `T`.
 #[allow(dead_code)]
-pub struct Server<H> {
+pub struct Server<H, T: Transport = ironsbe_transport::DefaultTransport> {
     bind_addr: SocketAddr,
     handler: Arc<H>,
     max_connections: usize,
-    max_frame_size: usize,
     cmd_rx: MpscReceiver<ServerCommand>,
     event_tx: MpscSender<ServerEvent>,
     sessions: SessionManager,
     cmd_notify: Arc<Notify>,
+    _transport: PhantomData<T>,
 }
 
-impl<H: MessageHandler + Send + Sync + 'static> Server<H> {
+impl<H, T> Server<H, T>
+where
+    H: MessageHandler + Send + Sync + 'static,
+    T: Transport,
+    T::Connection: Send + 'static,
+{
     /// Runs the server, accepting connections and processing messages.
+    ///
+    /// Uses the selected [`Transport`] backend to bind and accept connections.
     ///
     /// # Errors
     /// Returns `ServerError` if the server fails to start or encounters an error.
     pub async fn run(&mut self) -> Result<(), ServerError> {
-        let listener = tokio::net::TcpListener::bind(self.bind_addr).await?;
+        let mut listener = T::bind(self.bind_addr)
+            .await
+            .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
         tracing::info!("Server listening on {}", self.bind_addr);
 
         loop {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
-                        Ok((stream, addr)) => {
-                            self.handle_connection(stream, addr).await;
+                        Ok(conn) => {
+                            let addr = conn.peer_addr().unwrap_or_else(
+                                |_| "0.0.0.0:0".parse().unwrap()
+                            );
+                            self.handle_connection(conn, addr).await;
                         }
                         Err(e) => {
                             tracing::error!("Accept error: {}", e);
@@ -156,7 +179,7 @@ impl<H: MessageHandler + Send + Sync + 'static> Server<H> {
         }
     }
 
-    async fn handle_connection(&mut self, stream: TcpStream, addr: SocketAddr) {
+    async fn handle_connection(&mut self, conn: T::Connection, addr: SocketAddr) {
         if self.sessions.count() >= self.max_connections {
             tracing::warn!("Max connections reached, rejecting {}", addr);
             return;
@@ -165,7 +188,6 @@ impl<H: MessageHandler + Send + Sync + 'static> Server<H> {
         let session_id = self.sessions.create_session(addr);
         let handler = Arc::clone(&self.handler);
         let event_tx = self.event_tx.clone();
-        let max_frame_size = self.max_frame_size;
 
         handler.on_session_start(session_id);
         let _ = event_tx.try_send(ServerEvent::SessionCreated(session_id, addr));
@@ -174,9 +196,7 @@ impl<H: MessageHandler + Send + Sync + 'static> Server<H> {
         tokio::spawn(async move {
             tracing::info!("Session {} connected from {}", session_id, addr);
 
-            if let Err(e) =
-                handle_session(session_id, stream, handler.as_ref(), max_frame_size).await
-            {
+            if let Err(e) = handle_session(session_id, conn, handler.as_ref()).await {
                 tracing::error!("Session {} error: {:?}", session_id, e);
             }
 
@@ -260,58 +280,6 @@ pub enum ServerEvent {
     Error(String),
 }
 
-/// Length-prefixed frame codec for SBE messages.
-struct SbeFrameCodec {
-    max_frame_size: usize,
-}
-
-impl SbeFrameCodec {
-    fn new(max_frame_size: usize) -> Self {
-        Self { max_frame_size }
-    }
-}
-
-impl Decoder for SbeFrameCodec {
-    type Item = BytesMut;
-    type Error = std::io::Error;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < 4 {
-            return Ok(None);
-        }
-
-        let length = u32::from_le_bytes([src[0], src[1], src[2], src[3]]) as usize;
-
-        if length > self.max_frame_size {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Frame too large: {} > {}", length, self.max_frame_size),
-            ));
-        }
-
-        if src.len() < 4 + length {
-            src.reserve(4 + length - src.len());
-            return Ok(None);
-        }
-
-        let _ = src.split_to(4);
-        Ok(Some(src.split_to(length)))
-    }
-}
-
-impl<T: AsRef<[u8]>> Encoder<T> for SbeFrameCodec {
-    type Error = std::io::Error;
-
-    fn encode(&mut self, item: T, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let data = item.as_ref();
-        let length = data.len() as u32;
-        dst.reserve(4 + data.len());
-        dst.extend_from_slice(&length.to_le_bytes());
-        dst.extend_from_slice(data);
-        Ok(())
-    }
-}
-
 /// Session responder that sends messages back to the client.
 struct SessionResponder {
     tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
@@ -330,16 +298,16 @@ impl Responder for SessionResponder {
     }
 }
 
-/// Handles a single client session.
-async fn handle_session<H: MessageHandler>(
+/// Handles a single client session over a transport [`Connection`].
+async fn handle_session<H, C>(
     session_id: u64,
-    stream: TcpStream,
+    mut conn: C,
     handler: &H,
-    max_frame_size: usize,
-) -> Result<(), std::io::Error> {
-    let codec = SbeFrameCodec::new(max_frame_size);
-    let mut framed = Framed::new(stream, codec);
-
+) -> Result<(), std::io::Error>
+where
+    H: MessageHandler,
+    C: Connection,
+{
     // Channel for sending responses
     let (tx, mut rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
     let responder = SessionResponder { tx };
@@ -347,9 +315,9 @@ async fn handle_session<H: MessageHandler>(
     loop {
         tokio::select! {
             // Read incoming messages
-            result = framed.next() => {
+            result = conn.recv() => {
                 match result {
-                    Some(Ok(data)) => {
+                    Ok(Some(data)) => {
                         // Decode header and dispatch to handler
                         if data.len() >= MessageHeader::ENCODED_LENGTH {
                             let header = MessageHeader::wrap(data.as_ref(), 0);
@@ -358,22 +326,22 @@ async fn handle_session<H: MessageHandler>(
                             handler.on_error(session_id, "Message too short for header");
                         }
                     }
-                    Some(Err(e)) => {
-                        tracing::error!("Session {} read error: {}", session_id, e);
-                        return Err(e);
-                    }
-                    None => {
+                    Ok(None) => {
                         tracing::info!("Session {} disconnected", session_id);
                         return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::error!("Session {} read error: {}", session_id, e);
+                        return Err(std::io::Error::other(e.to_string()));
                     }
                 }
             }
 
             // Send outgoing messages
             Some(msg) = rx.recv() => {
-                if let Err(e) = framed.send(msg).await {
+                if let Err(e) = conn.send(&msg).await {
                     tracing::error!("Session {} write error: {}", session_id, e);
-                    return Err(e);
+                    return Err(std::io::Error::other(e.to_string()));
                 }
             }
         }
@@ -383,6 +351,8 @@ async fn handle_session<H: MessageHandler>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type DefaultBuilder<H> = ServerBuilder<H, ironsbe_transport::DefaultTransport>;
 
     struct TestHandler;
 
@@ -399,50 +369,46 @@ mod tests {
 
     #[test]
     fn test_server_builder_new() {
-        let builder = ServerBuilder::<TestHandler>::new();
+        let builder = DefaultBuilder::<TestHandler>::new();
         let _ = builder;
     }
 
     #[test]
     fn test_server_builder_default() {
-        let builder = ServerBuilder::<TestHandler>::default();
+        let builder = DefaultBuilder::<TestHandler>::default();
         let _ = builder;
     }
 
     #[test]
     fn test_server_builder_bind() {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let builder = ServerBuilder::<TestHandler>::new().bind(addr);
+        let builder = DefaultBuilder::<TestHandler>::new().bind(addr);
         let _ = builder;
     }
 
     #[test]
     fn test_server_builder_handler() {
-        let builder = ServerBuilder::new().handler(TestHandler);
+        let builder = DefaultBuilder::<TestHandler>::new().handler(TestHandler);
         let _ = builder;
     }
 
     #[test]
     fn test_server_builder_max_connections() {
-        let builder = ServerBuilder::<TestHandler>::new().max_connections(500);
-        let _ = builder;
-    }
-
-    #[test]
-    fn test_server_builder_max_frame_size() {
-        let builder = ServerBuilder::<TestHandler>::new().max_frame_size(128 * 1024);
+        let builder = DefaultBuilder::<TestHandler>::new().max_connections(500);
         let _ = builder;
     }
 
     #[test]
     fn test_server_builder_channel_capacity() {
-        let builder = ServerBuilder::<TestHandler>::new().channel_capacity(8192);
+        let builder = DefaultBuilder::<TestHandler>::new().channel_capacity(8192);
         let _ = builder;
     }
 
     #[test]
     fn test_server_builder_build() {
-        let (_server, _handle) = ServerBuilder::new().handler(TestHandler).build();
+        let (_server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
     }
 
     #[test]
@@ -481,64 +447,25 @@ mod tests {
 
     #[test]
     fn test_server_handle_shutdown() {
-        let (_server, handle) = ServerBuilder::new().handler(TestHandler).build();
+        let (_server, handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
         handle.shutdown();
     }
 
     #[test]
     fn test_server_handle_close_session() {
-        let (_server, handle) = ServerBuilder::new().handler(TestHandler).build();
+        let (_server, handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
         handle.close_session(1);
     }
 
     #[test]
     fn test_server_handle_broadcast() {
-        let (_server, handle) = ServerBuilder::new().handler(TestHandler).build();
+        let (_server, handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
         handle.broadcast(vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn test_sbe_frame_codec_new() {
-        let codec = SbeFrameCodec::new(64 * 1024);
-        assert_eq!(codec.max_frame_size, 64 * 1024);
-    }
-
-    #[test]
-    fn test_sbe_frame_codec_decode_incomplete() {
-        let mut codec = SbeFrameCodec::new(1024);
-        let mut buf = BytesMut::from(&[0u8, 0, 0][..]);
-        assert!(codec.decode(&mut buf).unwrap().is_none());
-    }
-
-    #[test]
-    fn test_sbe_frame_codec_decode_complete() {
-        let mut codec = SbeFrameCodec::new(1024);
-        let mut buf = BytesMut::new();
-        buf.extend_from_slice(&5u32.to_le_bytes());
-        buf.extend_from_slice(b"hello");
-
-        let result = codec.decode(&mut buf).unwrap();
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().as_ref(), b"hello");
-    }
-
-    #[test]
-    fn test_sbe_frame_codec_decode_too_large() {
-        let mut codec = SbeFrameCodec::new(10);
-        let mut buf = BytesMut::new();
-        buf.extend_from_slice(&100u32.to_le_bytes());
-
-        let result = codec.decode(&mut buf);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_sbe_frame_codec_encode() {
-        let mut codec = SbeFrameCodec::new(1024);
-        let mut buf = BytesMut::new();
-        codec.encode(b"hello", &mut buf).unwrap();
-
-        assert_eq!(&buf[0..4], &5u32.to_le_bytes());
-        assert_eq!(&buf[4..9], b"hello");
     }
 }
