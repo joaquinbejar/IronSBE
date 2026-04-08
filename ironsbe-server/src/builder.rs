@@ -10,7 +10,7 @@ use ironsbe_core::header::MessageHeader;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{Notify, mpsc as tokio_mpsc};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 
@@ -81,6 +81,8 @@ impl<H: MessageHandler> ServerBuilder<H> {
         let (cmd_tx, cmd_rx) = MpscChannel::bounded(self.channel_capacity);
         let (event_tx, event_rx) = MpscChannel::bounded(self.channel_capacity);
 
+        let cmd_notify = Arc::new(Notify::new());
+
         let server = Server {
             bind_addr: self.bind_addr,
             handler: Arc::new(handler),
@@ -89,9 +91,14 @@ impl<H: MessageHandler> ServerBuilder<H> {
             cmd_rx,
             event_tx,
             sessions: SessionManager::new(),
+            cmd_notify: Arc::clone(&cmd_notify),
         };
 
-        let handle = ServerHandle { cmd_tx, event_rx };
+        let handle = ServerHandle {
+            cmd_tx,
+            event_rx,
+            cmd_notify,
+        };
 
         (server, handle)
     }
@@ -113,6 +120,7 @@ pub struct Server<H> {
     cmd_rx: MpscReceiver<ServerCommand>,
     event_tx: MpscSender<ServerEvent>,
     sessions: SessionManager,
+    cmd_notify: Arc<Notify>,
 }
 
 impl<H: MessageHandler + Send + Sync + 'static> Server<H> {
@@ -137,9 +145,11 @@ impl<H: MessageHandler + Send + Sync + 'static> Server<H> {
                     }
                 }
 
-                cmd = async { self.cmd_rx.try_recv() } => {
-                    if let Some(cmd) = cmd && self.handle_command(cmd).await {
-                        return Ok(());
+                _ = self.cmd_notify.notified() => {
+                    while let Some(cmd) = self.cmd_rx.try_recv() {
+                        if self.handle_command(cmd).await {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -198,12 +208,14 @@ impl<H: MessageHandler + Send + Sync + 'static> Server<H> {
 pub struct ServerHandle {
     cmd_tx: MpscSender<ServerCommand>,
     event_rx: MpscReceiver<ServerEvent>,
+    cmd_notify: Arc<Notify>,
 }
 
 impl ServerHandle {
     /// Requests server shutdown.
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.try_send(ServerCommand::Shutdown);
+        self.cmd_notify.notify_one();
     }
 
     /// Closes a specific session.
@@ -211,11 +223,13 @@ impl ServerHandle {
         let _ = self
             .cmd_tx
             .try_send(ServerCommand::CloseSession(session_id));
+        self.cmd_notify.notify_one();
     }
 
     /// Broadcasts a message to all sessions.
     pub fn broadcast(&self, message: Vec<u8>) {
         let _ = self.cmd_tx.try_send(ServerCommand::Broadcast(message));
+        self.cmd_notify.notify_one();
     }
 
     /// Polls for server events.
