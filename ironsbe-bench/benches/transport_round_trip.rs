@@ -143,7 +143,6 @@ mod uring {
 
     pub(super) enum UringCommand {
         Send(Vec<u8>),
-        Shutdown,
     }
 
     pub(super) enum UringReply {
@@ -185,15 +184,10 @@ mod uring {
                         UringTcpTransport::connect_with(UringClientConfig::new(listen_addr))
                             .await
                             .expect("uring connect");
-                    while let Ok(cmd) = command_rx.recv() {
-                        match cmd {
-                            UringCommand::Send(payload) => {
-                                client.send(&payload).await.expect("uring send");
-                                let echo = client.recv().await.expect("uring recv").expect("frame");
-                                let _ = reply_tx.send(UringReply::Echo(echo.to_vec()));
-                            }
-                            UringCommand::Shutdown => break,
-                        }
+                    while let Ok(UringCommand::Send(payload)) = command_rx.recv() {
+                        client.send(&payload).await.expect("uring send");
+                        let echo = client.recv().await.expect("uring recv").expect("frame");
+                        let _ = reply_tx.send(UringReply::Echo(echo.to_vec()));
                     }
                 });
             });
