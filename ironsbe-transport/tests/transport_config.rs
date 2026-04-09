@@ -116,15 +116,19 @@ fn test_tcp_server_config_default_buffer_sizes() {
 /// Direct kernel-level check that `socket2::SockRef` actually applies
 /// `SO_RCVBUF` / `SO_SNDBUF` to a borrowed `tokio::net::TcpStream`.
 ///
-/// The kernel may double the requested value (Linux), so the assertion is
-/// `>=` rather than `==` to stay portable across Linux and macOS/BSD.
+/// The kernel may **clamp** the requested value down to a system-wide ceiling
+/// (`/proc/sys/net/core/{rmem,wmem}_max` on Linux — 208 KiB by default on
+/// stock Ubuntu CI runners) and may also **double** it internally before
+/// reporting via `getsockopt`.  We therefore request a small value (64 KiB)
+/// that fits comfortably under any reasonable ceiling and only assert
+/// `>= REQUESTED`, which works on both Linux and macOS/BSD.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_socket_buffer_sizes_are_observable_via_getsockopt() {
     use socket2::SockRef;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{TcpListener, TcpStream};
 
-    const REQUESTED: usize = 512 * 1024;
+    const REQUESTED: usize = 64 * 1024;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let listen_addr = listener.local_addr().expect("local_addr");
