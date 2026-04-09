@@ -25,10 +25,7 @@ impl<C: Connection> ClientSession<C> {
     /// # Errors
     /// Returns an error if send fails.
     pub async fn send(&mut self, message: &[u8]) -> std::io::Result<()> {
-        self.conn
-            .send(message)
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))
+        self.conn.send(message).await.map_err(std::io::Error::other)
     }
 
     /// Receives a message from the server.
@@ -39,9 +36,6 @@ impl<C: Connection> ClientSession<C> {
     /// # Errors
     /// Returns an error if receive fails.
     pub async fn recv(&mut self) -> std::io::Result<Option<BytesMut>> {
-        self.conn
-            .recv()
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))
+        self.conn.recv().await.map_err(std::io::Error::other)
     }
 }

@@ -12,11 +12,11 @@
 //!
 //! # Selecting a backend
 //!
-//! The default feature set enables `tcp-tokio`.  To use a different backend
-//! (once available), disable default features and enable the desired one:
+//! The default feature set enables `tcp-tokio`.  To select it explicitly,
+//! disable default features and enable the backend feature directly:
 //!
 //! ```toml
-//! ironsbe-transport = { version = "...", default-features = false, features = ["tcp-uring"] }
+//! ironsbe-transport = { version = "...", default-features = false, features = ["tcp-tokio"] }
 //! ```
 //!
 //! [`DefaultTransport`] is a type alias that resolves to the backend selected

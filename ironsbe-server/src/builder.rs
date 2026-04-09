@@ -149,7 +149,7 @@ where
     pub async fn run(&mut self) -> Result<(), ServerError> {
         let mut listener = T::bind(self.bind_addr)
             .await
-            .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
+            .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
         tracing::info!("Server listening on {}", self.bind_addr);
 
         loop {
@@ -332,7 +332,7 @@ where
                     }
                     Err(e) => {
                         tracing::error!("Session {} read error: {}", session_id, e);
-                        return Err(std::io::Error::other(e.to_string()));
+                        return Err(std::io::Error::other(e));
                     }
                 }
             }
@@ -341,7 +341,7 @@ where
             Some(msg) = rx.recv() => {
                 if let Err(e) = conn.send(&msg).await {
                     tracing::error!("Session {} write error: {}", session_id, e);
-                    return Err(std::io::Error::other(e.to_string()));
+                    return Err(std::io::Error::other(e));
                 }
             }
         }

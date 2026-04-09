@@ -165,7 +165,7 @@ impl<T: Transport> Client<T> {
         let conn = tokio::time::timeout(self.connect_timeout, T::connect(self.server_addr))
             .await
             .map_err(|_| ClientError::ConnectTimeout)?
-            .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
+            .map_err(|e| ClientError::Io(std::io::Error::other(e)))?;
 
         self.reconnect_state.on_success();
 
