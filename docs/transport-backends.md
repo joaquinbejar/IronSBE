@@ -82,7 +82,8 @@ let (server, _) = ServerBuilder::<MyHandler>::with_default_transport()
 Both `TcpServerConfig` and `TcpClientConfig` expose
 `recv_buffer_size: Option<usize>` / `send_buffer_size: Option<usize>` (default
 `Some(256 KiB)`).  When set, the values are applied to every accepted /
-connected socket via `setsockopt(SO_RCVBUF | SO_SNDBUF)` using the
+connected socket via separate `setsockopt(SO_RCVBUF)` /
+`setsockopt(SO_SNDBUF)` calls using the
 [`socket2`](https://crates.io/crates/socket2) crate.
 
 Caveats:

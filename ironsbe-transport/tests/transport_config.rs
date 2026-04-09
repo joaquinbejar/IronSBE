@@ -155,11 +155,13 @@ async fn test_socket_buffer_sizes_are_observable_via_getsockopt() {
     server_task.await.expect("server task");
 }
 
-/// End-to-end check via the `Transport` trait API: a server bound and a
-/// client connected with custom `recv_buffer_size` / `send_buffer_size` round-trip
-/// successfully.  The `apply_socket_buffer_sizes` call in `accept` /
-/// `connect_with` would have errored out before reaching the round-trip if
-/// the values were not actually applied to the underlying sockets.
+/// End-to-end smoke test via the `Transport` trait API: a server bound and a
+/// client connected with custom `recv_buffer_size` / `send_buffer_size` can
+/// still complete a round-trip successfully.  This verifies that setting
+/// these config fields does not cause bind/connect/IO errors through the
+/// transport API; it does not directly assert the observable socket option
+/// values — that is covered by
+/// [`test_socket_buffer_sizes_are_observable_via_getsockopt`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_round_trip_with_custom_buffer_sizes() {
     let bind_addr: SocketAddr = "127.0.0.1:0".parse().expect("valid addr");
