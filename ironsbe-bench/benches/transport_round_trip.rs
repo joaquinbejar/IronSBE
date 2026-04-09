@@ -128,12 +128,16 @@ mod uring {
     use super::*;
     use ironsbe_transport::tcp_uring::{UringClientConfig, UringServerConfig, UringTcpTransport};
     use ironsbe_transport::traits::{LocalConnection, LocalListener, LocalTransport};
+    use std::sync::Mutex;
     use std::sync::mpsc as std_mpsc;
 
     pub(super) struct UringFixture {
         pub(super) server_addr: SocketAddr,
         pub(super) command_tx: std_mpsc::SyncSender<UringCommand>,
-        pub(super) reply_rx: std_mpsc::Receiver<UringReply>,
+        // Receivers from std::mpsc are `!Sync`, so wrap in a Mutex to
+        // satisfy the `OnceLock` static-sharing bound.  The bench thread
+        // is the only consumer so contention is zero in practice.
+        pub(super) reply_rx: Mutex<std_mpsc::Receiver<UringReply>>,
         _runtime_thread: thread::JoinHandle<()>,
     }
 
@@ -156,6 +160,7 @@ mod uring {
 
             let runtime_thread = thread::spawn(move || {
                 tokio_uring::start(async move {
+                    // Bind the server side of the loop.
                     let mut listener =
                         UringTcpTransport::bind_with(UringServerConfig::new(bind_addr))
                             .await
@@ -163,7 +168,8 @@ mod uring {
                     let listen_addr = listener.local_addr().expect("local_addr");
                     let _ = addr_tx.send(listen_addr);
 
-                    // Spawn an echo task on the same local set.
+                    // Spawn an echo task on the same local set so the
+                    // bench client (also on this thread) has a peer.
                     tokio::task::spawn_local(async move {
                         let mut conn = listener.accept().await.expect("accept");
                         while let Ok(Some(msg)) = conn.recv().await {
@@ -173,17 +179,12 @@ mod uring {
                         }
                     });
 
-                    // Drive the bench client from the same local set.
-                    let server_addr = addr_rx.recv().expect("addr roundtrip not supported");
-                    let _ = server_addr;
-
-                    // Connect a single client and wait for command-driven
-                    // sends from the criterion thread via std::mpsc.
+                    // Connect the bench client and run the
+                    // command-driven send/recv loop until shutdown.
                     let mut client =
                         UringTcpTransport::connect_with(UringClientConfig::new(listen_addr))
                             .await
                             .expect("uring connect");
-
                     while let Ok(cmd) = command_rx.recv() {
                         match cmd {
                             UringCommand::Send(payload) => {
@@ -196,18 +197,13 @@ mod uring {
                     }
                 });
             });
-            // The std::mpsc above ferries the bind addr back to the test
-            // thread.  We re-receive it here from the same channel via a
-            // second tap so the FIXTURE struct can store it.
-            //
-            // (The reason for the slightly awkward dance is that
-            // tokio_uring::start consumes its argument and we cannot
-            // share async-only state across the runtime boundary.)
+            // The runtime thread sends the bound addr exactly once via
+            // `addr_tx`; we receive it here on the criterion thread.
             let server_addr = addr_rx.recv().expect("addr");
             UringFixture {
                 server_addr,
                 command_tx,
-                reply_rx,
+                reply_rx: Mutex::new(reply_rx),
                 _runtime_thread: runtime_thread,
             }
         })
@@ -230,7 +226,12 @@ fn bench_tcp_uring_round_trip(c: &mut Criterion) {
                     .command_tx
                     .send(uring::UringCommand::Send(payload.clone()))
                     .expect("command send");
-                let reply = fixture.reply_rx.recv().expect("reply recv");
+                let reply = fixture
+                    .reply_rx
+                    .lock()
+                    .expect("reply mutex poisoned")
+                    .recv()
+                    .expect("reply recv");
                 let uring::UringReply::Echo(echo) = reply;
                 black_box(echo);
             }
