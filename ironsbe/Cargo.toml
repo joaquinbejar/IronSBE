@@ -36,3 +36,25 @@ path = "examples/client.rs"
 [[example]]
 name = "benchmark_report"
 path = "examples/benchmark_report.rs"
+
+[[example]]
+name = "uring_server"
+path = "examples/uring_server.rs"
+
+[[example]]
+name = "uring_client"
+path = "examples/uring_client.rs"
+
+[features]
+default = []
+# Linux-only io_uring backend.  Forwards to the matching feature in
+# ironsbe-server / ironsbe-client / ironsbe-transport so the
+# uring_server / uring_client examples can opt in.
+tcp-uring = [
+    "ironsbe-server/tcp-uring",
+    "ironsbe-client/tcp-uring",
+    "ironsbe-transport/tcp-uring",
+]
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tokio-uring = { workspace = true }

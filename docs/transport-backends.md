@@ -205,13 +205,72 @@ operation.
 The io_uring backend uses the same 4-byte little-endian length-prefix
 framing as `tcp-tokio`, so the two backends are wire-compatible.
 
-### Scope
+### Server integration: `LocalServer` and `LocalClient`
 
-This module ships the trait-level integration only.  Server integration
-(`ironsbe-server` running on a `tokio-uring` runtime), examples, and
-benchmark numbers are tracked in the follow-up issue.  Buffer pooling,
-registered buffers, registered fds and `IORING_OP_SEND_ZC` are also
-deferred to the same follow-up.
+The high-level `Server` / `Client` types in `ironsbe-server` /
+`ironsbe-client` are generic over the multi-threaded `Transport` family
+and so cannot drive a `LocalTransport` backend directly.  Instead, the
+crates expose **parallel `LocalServer` / `LocalClient` types** generic
+over `LocalTransport`.  They share `MessageHandler`, `ServerHandle`,
+`ClientHandle`, the command/event enums and most of the session loop
+with the multi-threaded versions; the differences are:
+
+- Trait bound is `T: LocalTransport` (no `Send + Sync`).
+- Per-session tasks are spawned via `tokio::task::spawn_local` rather
+  than `tokio::spawn`, so they can hold `!Send` connections.
+- `run()` must be polled inside a Tokio `LocalSet`.
+  `tokio_uring::start` installs one for free; for plain `tokio` you can
+  use `tokio::task::LocalSet::run_until`.
+
+```rust
+use ironsbe_server::{LocalServerBuilder, MessageHandler};
+use ironsbe_transport::tcp_uring::UringTcpTransport;
+
+fn main() -> Result<(), ironsbe_server::ServerError> {
+    let (mut server, _handle) =
+        LocalServerBuilder::<MyHandler, UringTcpTransport>::new()
+            .bind("127.0.0.1:9000".parse().expect("addr"))
+            .handler(MyHandler)
+            .build();
+    tokio_uring::start(async move { server.run().await })
+}
+```
+
+The same shape applies to `LocalClientBuilder` / `LocalClient`.  Working
+end-to-end examples live in `ironsbe/examples/uring_server.rs` and
+`ironsbe/examples/uring_client.rs`.
+
+#### Multi-worker scaling
+
+This first iteration runs a single uring reactor on the calling thread.
+Spreading load across cores via `SO_REUSEPORT` + one worker per core is
+a deliberate follow-up: the bench numbers below will tell us whether
+single-worker latency is already good enough or whether the multi-worker
+work is justified.
+
+### Benchmarks
+
+The `transport_round_trip` bench in `ironsbe-bench` measures the
+per-message latency of a 64-byte SBE message round-trip against both
+backends.  Run with:
+
+```sh
+# tcp-tokio only:
+cargo bench -p ironsbe-bench --bench transport_round_trip
+
+# both backends (Linux ≥ 5.10):
+cargo bench -p ironsbe-bench --bench transport_round_trip --features tcp-uring
+```
+
+Numbers (TBD — pending hardware run):
+
+| Backend     | p50 | p99 | p99.9 | Throughput |
+|-------------|-----|-----|-------|------------|
+| `tcp-tokio` | TBD | TBD | TBD   | TBD        |
+| `tcp-uring` | TBD | TBD | TBD   | TBD        |
+
+These will be filled in after running the bench on a Linux ≥ 5.10
+machine and updated in this doc plus the PR description.
 
 ### Building
 

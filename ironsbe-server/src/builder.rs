@@ -309,6 +309,23 @@ pub struct ServerHandle {
 }
 
 impl ServerHandle {
+    /// Constructs a [`ServerHandle`] from its raw plumbing.
+    ///
+    /// Used internally by the multi-threaded [`Server`] builder and by
+    /// the single-threaded `LocalServer` builder so both server flavours
+    /// can hand back the same handle type.
+    pub(crate) fn new(
+        cmd_tx: MpscSender<ServerCommand>,
+        event_rx: MpscReceiver<ServerEvent>,
+        cmd_notify: Arc<Notify>,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            event_rx,
+            cmd_notify,
+        }
+    }
+
     /// Requests server shutdown.
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.try_send(ServerCommand::Shutdown);

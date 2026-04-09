@@ -325,6 +325,25 @@ pub struct ClientHandle {
 }
 
 impl ClientHandle {
+    /// Constructs a [`ClientHandle`] from its raw plumbing.
+    ///
+    /// Used internally by both the multi-threaded [`Client`] builder and
+    /// the single-threaded `LocalClient` builder so both client flavours
+    /// can hand back the same handle type.
+    pub(crate) fn new(
+        cmd_tx: spsc::SpscSender<ClientCommand>,
+        event_rx: spsc::SpscReceiver<ClientEvent>,
+        cmd_notify: Arc<Notify>,
+        event_notify: Arc<Notify>,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            event_rx,
+            cmd_notify,
+            event_notify,
+        }
+    }
+
     /// Sends an SBE message to the server (non-blocking).
     ///
     /// # Errors
