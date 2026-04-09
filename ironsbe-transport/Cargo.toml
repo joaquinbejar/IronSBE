@@ -16,6 +16,12 @@ tcp-tokio = ["dep:tokio-util", "dep:futures", "dep:socket2"]
 # Linux-only io_uring backend.  Enabling this on a non-Linux platform compiles
 # the trait-level glue but the backend module is gated to `target_os = "linux"`.
 tcp-uring = ["dep:tokio-uring"]
+# Pure-Rust pieces of the AF_XDP backend (frame parsers + smoltcp/UDP
+# stacks).  Compiles everywhere and is fully unit-tested without root or
+# hardware.  The actual `xsk-rs` datapath layer that wires this up to a
+# real NIC queue is landed in a follow-up PR alongside the server
+# integration and benchmarks (it requires hardware to validate).
+xdp-stacks = ["dep:smoltcp", "dep:etherparse"]
 
 [dependencies]
 ironsbe-core = { workspace = true }
@@ -29,6 +35,14 @@ parking_lot = { workspace = true }
 tracing = { workspace = true }
 lru = { workspace = true }
 memmap2 = { workspace = true }
+
+[dependencies.smoltcp]
+workspace = true
+optional = true
+
+[dependencies.etherparse]
+workspace = true
+optional = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-uring = { workspace = true, optional = true }

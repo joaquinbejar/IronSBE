@@ -40,6 +40,15 @@ pub mod tcp;
 #[cfg(all(feature = "tcp-uring", target_os = "linux"))]
 pub mod tcp_uring;
 
+/// AF_XDP partial kernel-bypass backend.
+///
+/// The pure-Rust pieces (frame parsers, `XdpStack` trait, `UdpStack`,
+/// `SmoltcpStack`) compile everywhere under the `xdp-stacks` feature.  The
+/// AF_XDP datapath itself is only compiled on Linux when both the `xdp`
+/// feature and `target_os = "linux"` are active.
+#[cfg(feature = "xdp-stacks")]
+pub mod xdp;
+
 pub use error::TransportError;
 pub use traits::{Connection, Listener, Transport};
 
