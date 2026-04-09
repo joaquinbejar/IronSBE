@@ -13,12 +13,29 @@ use tokio::sync::{Notify, mpsc as tokio_mpsc};
 
 /// Builder for configuring and creating a server.
 ///
-/// The type parameter `T` selects the transport backend.  When using the
-/// default feature set (`tcp-tokio`), `T` defaults to
+/// The type parameter `T` selects the transport backend.  When the
+/// `tcp-tokio` feature is enabled (the default), `T` defaults to
 /// [`ironsbe_transport::DefaultTransport`] so existing call-sites compile
-/// without changes.
+/// without changes.  With the feature disabled, `T` must be specified
+/// explicitly so downstream crates can plug in a custom backend.
+#[cfg(feature = "tcp-tokio")]
 pub struct ServerBuilder<H, T: Transport = ironsbe_transport::DefaultTransport> {
     bind_addr: SocketAddr,
+    bind_config: Option<T::BindConfig>,
+    handler: Option<H>,
+    max_connections: usize,
+    channel_capacity: usize,
+    _transport: PhantomData<T>,
+}
+
+/// Builder for configuring and creating a server.
+///
+/// With the `tcp-tokio` feature disabled, the transport backend must be
+/// specified explicitly via the `T` type parameter.
+#[cfg(not(feature = "tcp-tokio"))]
+pub struct ServerBuilder<H, T: Transport> {
+    bind_addr: SocketAddr,
+    bind_config: Option<T::BindConfig>,
     handler: Option<H>,
     max_connections: usize,
     channel_capacity: usize,
@@ -31,6 +48,7 @@ impl<H: MessageHandler, T: Transport> ServerBuilder<H, T> {
     pub fn new() -> Self {
         Self {
             bind_addr: "0.0.0.0:9000".parse().unwrap(),
+            bind_config: None,
             handler: None,
             max_connections: 1000,
             channel_capacity: 4096,
@@ -39,9 +57,25 @@ impl<H: MessageHandler, T: Transport> ServerBuilder<H, T> {
     }
 
     /// Sets the bind address.
+    ///
+    /// If a [`bind_config`](Self::bind_config) was previously supplied it
+    /// will be cleared, since the address is now ambiguous.  Set the address
+    /// first, then customize via `bind_config`.
     #[must_use]
     pub fn bind(mut self, addr: SocketAddr) -> Self {
         self.bind_addr = addr;
+        self.bind_config = None;
+        self
+    }
+
+    /// Supplies a backend-specific bind configuration.
+    ///
+    /// Use this to override transport tunables (frame size, NODELAY, socket
+    /// buffer sizes, …).  When unset, the backend builds a default config
+    /// from the bind address.
+    #[must_use]
+    pub fn bind_config(mut self, config: T::BindConfig) -> Self {
+        self.bind_config = Some(config);
         self
     }
 
@@ -80,6 +114,10 @@ impl<H: MessageHandler, T: Transport> ServerBuilder<H, T> {
 
         let server = Server {
             bind_addr: self.bind_addr,
+            bind_config: Some(
+                self.bind_config
+                    .unwrap_or_else(|| T::BindConfig::from(self.bind_addr)),
+            ),
             handler: Arc::new(handler),
             max_connections: self.max_connections,
             cmd_rx,
@@ -117,14 +155,48 @@ impl<H: MessageHandler> ServerBuilder<H> {
     pub fn with_default_transport() -> Self {
         <Self as Default>::default()
     }
+
+    /// Sets the maximum SBE frame size in bytes (Tokio TCP backend only).
+    ///
+    /// Convenience shortcut that mutates the underlying
+    /// [`ironsbe_transport::tcp::TcpServerConfig`] without requiring callers
+    /// to construct it manually.
+    #[must_use]
+    pub fn max_frame_size(mut self, size: usize) -> Self {
+        let cfg = self
+            .bind_config
+            .take()
+            .unwrap_or_else(|| ironsbe_transport::tcp::TcpServerConfig::new(self.bind_addr));
+        self.bind_config = Some(cfg.max_frame_size(size));
+        self
+    }
 }
 
 /// The main server instance.
 ///
 /// Generic over handler `H` and transport backend `T`.
+#[cfg(feature = "tcp-tokio")]
 #[allow(dead_code)]
 pub struct Server<H, T: Transport = ironsbe_transport::DefaultTransport> {
     bind_addr: SocketAddr,
+    bind_config: Option<T::BindConfig>,
+    handler: Arc<H>,
+    max_connections: usize,
+    cmd_rx: MpscReceiver<ServerCommand>,
+    event_tx: MpscSender<ServerEvent>,
+    sessions: SessionManager,
+    cmd_notify: Arc<Notify>,
+    _transport: PhantomData<T>,
+}
+
+/// The main server instance.
+///
+/// Generic over handler `H` and transport backend `T`.
+#[cfg(not(feature = "tcp-tokio"))]
+#[allow(dead_code)]
+pub struct Server<H, T: Transport> {
+    bind_addr: SocketAddr,
+    bind_config: Option<T::BindConfig>,
     handler: Arc<H>,
     max_connections: usize,
     cmd_rx: MpscReceiver<ServerCommand>,
@@ -147,10 +219,15 @@ where
     /// # Errors
     /// Returns `ServerError` if the server fails to start or encounters an error.
     pub async fn run(&mut self) -> Result<(), ServerError> {
-        let mut listener = T::bind(self.bind_addr)
+        let bind_config = self
+            .bind_config
+            .take()
+            .unwrap_or_else(|| T::BindConfig::from(self.bind_addr));
+        let mut listener = T::bind_with(bind_config)
             .await
             .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
-        tracing::info!("Server listening on {}", self.bind_addr);
+        let effective_addr = listener.local_addr().unwrap_or(self.bind_addr);
+        tracing::info!("Server listening on {}", effective_addr);
 
         loop {
             tokio::select! {
@@ -348,7 +425,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tcp-tokio"))]
 mod tests {
     use super::*;
 

@@ -13,12 +13,29 @@ use tokio::sync::Notify;
 
 /// Builder for configuring and creating a client.
 ///
-/// The type parameter `T` selects the transport backend.  When using the
-/// default feature set (`tcp-tokio`), `T` defaults to
+/// The type parameter `T` selects the transport backend.  When the
+/// `tcp-tokio` feature is enabled (the default), `T` defaults to
 /// [`ironsbe_transport::DefaultTransport`] so existing call-sites compile
-/// without changes.
+/// without changes.  With the feature disabled, `T` must be specified
+/// explicitly so downstream crates can plug in a custom backend.
+#[cfg(feature = "tcp-tokio")]
 pub struct ClientBuilder<T: Transport = ironsbe_transport::DefaultTransport> {
     server_addr: SocketAddr,
+    connect_config: Option<T::ConnectConfig>,
+    connect_timeout: Duration,
+    reconnect_config: ReconnectConfig,
+    channel_capacity: usize,
+    _transport: PhantomData<T>,
+}
+
+/// Builder for configuring and creating a client.
+///
+/// With the `tcp-tokio` feature disabled, the transport backend must be
+/// specified explicitly via the `T` type parameter.
+#[cfg(not(feature = "tcp-tokio"))]
+pub struct ClientBuilder<T: Transport> {
+    server_addr: SocketAddr,
+    connect_config: Option<T::ConnectConfig>,
     connect_timeout: Duration,
     reconnect_config: ReconnectConfig,
     channel_capacity: usize,
@@ -31,6 +48,7 @@ impl<T: Transport> ClientBuilder<T> {
     pub fn new(server_addr: SocketAddr) -> Self {
         Self {
             server_addr,
+            connect_config: None,
             connect_timeout: Duration::from_secs(5),
             reconnect_config: ReconnectConfig::default(),
             channel_capacity: 4096,
@@ -38,7 +56,25 @@ impl<T: Transport> ClientBuilder<T> {
         }
     }
 
-    /// Sets the connection timeout.
+    /// Supplies a backend-specific connect configuration.
+    ///
+    /// Use this to override transport tunables (frame size, NODELAY, socket
+    /// buffer sizes, …).  When unset, the backend builds a default config
+    /// from the server address.
+    #[must_use]
+    pub fn connect_config(mut self, config: T::ConnectConfig) -> Self {
+        self.connect_config = Some(config);
+        self
+    }
+
+    /// Sets the outer connection timeout used by the reconnect loop.
+    ///
+    /// This bounds how long [`Client::run`] waits for a single connect
+    /// attempt before mapping the failure to [`ClientError::ConnectTimeout`].
+    /// It does **not** mutate any [`connect_config`](Self::connect_config)
+    /// the user may have supplied — to also override the backend's internal
+    /// connect timeout for the Tokio TCP backend, use
+    /// [`tcp_connect_timeout`](Self::tcp_connect_timeout).
     #[must_use]
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
@@ -84,6 +120,10 @@ impl<T: Transport> ClientBuilder<T> {
 
         let client = Client {
             server_addr: self.server_addr,
+            connect_config: Some(
+                self.connect_config
+                    .unwrap_or_else(|| T::ConnectConfig::from(self.server_addr)),
+            ),
             connect_timeout: self.connect_timeout,
             reconnect_state: ReconnectState::new(self.reconnect_config),
             cmd_rx,
@@ -116,13 +156,64 @@ impl ClientBuilder {
     pub fn with_default_transport(server_addr: SocketAddr) -> Self {
         Self::new(server_addr)
     }
+
+    /// Sets the maximum SBE frame size in bytes (Tokio TCP backend only).
+    ///
+    /// Convenience shortcut that mutates the underlying
+    /// [`ironsbe_transport::tcp::TcpClientConfig`] without requiring callers
+    /// to construct it manually.
+    #[must_use]
+    pub fn max_frame_size(mut self, size: usize) -> Self {
+        let cfg = self
+            .connect_config
+            .take()
+            .unwrap_or_else(|| ironsbe_transport::tcp::TcpClientConfig::new(self.server_addr));
+        self.connect_config = Some(cfg.max_frame_size(size));
+        self
+    }
+
+    /// Forwards a connect timeout into the underlying
+    /// [`TcpClientConfig`](ironsbe_transport::tcp::TcpClientConfig) so the
+    /// backend's internal timeout matches the outer reconnect loop.
+    ///
+    /// Convenience shortcut equivalent to calling
+    /// [`connect_timeout`](Self::connect_timeout) and then mutating
+    /// `TcpClientConfig::connect_timeout` on a custom `connect_config`.
+    #[must_use]
+    pub fn tcp_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        let cfg = self
+            .connect_config
+            .take()
+            .unwrap_or_else(|| ironsbe_transport::tcp::TcpClientConfig::new(self.server_addr));
+        self.connect_config = Some(cfg.connect_timeout(timeout));
+        self
+    }
 }
 
 /// The main client instance.
 ///
 /// Generic over transport backend `T`.
+#[cfg(feature = "tcp-tokio")]
 pub struct Client<T: Transport = ironsbe_transport::DefaultTransport> {
     server_addr: SocketAddr,
+    connect_config: Option<T::ConnectConfig>,
+    connect_timeout: Duration,
+    reconnect_state: ReconnectState,
+    cmd_rx: spsc::SpscReceiver<ClientCommand>,
+    event_tx: spsc::SpscSender<ClientEvent>,
+    cmd_notify: Arc<Notify>,
+    event_notify: Arc<Notify>,
+    _transport: PhantomData<T>,
+}
+
+/// The main client instance.
+///
+/// Generic over transport backend `T`.
+#[cfg(not(feature = "tcp-tokio"))]
+pub struct Client<T: Transport> {
+    server_addr: SocketAddr,
+    connect_config: Option<T::ConnectConfig>,
     connect_timeout: Duration,
     reconnect_state: ReconnectState,
     cmd_rx: spsc::SpscReceiver<ClientCommand>,
@@ -162,10 +253,25 @@ impl<T: Transport> Client<T> {
     }
 
     async fn connect_and_run(&mut self) -> Result<(), ClientError> {
-        let conn = tokio::time::timeout(self.connect_timeout, T::connect(self.server_addr))
+        // Reconnect attempts share the same connect_config; clone on each attempt.
+        let connect_config = self
+            .connect_config
+            .clone()
+            .unwrap_or_else(|| T::ConnectConfig::from(self.server_addr));
+        let conn = tokio::time::timeout(self.connect_timeout, T::connect_with(connect_config))
             .await
             .map_err(|_| ClientError::ConnectTimeout)?
-            .map_err(|e| ClientError::Io(std::io::Error::other(e)))?;
+            .map_err(|e| {
+                let io_err = std::io::Error::other(e);
+                // Normalise backend-internal timeouts to ConnectTimeout so the
+                // outer error is consistent regardless of which timer fired
+                // first (the outer wrapper here or the backend's own).
+                if io_err.kind() == std::io::ErrorKind::TimedOut {
+                    ClientError::ConnectTimeout
+                } else {
+                    ClientError::Io(io_err)
+                }
+            })?;
 
         self.reconnect_state.on_success();
 
@@ -304,7 +410,7 @@ pub enum ClientEvent {
     Error(String),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tcp-tokio"))]
 mod tests {
     use super::*;
     use std::time::Duration;
