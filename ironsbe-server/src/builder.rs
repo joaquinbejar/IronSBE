@@ -309,6 +309,23 @@ pub struct ServerHandle {
 }
 
 impl ServerHandle {
+    /// Constructs a [`ServerHandle`] from its raw plumbing.
+    ///
+    /// Used internally by the multi-threaded [`Server`] builder and by
+    /// the single-threaded `LocalServer` builder so both server flavours
+    /// can hand back the same handle type.
+    pub(crate) fn new(
+        cmd_tx: MpscSender<ServerCommand>,
+        event_rx: MpscReceiver<ServerEvent>,
+        cmd_notify: Arc<Notify>,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            event_rx,
+            cmd_notify,
+        }
+    }
+
     /// Requests server shutdown.
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.try_send(ServerCommand::Shutdown);
@@ -336,7 +353,7 @@ impl ServerHandle {
 }
 
 /// Commands that can be sent to the server.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ServerCommand {
     /// Shutdown the server.
     Shutdown,
@@ -349,6 +366,10 @@ pub enum ServerCommand {
 /// Events emitted by the server.
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
+    /// The server has bound its listener and is ready to accept
+    /// connections.  Carries the *effective* local address (useful when
+    /// the caller bound to port 0).
+    Listening(SocketAddr),
     /// A new session was created.
     SessionCreated(u64, SocketAddr),
     /// A session was closed.

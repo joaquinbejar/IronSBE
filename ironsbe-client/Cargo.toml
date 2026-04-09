@@ -13,6 +13,9 @@ categories = ["network-programming", "asynchronous"]
 [features]
 default = ["tcp-tokio"]
 tcp-tokio = ["ironsbe-transport/tcp-tokio"]
+# Linux-only io_uring backend.  Enables the LocalClient and integration
+# tests against the matching transport feature.
+tcp-uring = ["ironsbe-transport/tcp-uring"]
 
 [dependencies]
 ironsbe-core = { workspace = true }

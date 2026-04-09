@@ -9,8 +9,10 @@
 
 pub mod builder;
 pub mod error;
+pub mod local_builder;
 pub mod reconnect;
 pub mod session;
 
 pub use builder::{Client, ClientBuilder, ClientCommand, ClientEvent, ClientHandle};
 pub use error::ClientError;
+pub use local_builder::{LocalClient, LocalClientBuilder};

@@ -10,12 +10,24 @@ homepage.workspace = true
 keywords = ["benchmark", "performance", "sbe"]
 categories = ["development-tools::profiling"]
 
+[features]
+default = []
+# Linux-only io_uring backend.  Forwards to the matching feature in
+# ironsbe-transport so the transport_round_trip bench can include the
+# uring path.
+tcp-uring = ["ironsbe-transport/tcp-uring"]
+
 [dependencies]
 ironsbe-core = { workspace = true }
 ironsbe-channel = { workspace = true }
-ironsbe-transport = { workspace = true }
+ironsbe-transport = { workspace = true, features = ["tcp-tokio"] }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+bytes = { workspace = true }
+hdrhistogram = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tokio-uring = { workspace = true }
 
 [[bench]]
 name = "encoding"
@@ -27,4 +39,8 @@ harness = false
 
 [[bench]]
 name = "performance"
+harness = false
+
+[[bench]]
+name = "transport_round_trip"
 harness = false

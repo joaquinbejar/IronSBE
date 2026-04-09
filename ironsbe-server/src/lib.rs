@@ -12,10 +12,12 @@ pub mod builder;
 pub mod dispatcher;
 pub mod error;
 pub mod handler;
+pub mod local_builder;
 pub mod session;
 
 pub use builder::{Server, ServerBuilder, ServerCommand, ServerEvent, ServerHandle};
 pub use dispatcher::MessageDispatcher;
 pub use error::ServerError;
 pub use handler::{MessageHandler, Responder, TypedHandler};
+pub use local_builder::{LocalServer, LocalServerBuilder};
 pub use session::SessionManager;

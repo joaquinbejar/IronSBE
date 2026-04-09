@@ -66,6 +66,7 @@ rtrb = "0.3"
 lru = "0.16"
 memmap2 = "0.9"
 criterion = { version = "0.8", features = ["html_reports"] }
+hdrhistogram = "7"
 
 [profile.release]
 opt-level = 3
