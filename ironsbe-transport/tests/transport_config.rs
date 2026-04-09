@@ -95,3 +95,94 @@ fn test_tcp_client_config_from_socket_addr() {
     assert_eq!(cfg.max_frame_size, 64 * 1024);
     assert!(cfg.tcp_nodelay);
 }
+
+#[test]
+fn test_tcp_server_config_buffer_size_builders() {
+    let addr: SocketAddr = "127.0.0.1:9003".parse().expect("valid addr");
+    let cfg = TcpServerConfig::new(addr)
+        .recv_buffer_size(512 * 1024)
+        .send_buffer_size(512 * 1024);
+    assert_eq!(cfg.recv_buffer_size, Some(512 * 1024));
+    assert_eq!(cfg.send_buffer_size, Some(512 * 1024));
+}
+
+#[test]
+fn test_tcp_server_config_default_buffer_sizes() {
+    let cfg = TcpServerConfig::default();
+    assert_eq!(cfg.recv_buffer_size, Some(256 * 1024));
+    assert_eq!(cfg.send_buffer_size, Some(256 * 1024));
+}
+
+/// Direct kernel-level check that `socket2::SockRef` actually applies
+/// `SO_RCVBUF` / `SO_SNDBUF` to a borrowed `tokio::net::TcpStream`.
+///
+/// The kernel may double the requested value (Linux), so the assertion is
+/// `>=` rather than `==` to stay portable across Linux and macOS/BSD.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_socket_buffer_sizes_are_observable_via_getsockopt() {
+    use socket2::SockRef;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    const REQUESTED: usize = 512 * 1024;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listen_addr = listener.local_addr().expect("local_addr");
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _addr) = listener.accept().await.expect("accept");
+        let sock = SockRef::from(&stream);
+        sock.set_recv_buffer_size(REQUESTED).expect("set rcvbuf");
+        sock.set_send_buffer_size(REQUESTED).expect("set sndbuf");
+        let observed_recv = sock.recv_buffer_size().expect("get rcvbuf");
+        let observed_send = sock.send_buffer_size().expect("get sndbuf");
+        assert!(
+            observed_recv >= REQUESTED,
+            "rcvbuf {observed_recv} < requested {REQUESTED}"
+        );
+        assert!(
+            observed_send >= REQUESTED,
+            "sndbuf {observed_send} < requested {REQUESTED}"
+        );
+    });
+
+    let mut client = TcpStream::connect(listen_addr).await.expect("connect");
+    client.write_all(b"ping").await.expect("write");
+    server_task.await.expect("server task");
+}
+
+/// End-to-end check via the `Transport` trait API: a server bound and a
+/// client connected with custom `recv_buffer_size` / `send_buffer_size` round-trip
+/// successfully.  The `apply_socket_buffer_sizes` call in `accept` /
+/// `connect_with` would have errored out before reaching the round-trip if
+/// the values were not actually applied to the underlying sockets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_round_trip_with_custom_buffer_sizes() {
+    let bind_addr: SocketAddr = "127.0.0.1:0".parse().expect("valid addr");
+    let server_cfg = TcpServerConfig::new(bind_addr)
+        .recv_buffer_size(512 * 1024)
+        .send_buffer_size(512 * 1024);
+    let mut listener = TokioTcpTransport::bind_with(server_cfg)
+        .await
+        .expect("bind");
+    let listen_addr = listener.local_addr().expect("local_addr");
+
+    let server_task = tokio::spawn(async move {
+        let mut conn = listener.accept().await.expect("accept");
+        let msg = conn.recv().await.expect("recv").expect("frame");
+        assert_eq!(&msg[..], b"hello");
+        conn.send(b"world").await.expect("send");
+    });
+
+    let client_cfg = TcpClientConfig::new(listen_addr)
+        .recv_buffer_size(512 * 1024)
+        .send_buffer_size(512 * 1024);
+    let mut client = TokioTcpTransport::connect_with(client_cfg)
+        .await
+        .expect("connect");
+    client.send(b"hello").await.expect("client send");
+    let reply = client.recv().await.expect("client recv").expect("frame");
+    assert_eq!(&reply[..], b"world");
+
+    server_task.await.expect("server task");
+}

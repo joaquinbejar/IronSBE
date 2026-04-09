@@ -20,6 +20,15 @@ pub struct TcpServerConfig {
     pub max_frame_size: usize,
     /// Enable TCP_NODELAY.
     pub tcp_nodelay: bool,
+    /// `SO_RCVBUF` to apply to accepted sockets, in bytes.
+    ///
+    /// `None` leaves the kernel default in place.  The kernel may clamp or
+    /// double the requested value (Linux exposes `2 * size` via `getsockopt`).
+    pub recv_buffer_size: Option<usize>,
+    /// `SO_SNDBUF` to apply to accepted sockets, in bytes.
+    ///
+    /// Same caveats as [`recv_buffer_size`](Self::recv_buffer_size).
+    pub send_buffer_size: Option<usize>,
 }
 
 impl Default for TcpServerConfig {
@@ -29,6 +38,8 @@ impl Default for TcpServerConfig {
             max_connections: 1000,
             max_frame_size: 64 * 1024,
             tcp_nodelay: true,
+            recv_buffer_size: Some(256 * 1024),
+            send_buffer_size: Some(256 * 1024),
         }
     }
 }
@@ -70,6 +81,20 @@ impl TcpServerConfig {
         self.tcp_nodelay = enabled;
         self
     }
+
+    /// Sets `SO_RCVBUF` for accepted sockets.
+    #[must_use]
+    pub fn recv_buffer_size(mut self, size: usize) -> Self {
+        self.recv_buffer_size = Some(size);
+        self
+    }
+
+    /// Sets `SO_SNDBUF` for accepted sockets.
+    #[must_use]
+    pub fn send_buffer_size(mut self, size: usize) -> Self {
+        self.send_buffer_size = Some(size);
+        self
+    }
 }
 
 /// TCP server for SBE messaging.
@@ -104,6 +129,11 @@ impl TcpServer {
     pub async fn accept(&mut self) -> std::io::Result<TcpConnection> {
         let (stream, addr) = self.listener.accept().await?;
         stream.set_nodelay(self.config.tcp_nodelay)?;
+        super::apply_socket_buffer_sizes(
+            &stream,
+            self.config.recv_buffer_size,
+            self.config.send_buffer_size,
+        )?;
 
         Ok(TcpConnection {
             framed: Framed::new(stream, SbeFrameCodec::new(self.config.max_frame_size)),

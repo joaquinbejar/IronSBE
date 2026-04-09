@@ -5,6 +5,8 @@
 //! and is the default backend when the `tcp-tokio` feature is enabled.
 
 use crate::traits;
+use socket2::SockRef;
+use tokio::net::TcpStream;
 
 pub mod client;
 pub mod framing;
@@ -13,6 +15,31 @@ pub mod server;
 pub use client::{TcpClient, TcpClientConfig};
 pub use framing::SbeFrameCodec;
 pub use server::{TcpConnection, TcpServer, TcpServerConfig};
+
+/// Applies optional `SO_RCVBUF` / `SO_SNDBUF` to a borrowed TCP stream.
+///
+/// `recv` / `send` are interpreted as **requested** sizes in bytes.  The
+/// kernel may clamp the value, and on Linux the value reported by
+/// `getsockopt` will typically be double what was set.  Both options are
+/// best-effort, but I/O errors are propagated so callers can detect a
+/// completely broken socket.
+///
+/// # Errors
+/// Returns the underlying I/O error if `setsockopt` fails.
+pub(crate) fn apply_socket_buffer_sizes(
+    stream: &TcpStream,
+    recv: Option<usize>,
+    send: Option<usize>,
+) -> std::io::Result<()> {
+    let sock = SockRef::from(stream);
+    if let Some(size) = recv {
+        sock.set_recv_buffer_size(size)?;
+    }
+    if let Some(size) = send {
+        sock.set_send_buffer_size(size)?;
+    }
+    Ok(())
+}
 
 /// Tokio-based TCP transport backend.
 ///
@@ -53,6 +80,7 @@ impl traits::Transport for TokioTcpTransport {
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout"))??;
         stream.set_nodelay(config.tcp_nodelay)?;
+        apply_socket_buffer_sizes(&stream, config.recv_buffer_size, config.send_buffer_size)?;
         let peer_addr = stream.peer_addr()?;
         let framed =
             tokio_util::codec::Framed::new(stream, SbeFrameCodec::new(config.max_frame_size));
