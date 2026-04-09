@@ -77,6 +77,20 @@ impl TcpClientConfig {
         self.tcp_nodelay = enabled;
         self
     }
+
+    /// Sets `SO_RCVBUF` for the connecting socket.
+    #[must_use]
+    pub fn recv_buffer_size(mut self, size: usize) -> Self {
+        self.recv_buffer_size = Some(size);
+        self
+    }
+
+    /// Sets `SO_SNDBUF` for the connecting socket.
+    #[must_use]
+    pub fn send_buffer_size(mut self, size: usize) -> Self {
+        self.send_buffer_size = Some(size);
+        self
+    }
 }
 
 /// TCP client for SBE messaging.
@@ -104,6 +118,8 @@ impl TcpClient {
 
         // Configure socket
         stream.set_nodelay(config.tcp_nodelay)?;
+        super::apply_socket_buffer_sizes(&stream, config.recv_buffer_size, config.send_buffer_size)
+            .map_err(TransportError::Io)?;
 
         let peer_addr = stream.peer_addr()?;
         let framed = Framed::new(stream, SbeFrameCodec::new(config.max_frame_size));

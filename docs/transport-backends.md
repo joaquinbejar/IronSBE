@@ -77,6 +77,31 @@ let (server, _) = ServerBuilder::<MyHandler>::with_default_transport()
     .build();
 ```
 
+#### Socket buffer sizes (`SO_RCVBUF` / `SO_SNDBUF`)
+
+Both `TcpServerConfig` and `TcpClientConfig` expose
+`recv_buffer_size: Option<usize>` / `send_buffer_size: Option<usize>` (default
+`Some(256 KiB)`).  When set, the values are applied to every accepted /
+connected socket via separate `setsockopt(SO_RCVBUF)` /
+`setsockopt(SO_SNDBUF)` calls using the
+[`socket2`](https://crates.io/crates/socket2) crate.
+
+Caveats:
+
+- The kernel may **clamp** the requested value to a system-wide ceiling
+  (`/proc/sys/net/core/rmem_max` / `wmem_max` on Linux).
+- Linux **doubles** the requested value internally and reports the doubled
+  value via `getsockopt`.  macOS/BSD return the value as-set.
+- Set both values **before** any heavy I/O begins; changing them on a live
+  socket has no effect on already-queued data.
+
+```rust
+let server_cfg = TcpServerConfig::new(addr)
+    .max_frame_size(256 * 1024)
+    .recv_buffer_size(1024 * 1024)
+    .send_buffer_size(1024 * 1024);
+```
+
 ### `Listener`
 
 Accepts incoming connections (server side).
