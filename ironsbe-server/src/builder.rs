@@ -226,7 +226,8 @@ where
         let mut listener = T::bind_with(bind_config)
             .await
             .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
-        tracing::info!("Server listening on {}", self.bind_addr);
+        let effective_addr = listener.local_addr().unwrap_or(self.bind_addr);
+        tracing::info!("Server listening on {}", effective_addr);
 
         loop {
             tokio::select! {

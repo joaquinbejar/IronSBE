@@ -67,7 +67,14 @@ impl<T: Transport> ClientBuilder<T> {
         self
     }
 
-    /// Sets the connection timeout.
+    /// Sets the outer connection timeout used by the reconnect loop.
+    ///
+    /// This bounds how long [`Client::run`] waits for a single connect
+    /// attempt before mapping the failure to [`ClientError::ConnectTimeout`].
+    /// It does **not** mutate any [`connect_config`](Self::connect_config)
+    /// the user may have supplied — to also override the backend's internal
+    /// connect timeout for the Tokio TCP backend, use
+    /// [`tcp_connect_timeout`](Self::tcp_connect_timeout).
     #[must_use]
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
@@ -164,6 +171,24 @@ impl ClientBuilder {
         self.connect_config = Some(cfg.max_frame_size(size));
         self
     }
+
+    /// Forwards a connect timeout into the underlying
+    /// [`TcpClientConfig`](ironsbe_transport::tcp::TcpClientConfig) so the
+    /// backend's internal timeout matches the outer reconnect loop.
+    ///
+    /// Convenience shortcut equivalent to calling
+    /// [`connect_timeout`](Self::connect_timeout) and then mutating
+    /// `TcpClientConfig::connect_timeout` on a custom `connect_config`.
+    #[must_use]
+    pub fn tcp_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        let cfg = self
+            .connect_config
+            .take()
+            .unwrap_or_else(|| ironsbe_transport::tcp::TcpClientConfig::new(self.server_addr));
+        self.connect_config = Some(cfg.connect_timeout(timeout));
+        self
+    }
 }
 
 /// The main client instance.
@@ -236,7 +261,17 @@ impl<T: Transport> Client<T> {
         let conn = tokio::time::timeout(self.connect_timeout, T::connect_with(connect_config))
             .await
             .map_err(|_| ClientError::ConnectTimeout)?
-            .map_err(|e| ClientError::Io(std::io::Error::other(e)))?;
+            .map_err(|e| {
+                let io_err = std::io::Error::other(e);
+                // Normalise backend-internal timeouts to ConnectTimeout so the
+                // outer error is consistent regardless of which timer fired
+                // first (the outer wrapper here or the backend's own).
+                if io_err.kind() == std::io::ErrorKind::TimedOut {
+                    ClientError::ConnectTimeout
+                } else {
+                    ClientError::Io(io_err)
+                }
+            })?;
 
         self.reconnect_state.on_success();
 
