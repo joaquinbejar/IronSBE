@@ -24,6 +24,7 @@ ironsbe-transport = { workspace = true, features = ["tcp-tokio"] }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 bytes = { workspace = true }
+hdrhistogram = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tokio-uring = { workspace = true }

@@ -113,6 +113,7 @@ impl<H: MessageHandler, T: LocalTransport> LocalServerBuilder<H, T> {
             ),
             handler: Rc::new(handler),
             max_connections: self.max_connections,
+            cmd_tx: cmd_tx.clone(),
             cmd_rx,
             event_tx,
             sessions: SessionManager::new(),
@@ -143,6 +144,10 @@ pub struct LocalServer<H, T: LocalTransport> {
     bind_config: Option<T::BindConfig>,
     handler: Rc<H>,
     max_connections: usize,
+    /// Cloned and handed to per-session tasks so they can fire
+    /// `ServerCommand::CloseSession` when the session ends, freeing the
+    /// `SessionManager` slot back in the run loop.
+    cmd_tx: MpscSender<ServerCommand>,
     cmd_rx: MpscReceiver<ServerCommand>,
     event_tx: MpscSender<ServerEvent>,
     sessions: SessionManager,
@@ -175,6 +180,12 @@ where
             .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
         let effective_addr = listener.local_addr().unwrap_or(self.bind_addr);
         tracing::info!("Local server listening on {}", effective_addr);
+        // Notify any external observer (test harness, supervisor) of
+        // the effective bound address.  Best-effort: dropping the event
+        // is fine if no one is listening.
+        let _ = self
+            .event_tx
+            .try_send(ServerEvent::Listening(effective_addr));
 
         loop {
             tokio::select! {
@@ -212,6 +223,12 @@ where
         let session_id = self.sessions.create_session(addr);
         let handler = Rc::clone(&self.handler);
         let event_tx = self.event_tx.clone();
+        // Cloned cmd_tx so the spawned task can fire CloseSession back
+        // to the run loop on disconnect, releasing the SessionManager
+        // slot.  Without this the slot leaks and `max_connections`
+        // eventually rejects every new connection.
+        let cmd_tx = self.cmd_tx.clone();
+        let cmd_notify = Arc::clone(&self.cmd_notify);
 
         handler.on_session_start(session_id);
         let _ = event_tx.try_send(ServerEvent::SessionCreated(session_id, addr));
@@ -225,6 +242,9 @@ where
             }
             handler.on_session_end(session_id);
             let _ = event_tx.try_send(ServerEvent::SessionClosed(session_id));
+            // Ask the run loop to release the SessionManager slot.
+            let _ = cmd_tx.try_send(ServerCommand::CloseSession(session_id));
+            cmd_notify.notify_one();
         });
     }
 

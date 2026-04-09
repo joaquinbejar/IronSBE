@@ -1,7 +1,7 @@
 //! End-to-end transport round-trip benchmark.
 //!
-//! Measures the time to send a small SBE message from the client to the
-//! server and receive an echo back.  Compares the multi-threaded
+//! Measures the per-message round-trip latency of a 64-byte SBE payload
+//! over a persistent connection, comparing the multi-threaded
 //! `tcp-tokio` backend against the Linux-only `tcp-uring` backend (when
 //! the `tcp-uring` feature is enabled).
 //!
@@ -14,109 +14,138 @@
 //! # both backends (Linux >= 5.10):
 //! cargo bench -p ironsbe-bench --bench transport_round_trip --features tcp-uring
 //! ```
+//!
+//! Output is a markdown table ready to paste into the PR description and
+//! `docs/transport-backends.md`.  We deliberately do **not** use criterion's
+//! `iter` harness because:
+//!
+//! 1. criterion's default reporter prints `[lower_CI mean upper_CI]` of the
+//!    **mean**, not p50/p99/p99.9 — which is exactly what we need for a
+//!    transport latency benchmark.
+//! 2. We want all timing to happen on the runtime thread that owns the
+//!    connection, with zero cross-thread plumbing in the hot loop.  Each
+//!    backend's worker thread runs its own measurement loop with
+//!    `Instant::now()` and feeds an `hdrhistogram::Histogram`, then
+//!    returns the histogram to the main thread for reporting.
+//!
+//! This bench has `harness = false` in `Cargo.toml`, so it is just a
+//! plain binary with `fn main`.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use hdrhistogram::Histogram;
 use ironsbe_transport::tcp::{TcpClientConfig, TcpServerConfig, TokioTcpTransport};
-use ironsbe_transport::traits::{Connection, Transport};
-use std::hint::black_box;
+use ironsbe_transport::traits::Transport;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
-use tokio::runtime::Runtime;
-use tokio::sync::oneshot;
+use std::time::{Duration, Instant};
 
 const PAYLOAD_LEN: usize = 64;
-const ITERATIONS_PER_BATCH: usize = 32;
+const WARMUP_ITERS: usize = 10_000;
+const MEASURE_ITERS: usize = 100_000;
 
-/// Builds a deterministic payload of the given length so the benchmark
-/// is reproducible across runs.
+/// Per-backend measurement result handed back to the main thread.
+struct BenchResult {
+    name: &'static str,
+    histogram: Histogram<u64>,
+}
+
+/// Builds a deterministic 64-byte payload so the bench is reproducible.
 fn make_payload() -> Vec<u8> {
     (0..PAYLOAD_LEN).map(|i| (i & 0xff) as u8).collect()
+}
+
+/// Renders a single result as one row of the markdown summary table.
+///
+/// Histogram values are stored in nanoseconds, so we format them as
+/// `µs` with three decimals to keep the table readable for typical
+/// loopback latencies.
+fn render_row(result: &BenchResult) {
+    let h = &result.histogram;
+    let p50 = h.value_at_quantile(0.50) as f64 / 1_000.0;
+    let p99 = h.value_at_quantile(0.99) as f64 / 1_000.0;
+    let p999 = h.value_at_quantile(0.999) as f64 / 1_000.0;
+    let mean_ns = h.mean();
+    let throughput = if mean_ns > 0.0 {
+        1e9 / mean_ns
+    } else {
+        f64::INFINITY
+    };
+    println!(
+        "| `{}` | {:.3} µs | {:.3} µs | {:.3} µs | {:>7.0} msg/s |",
+        result.name, p50, p99, p999, throughput,
+    );
 }
 
 // =====================================================================
 // tcp-tokio path
 // =====================================================================
 
-struct TokioFixture {
-    runtime: Arc<Runtime>,
-    server_addr: SocketAddr,
-    _server_thread: thread::JoinHandle<()>,
-}
+fn run_tcp_tokio_bench() -> BenchResult {
+    let bind_addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+    let (addr_tx, addr_rx) = mpsc::sync_channel::<SocketAddr>(1);
+    let (result_tx, result_rx) = mpsc::sync_channel::<Histogram<u64>>(1);
 
-fn tokio_fixture() -> &'static TokioFixture {
-    static FIXTURE: OnceLock<TokioFixture> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-                .expect("build tokio runtime"),
-        );
-        let bind_addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-        let (addr_tx, addr_rx) = oneshot::channel();
-        let rt_clone = Arc::clone(&runtime);
-        let server_thread = thread::spawn(move || {
-            rt_clone.block_on(async move {
-                let mut listener = TokioTcpTransport::bind_with(TcpServerConfig::new(bind_addr))
-                    .await
-                    .expect("bind");
-                let listen_addr = listener.local_addr().expect("local_addr");
-                let _ = addr_tx.send(listen_addr);
-                loop {
-                    let conn = listener.accept().await.expect("accept");
-                    tokio::spawn(echo_loop_tokio(conn));
-                }
-            });
-        });
-        let server_addr = runtime.block_on(addr_rx).expect("addr");
-        TokioFixture {
-            runtime,
-            server_addr,
-            _server_thread: server_thread,
-        }
-    })
-}
-
-async fn echo_loop_tokio<C: Connection>(mut conn: C) {
-    while let Ok(Some(msg)) = conn.recv().await {
-        if conn.send(&msg).await.is_err() {
-            break;
-        }
-    }
-}
-
-fn bench_tcp_tokio_round_trip(c: &mut Criterion) {
-    let fixture = tokio_fixture();
-    let runtime = Arc::clone(&fixture.runtime);
-    let server_addr = fixture.server_addr;
-
-    let mut group = c.benchmark_group("transport_round_trip/tcp_tokio");
-    group.measurement_time(Duration::from_secs(8));
-    group.sample_size(50);
-    group.bench_function("payload_64B", |b| {
-        // Connect once, reuse the connection across iterations to keep
-        // the bench measuring round-trip latency, not connect cost.
-        let payload = make_payload();
-        let mut client = runtime.block_on(async {
-            TokioTcpTransport::connect_with(TcpClientConfig::new(server_addr))
+    // Spin up a dedicated multi-thread tokio runtime in its own thread.
+    // The runtime owns both the echo server and the bench client; the
+    // bench timing happens entirely on this thread so the criterion-side
+    // mpsc plumbing is **not** in the timed section.
+    let _runtime_thread = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        runtime.block_on(async move {
+            // Echo server.
+            let mut listener = TokioTcpTransport::bind_with(TcpServerConfig::new(bind_addr))
                 .await
-                .expect("connect")
-        });
-        b.iter(|| {
-            runtime.block_on(async {
-                for _ in 0..ITERATIONS_PER_BATCH {
-                    client.send(&payload).await.expect("send");
-                    let echo = client.recv().await.expect("recv").expect("frame");
-                    black_box(echo);
+                .expect("tokio bind");
+            let listen_addr = listener.local_addr().expect("local_addr");
+            let _ = addr_tx.send(listen_addr);
+
+            tokio::spawn(async move {
+                let mut conn = listener.accept().await.expect("accept");
+                while let Ok(Some(msg)) = conn.recv().await {
+                    if conn.send(&msg).await.is_err() {
+                        break;
+                    }
                 }
             });
+
+            // Bench client.
+            let mut client = TokioTcpTransport::connect_with(TcpClientConfig::new(listen_addr))
+                .await
+                .expect("tokio connect");
+            let payload = make_payload();
+
+            // Warmup.
+            for _ in 0..WARMUP_ITERS {
+                client.send(&payload).await.expect("warmup send");
+                let _ = client.recv().await.expect("warmup recv").expect("frame");
+            }
+
+            // Measurement.  Histogram tracks 1 ns .. 1 s, 3 sig figs.
+            let mut hist = Histogram::<u64>::new_with_bounds(1, 1_000_000_000, 3)
+                .expect("histogram bounds are valid");
+            for _ in 0..MEASURE_ITERS {
+                let start = Instant::now();
+                client.send(&payload).await.expect("measure send");
+                let _ = client.recv().await.expect("measure recv").expect("frame");
+                let elapsed = start.elapsed().as_nanos() as u64;
+                hist.record(elapsed.max(1)).expect("record");
+            }
+            let _ = result_tx.send(hist);
         });
     });
-    group.finish();
+
+    let _ = addr_rx.recv().expect("addr");
+    let histogram = result_rx
+        .recv_timeout(Duration::from_secs(120))
+        .expect("tcp-tokio bench timed out");
+    BenchResult {
+        name: "tcp-tokio",
+        histogram,
+    }
 }
 
 // =====================================================================
@@ -124,125 +153,97 @@ fn bench_tcp_tokio_round_trip(c: &mut Criterion) {
 // =====================================================================
 
 #[cfg(all(feature = "tcp-uring", target_os = "linux"))]
-mod uring {
-    use super::*;
+fn run_tcp_uring_bench() -> Option<BenchResult> {
     use ironsbe_transport::tcp_uring::{UringClientConfig, UringServerConfig, UringTcpTransport};
     use ironsbe_transport::traits::{LocalConnection, LocalListener, LocalTransport};
-    use std::sync::Mutex;
-    use std::sync::mpsc as std_mpsc;
 
-    pub(super) struct UringFixture {
-        pub(super) server_addr: SocketAddr,
-        pub(super) command_tx: std_mpsc::SyncSender<UringCommand>,
-        // Receivers from std::mpsc are `!Sync`, so wrap in a Mutex to
-        // satisfy the `OnceLock` static-sharing bound.  The bench thread
-        // is the only consumer so contention is zero in practice.
-        pub(super) reply_rx: Mutex<std_mpsc::Receiver<UringReply>>,
-        _runtime_thread: thread::JoinHandle<()>,
-    }
+    let bind_addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+    let (addr_tx, addr_rx) = mpsc::sync_channel::<SocketAddr>(1);
+    let (result_tx, result_rx) = mpsc::sync_channel::<Histogram<u64>>(1);
 
-    pub(super) enum UringCommand {
-        Send(Vec<u8>),
-    }
+    let _runtime_thread = thread::spawn(move || {
+        tokio_uring::start(async move {
+            // Echo server.
+            let mut listener = UringTcpTransport::bind_with(UringServerConfig::new(bind_addr))
+                .await
+                .expect("uring bind");
+            let listen_addr = listener.local_addr().expect("local_addr");
+            let _ = addr_tx.send(listen_addr);
 
-    pub(super) enum UringReply {
-        Echo(Vec<u8>),
-    }
-
-    pub(super) fn uring_fixture() -> &'static UringFixture {
-        static FIXTURE: OnceLock<UringFixture> = OnceLock::new();
-        FIXTURE.get_or_init(|| {
-            let bind_addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-            let (addr_tx, addr_rx) = std_mpsc::sync_channel::<SocketAddr>(1);
-            let (command_tx, command_rx) = std_mpsc::sync_channel::<UringCommand>(1024);
-            let (reply_tx, reply_rx) = std_mpsc::sync_channel::<UringReply>(1024);
-
-            let runtime_thread = thread::spawn(move || {
-                tokio_uring::start(async move {
-                    // Bind the server side of the loop.
-                    let mut listener =
-                        UringTcpTransport::bind_with(UringServerConfig::new(bind_addr))
-                            .await
-                            .expect("uring bind");
-                    let listen_addr = listener.local_addr().expect("local_addr");
-                    let _ = addr_tx.send(listen_addr);
-
-                    // Spawn an echo task on the same local set so the
-                    // bench client (also on this thread) has a peer.
-                    tokio::task::spawn_local(async move {
-                        let mut conn = listener.accept().await.expect("accept");
-                        while let Ok(Some(msg)) = conn.recv().await {
-                            if conn.send(&msg).await.is_err() {
-                                break;
-                            }
-                        }
-                    });
-
-                    // Connect the bench client and run the
-                    // command-driven send/recv loop until shutdown.
-                    let mut client =
-                        UringTcpTransport::connect_with(UringClientConfig::new(listen_addr))
-                            .await
-                            .expect("uring connect");
-                    while let Ok(UringCommand::Send(payload)) = command_rx.recv() {
-                        client.send(&payload).await.expect("uring send");
-                        let echo = client.recv().await.expect("uring recv").expect("frame");
-                        let _ = reply_tx.send(UringReply::Echo(echo.to_vec()));
+            tokio::task::spawn_local(async move {
+                let mut conn = listener.accept().await.expect("accept");
+                while let Ok(Some(msg)) = conn.recv().await {
+                    if conn.send(&msg).await.is_err() {
+                        break;
                     }
-                });
+                }
             });
-            // The runtime thread sends the bound addr exactly once via
-            // `addr_tx`; we receive it here on the criterion thread.
-            let server_addr = addr_rx.recv().expect("addr");
-            UringFixture {
-                server_addr,
-                command_tx,
-                reply_rx: Mutex::new(reply_rx),
-                _runtime_thread: runtime_thread,
-            }
-        })
-    }
-}
 
-#[cfg(all(feature = "tcp-uring", target_os = "linux"))]
-fn bench_tcp_uring_round_trip(c: &mut Criterion) {
-    let fixture = uring::uring_fixture();
-    let _ = fixture.server_addr; // logged for debug
+            // Bench client.
+            let mut client = UringTcpTransport::connect_with(UringClientConfig::new(listen_addr))
+                .await
+                .expect("uring connect");
+            let payload = make_payload();
 
-    let mut group = c.benchmark_group("transport_round_trip/tcp_uring");
-    group.measurement_time(Duration::from_secs(8));
-    group.sample_size(50);
-    group.bench_function("payload_64B", |b| {
-        let payload = make_payload();
-        b.iter(|| {
-            for _ in 0..ITERATIONS_PER_BATCH {
-                fixture
-                    .command_tx
-                    .send(uring::UringCommand::Send(payload.clone()))
-                    .expect("command send");
-                let reply = fixture
-                    .reply_rx
-                    .lock()
-                    .expect("reply mutex poisoned")
-                    .recv()
-                    .expect("reply recv");
-                let uring::UringReply::Echo(echo) = reply;
-                black_box(echo);
+            // Warmup.
+            for _ in 0..WARMUP_ITERS {
+                client.send(&payload).await.expect("warmup send");
+                let _ = client.recv().await.expect("warmup recv").expect("frame");
             }
+
+            // Measurement, single threaded, zero cross-thread overhead
+            // in the hot loop.
+            let mut hist = Histogram::<u64>::new_with_bounds(1, 1_000_000_000, 3)
+                .expect("histogram bounds are valid");
+            for _ in 0..MEASURE_ITERS {
+                let start = Instant::now();
+                client.send(&payload).await.expect("measure send");
+                let _ = client.recv().await.expect("measure recv").expect("frame");
+                let elapsed = start.elapsed().as_nanos() as u64;
+                hist.record(elapsed.max(1)).expect("record");
+            }
+            let _ = result_tx.send(hist);
         });
     });
-    group.finish();
+
+    let _ = addr_rx.recv().expect("addr");
+    let histogram = result_rx
+        .recv_timeout(Duration::from_secs(120))
+        .expect("tcp-uring bench timed out");
+    Some(BenchResult {
+        name: "tcp-uring",
+        histogram,
+    })
 }
 
 #[cfg(not(all(feature = "tcp-uring", target_os = "linux")))]
-fn bench_tcp_uring_round_trip(_c: &mut Criterion) {
-    // Stub when the feature is disabled.  Criterion will simply skip the
-    // group; the bench binary still compiles everywhere.
+fn run_tcp_uring_bench() -> Option<BenchResult> {
+    None
 }
 
-criterion_group!(
-    benches,
-    bench_tcp_tokio_round_trip,
-    bench_tcp_uring_round_trip
-);
-criterion_main!(benches);
+// =====================================================================
+// main
+// =====================================================================
+
+fn main() {
+    println!(
+        "Running transport_round_trip ({}-byte payload, {} warmup + {} measured iterations per backend)",
+        PAYLOAD_LEN, WARMUP_ITERS, MEASURE_ITERS,
+    );
+    println!();
+
+    let mut results = vec![run_tcp_tokio_bench()];
+    if let Some(uring) = run_tcp_uring_bench() {
+        results.push(uring);
+    } else {
+        println!(
+            "(tcp-uring backend not built — enable with --features tcp-uring on Linux >= 5.10)\n"
+        );
+    }
+
+    println!("| Backend     |       p50 |       p99 |     p99.9 |    Throughput |");
+    println!("|-------------|-----------|-----------|-----------|---------------|");
+    for result in &results {
+        render_row(result);
+    }
+}

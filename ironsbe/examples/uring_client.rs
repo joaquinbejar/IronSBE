@@ -3,11 +3,10 @@
 //! Run with:
 //!
 //! ```sh
-//! cargo run --example uring_client \
-//!     --features ironsbe-client/tcp-uring,ironsbe-transport/tcp-uring
+//! cargo run -p ironsbe --example uring_client --features tcp-uring
 //! ```
 //!
-//! Pair with `cargo run --example uring_server --features ...`.
+//! Pair with `cargo run -p ironsbe --example uring_server --features tcp-uring`.
 //!
 //! On non-Linux platforms (or without the `tcp-uring` feature) the binary
 //! still compiles but `main` exits early with a clear message.

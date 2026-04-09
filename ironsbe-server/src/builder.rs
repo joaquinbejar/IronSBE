@@ -353,7 +353,7 @@ impl ServerHandle {
 }
 
 /// Commands that can be sent to the server.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ServerCommand {
     /// Shutdown the server.
     Shutdown,
@@ -366,6 +366,10 @@ pub enum ServerCommand {
 /// Events emitted by the server.
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
+    /// The server has bound its listener and is ready to accept
+    /// connections.  Carries the *effective* local address (useful when
+    /// the caller bound to port 0).
+    Listening(SocketAddr),
     /// A new session was created.
     SessionCreated(u64, SocketAddr),
     /// A session was closed.

@@ -3,9 +3,12 @@
 //! Run with:
 //!
 //! ```sh
-//! cargo run --example uring_server \
-//!     --features ironsbe-server/tcp-uring,ironsbe-transport/tcp-uring
+//! cargo run -p ironsbe --example uring_server --features tcp-uring
 //! ```
+//!
+//! `tcp-uring` here is the forwarding feature on the `ironsbe` umbrella
+//! crate, which transitively enables it on `ironsbe-server`,
+//! `ironsbe-client` and `ironsbe-transport`.
 //!
 //! On non-Linux platforms (or without the `tcp-uring` feature) the binary
 //! still compiles but `main` exits early with a clear message — that
