@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting IronSBE server on {}", addr);
     println!("Press Ctrl+C to stop");
 
-    let (mut server, handle) = ServerBuilder::new()
+    let (mut server, handle) = ServerBuilder::<EchoHandler>::with_default_transport()
         .bind(addr)
         .handler(handler)
         .max_connections(100)

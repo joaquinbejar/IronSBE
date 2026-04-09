@@ -28,3 +28,6 @@ src/.DS_Store
 /tarpaulin-report.html
 .secrets
 /scripts/
+CLAUDE.md
+.claude/
+.windsurf/
