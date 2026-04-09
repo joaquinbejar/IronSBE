@@ -1,7 +1,8 @@
 //! Linux io_uring TCP backend (feature `tcp-uring`).
 //!
-//! Implements [`crate::Transport`], [`crate::Listener`], and
-//! [`crate::Connection`] on top of [`tokio_uring`].  All operations submit
+//! Implements [`crate::traits::LocalTransport`],
+//! [`crate::traits::LocalListener`], and [`crate::traits::LocalConnection`]
+//! on top of [`tokio_uring`].  All operations submit
 //! Submission Queue Entries (SQEs) to the kernel via `io_uring(7)`, returning
 //! ownership of buffers in [`tokio_uring::BufResult`] so that no in-flight
 //! buffer is ever borrowed.
@@ -128,8 +129,8 @@ impl UringClientConfig {
 
 /// Linux io_uring TCP transport backend.
 ///
-/// Implements [`crate::Transport`].  All operations must be driven from
-/// inside a [`tokio_uring::start`] block.
+/// Implements [`traits::LocalTransport`].  All operations must be driven
+/// from inside a [`tokio_uring::start`] block.
 pub struct UringTcpTransport;
 
 impl traits::LocalTransport for UringTcpTransport {
@@ -285,6 +286,15 @@ impl traits::LocalConnection for UringConnection {
                 ),
             ));
         }
+        // The on-wire length prefix is a 4-byte little-endian u32, so any
+        // frame longer than u32::MAX cannot be encoded without truncation.
+        // Reject explicitly rather than letting `as u32` silently wrap.
+        let frame_len_u32: u32 = u32::try_from(frame_len).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame length {frame_len} exceeds u32::MAX"),
+            )
+        })?;
         let total = LENGTH_PREFIX_BYTES
             .checked_add(frame_len)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "frame length overflow"))?;
@@ -293,7 +303,7 @@ impl traits::LocalConnection for UringConnection {
         // path; a future change can use a pooled BytesMut to remove the
         // allocation.
         let mut framed = Vec::with_capacity(total);
-        framed.extend_from_slice(&u32::to_le_bytes(frame_len as u32));
+        framed.extend_from_slice(&frame_len_u32.to_le_bytes());
         framed.extend_from_slice(&msg);
         // tokio-uring's write_all returns the buffer back regardless of
         // success so we can drop it cleanly.

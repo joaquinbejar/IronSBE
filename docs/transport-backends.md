@@ -139,6 +139,10 @@ pub trait Connection: Send + 'static {
 
     fn recv(&mut self) -> impl Future<Output = Result<Option<BytesMut>, Self::Error>> + Send + '_;
     fn send<'a>(&'a mut self, msg: &'a [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a;
+    /// Owned-buffer send.  Default impl forwards to `send`; backends with
+    /// zero-copy submission (io_uring, RDMA) override this to keep the
+    /// `Bytes` alive across the operation.
+    fn send_owned(&mut self, msg: Bytes) -> impl Future<Output = Result<(), Self::Error>> + Send + '_;
     fn peer_addr(&self) -> std::io::Result<SocketAddr>;
 }
 ```
@@ -174,21 +178,27 @@ drive based on the backend it was compiled with.
 - All transport operations must run inside a [`tokio_uring::start`] block:
 
   ```rust
-  tokio_uring::start(async {
-      let listener = UringTcpTransport::bind_with(
-          UringServerConfig::new("0.0.0.0:9000".parse()?)
-      ).await?;
-      // ...
-  });
+  fn main() -> std::io::Result<()> {
+      tokio_uring::start(async {
+          let addr = "0.0.0.0:9000".parse().expect("valid addr");
+          let listener = UringTcpTransport::bind_with(
+              UringServerConfig::new(addr)
+          ).await?;
+          // ...
+          Ok::<(), std::io::Error>(())
+      })?;
+      Ok(())
+  }
   ```
 
 ### Zero-copy `send_owned`
 
 The `Connection` and `LocalConnection` traits both expose
-`send_owned(Bytes)` with a default implementation that copies into a
-borrowed slice and forwards to `send`.  The io_uring backend overrides
-`send_owned` to keep the `Bytes` alive across the SQE submission so the
-kernel sees the buffer directly without an extra copy.
+`send_owned(Bytes)` with a default implementation that borrows the
+provided `Bytes` and forwards to `send`.  The io_uring backend overrides
+`send_owned` to keep the `Bytes` alive across the SQE submission, so
+the kernel can continue referencing that buffer directly for the
+operation.
 
 ### Wire format
 
