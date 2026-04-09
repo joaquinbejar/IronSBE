@@ -17,12 +17,25 @@ use bytes::{Bytes, BytesMut};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 /// Length-prefix size in bytes (matches `SbeFrameCodec`).
 const LENGTH_PREFIX_BYTES: usize = 4;
+
+/// Largest UDP/IPv4 payload that can be addressed by the 16-bit length
+/// field, minus the UDP header (8 bytes).  This caps the on-wire payload
+/// size, **including** our 4-byte SBE length prefix.
+const MAX_UDP_PAYLOAD: usize = u16::MAX as usize - 8;
+
+/// Default `max_frame_size` chosen so the on-wire UDP payload (prefix +
+/// SBE message) fits inside a single IPv4 datagram with comfortable
+/// headroom for the prefix.
+const DEFAULT_MAX_FRAME_SIZE: usize = MAX_UDP_PAYLOAD - LENGTH_PREFIX_BYTES;
 
 /// Per-peer connection state held inside [`UdpStack`].
 struct ConnectionState {
@@ -31,6 +44,12 @@ struct ConnectionState {
     peer_mac: MacAddr,
     /// Inbound SBE frames waiting to be consumed by `recv`.
     rx_queue: VecDeque<BytesMut>,
+    /// Waker stored when `recv` is awaiting a frame.  Woken from `on_rx`
+    /// the next time a frame for this peer is enqueued.
+    rx_waker: Option<Waker>,
+    /// `true` once the application drops the connection.  Causes pending
+    /// `recv` futures to resolve to `Ok(None)` ("peer closed").
+    closed: bool,
 }
 
 /// Configuration for [`UdpStack`].
@@ -50,20 +69,29 @@ pub struct UdpStackConfig {
 
 impl UdpStackConfig {
     /// Creates a new UDP stack config with the given local L3/L2 identity.
+    ///
+    /// The default `max_frame_size` is the largest SBE message that can
+    /// fit in a single IPv4/UDP datagram once the 4-byte length prefix
+    /// is accounted for.
     #[must_use]
     pub fn new(local_ip: Ipv4Addr, local_port: u16, local_mac: MacAddr) -> Self {
         Self {
             local_ip,
             local_port,
             local_mac,
-            max_frame_size: 64 * 1024,
+            max_frame_size: DEFAULT_MAX_FRAME_SIZE,
         }
     }
 
-    /// Sets the maximum SBE frame size.
+    /// Sets the maximum SBE frame size in bytes.
+    ///
+    /// The on-wire UDP payload is `size + 4` (length prefix); requests
+    /// that would exceed `MAX_UDP_PAYLOAD` are silently clamped down so
+    /// callers cannot accidentally configure an unrepresentable frame
+    /// size.
     #[must_use]
     pub fn max_frame_size(mut self, size: usize) -> Self {
-        self.max_frame_size = size;
+        self.max_frame_size = size.min(MAX_UDP_PAYLOAD - LENGTH_PREFIX_BYTES);
         self
     }
 }
@@ -74,8 +102,6 @@ struct UdpStackInner {
     config: UdpStackConfig,
     /// Map from peer `(ip, port)` to the per-connection state.
     connections: HashMap<SocketAddrV4, ConnectionState>,
-    /// FIFO of newly accepted peers, drained by the listener.
-    pending_accepts: VecDeque<SocketAddrV4>,
     /// Outbound frames built by `UdpConnection::send`.  The datapath
     /// drains this on its next poll round.
     pending_tx: VecDeque<Vec<u8>>,
@@ -87,17 +113,28 @@ impl UdpStackInner {
             .connections
             .get(&peer)
             .ok_or_else(|| FrameError::Malformed(format!("no connection state for peer {peer}")))?;
-        // Length-prefixed framing on top of UDP.
+        // Length-prefixed framing on top of UDP.  We check the **on-wire**
+        // size (prefix + payload), not just the payload, to make sure the
+        // resulting datagram still fits inside the configured ceiling.
         let frame_len = payload.len();
-        if frame_len > self.config.max_frame_size {
-            return Err(FrameError::BufferTooSmall {
-                needed: frame_len,
-                got: self.config.max_frame_size,
-            });
+        let datagram_len = LENGTH_PREFIX_BYTES.checked_add(frame_len).ok_or_else(|| {
+            FrameError::Malformed(format!(
+                "frame length overflow: prefix {LENGTH_PREFIX_BYTES} + payload {frame_len}"
+            ))
+        })?;
+        let max_on_wire = self
+            .config
+            .max_frame_size
+            .checked_add(LENGTH_PREFIX_BYTES)
+            .unwrap_or(MAX_UDP_PAYLOAD);
+        if datagram_len > max_on_wire {
+            return Err(FrameError::Malformed(format!(
+                "frame too large: on-wire UDP payload {datagram_len} exceeds limit {max_on_wire}"
+            )));
         }
         let frame_len_u32 = u32::try_from(frame_len)
             .map_err(|_| FrameError::Malformed(format!("frame length {frame_len} > u32::MAX")))?;
-        let mut datagram = Vec::with_capacity(LENGTH_PREFIX_BYTES + frame_len);
+        let mut datagram = Vec::with_capacity(datagram_len);
         datagram.extend_from_slice(&frame_len_u32.to_le_bytes());
         datagram.extend_from_slice(payload);
         build_udp_ipv4(
@@ -125,7 +162,6 @@ impl UdpStack {
             inner: Rc::new(RefCell::new(UdpStackInner {
                 config,
                 connections: HashMap::new(),
-                pending_accepts: VecDeque::new(),
                 pending_tx: VecDeque::new(),
             })),
         }
@@ -138,17 +174,6 @@ impl UdpStack {
         while let Some(frame) = inner.pending_tx.pop_front() {
             out.push(frame);
         }
-    }
-
-    /// Returns the next newly-accepted peer, if any.
-    #[must_use]
-    pub fn accept(&self) -> Option<UdpConnection> {
-        let mut inner = self.inner.borrow_mut();
-        let peer = inner.pending_accepts.pop_front()?;
-        Some(UdpConnection {
-            peer,
-            inner: Rc::clone(&self.inner),
-        })
     }
 }
 
@@ -234,14 +259,19 @@ impl XdpStack for UdpStack {
                 peer_port: udp.src_port,
                 peer_mac,
                 rx_queue: VecDeque::new(),
+                rx_waker: None,
+                closed: false,
             });
-            inner.pending_accepts.push_back(peer_addr);
             true
         } else {
             false
         };
         if let Some(state) = inner.connections.get_mut(&peer_addr) {
             state.rx_queue.push_back(payload);
+            // Wake any pending recv() future for this peer.
+            if let Some(waker) = state.rx_waker.take() {
+                waker.wake();
+            }
         }
         drop(inner);
 
@@ -271,23 +301,67 @@ pub struct UdpConnection {
     inner: Rc<RefCell<UdpStackInner>>,
 }
 
+impl Drop for UdpConnection {
+    fn drop(&mut self) {
+        // Mark the connection closed so any in-flight `recv` future for
+        // this peer resolves to `Ok(None)` rather than waiting forever.
+        if let Ok(mut inner) = self.inner.try_borrow_mut()
+            && let Some(state) = inner.connections.get_mut(&self.peer)
+        {
+            state.closed = true;
+            if let Some(waker) = state.rx_waker.take() {
+                waker.wake();
+            }
+        }
+    }
+}
+
+/// Future returned by [`UdpConnection::recv`].
+///
+/// Resolves to `Ok(Some(frame))` when a frame is available for the peer,
+/// `Ok(None)` when the connection has been closed (the application
+/// dropped its [`UdpConnection`] handle), or `Err` if the per-peer state
+/// has been evicted from the stack.
+struct UdpRecvFuture {
+    peer: SocketAddrV4,
+    inner: Rc<RefCell<UdpStackInner>>,
+}
+
+impl Future for UdpRecvFuture {
+    type Output = io::Result<Option<BytesMut>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self.inner.borrow_mut();
+        let state = match inner.connections.get_mut(&self.peer) {
+            Some(s) => s,
+            None => {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    format!("peer {} dropped from stack state", self.peer),
+                )));
+            }
+        };
+        if let Some(frame) = state.rx_queue.pop_front() {
+            return Poll::Ready(Ok(Some(frame)));
+        }
+        if state.closed {
+            return Poll::Ready(Ok(None));
+        }
+        // Park: register our waker so `XdpStack::on_rx` (or `Drop`) wakes
+        // us when a frame is enqueued or the connection is closed.
+        state.rx_waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
 impl LocalConnection for UdpConnection {
     type Error = io::Error;
 
-    async fn recv(&mut self) -> io::Result<Option<BytesMut>> {
-        // The datapath drains the rx queue synchronously by calling
-        // `XdpStack::on_rx`, so by the time `recv` is awaited, frames
-        // for this peer are already enqueued in `rx_queue`.  If none
-        // are available we return Ok(None) (no message yet); the outer
-        // listener loop drives the datapath again before re-polling.
-        let mut inner = self.inner.borrow_mut();
-        let state = inner.connections.get_mut(&self.peer).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotConnected,
-                format!("peer {} dropped from stack state", self.peer),
-            )
-        })?;
-        Ok(state.rx_queue.pop_front())
+    fn recv(&mut self) -> impl Future<Output = io::Result<Option<BytesMut>>> + '_ {
+        UdpRecvFuture {
+            peer: self.peer,
+            inner: Rc::clone(&self.inner),
+        }
     }
 
     async fn send(&mut self, msg: &[u8]) -> io::Result<()> {

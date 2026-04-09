@@ -80,6 +80,7 @@ pub struct ParsedArp {
 ///
 /// # Errors
 /// Returns [`FrameError::Malformed`] if the frame is too short.
+#[inline]
 pub fn parse_ethernet(frame: &[u8]) -> Result<ParsedFrame<'_>, FrameError> {
     let (eth, rest) =
         Ethernet2Header::from_slice(frame).map_err(|e| FrameError::Malformed(e.to_string()))?;
@@ -98,6 +99,7 @@ pub fn parse_ethernet(frame: &[u8]) -> Result<ParsedFrame<'_>, FrameError> {
 ///
 /// # Errors
 /// Returns [`FrameError::Malformed`] if the frame fails to parse.
+#[inline]
 pub fn parse_ipv4_udp(frame: &[u8]) -> Result<Option<ParsedUdp<'_>>, FrameError> {
     let sliced =
         SlicedPacket::from_ethernet(frame).map_err(|e| FrameError::Malformed(e.to_string()))?;
@@ -167,8 +169,11 @@ pub fn parse_arp(frame: &[u8]) -> Result<Option<ParsedArp>, FrameError> {
 /// TX ring slot.
 ///
 /// # Errors
-/// Returns [`FrameError::BufferTooSmall`] if the payload exceeds the
-/// addressable IPv4 datagram size.
+/// Returns [`FrameError::Malformed`] if `etherparse` rejects the inputs
+/// (oversized payload, header layout problem, …).  Note that the helper
+/// does not currently distinguish "payload too large" from other framing
+/// problems; callers that need finer-grained errors should validate the
+/// payload length up-front.
 pub fn build_udp_ipv4(
     src_mac: MacAddr,
     dst_mac: MacAddr,

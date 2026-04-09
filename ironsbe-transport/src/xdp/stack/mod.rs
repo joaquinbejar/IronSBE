@@ -10,7 +10,9 @@
 //!   with `tcp-tokio` / `tcp-uring`, at the cost of higher complexity and
 //!   per-connection state.
 //!
-//! Backends pick one of the two via [`crate::xdp::config::XdpServerConfig`].
+//! Backends choose one of these two stack implementations via their AF_XDP
+//! configuration (which lands together with the `xsk-rs` datapath in the
+//! follow-up issue).
 
 use crate::traits::LocalConnection;
 use std::net::IpAddr;
