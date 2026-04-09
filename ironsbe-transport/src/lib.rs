@@ -31,6 +31,15 @@ pub mod udp;
 #[cfg(feature = "tcp-tokio")]
 pub mod tcp;
 
+/// Linux io_uring TCP backend (feature `tcp-uring`).
+///
+/// This module is only compiled on Linux.  On other platforms enabling the
+/// `tcp-uring` feature is a no-op so the workspace can still build with the
+/// flag enabled (the optional `tokio-uring` dependency is target-conditional
+/// in `Cargo.toml`).
+#[cfg(all(feature = "tcp-uring", target_os = "linux"))]
+pub mod tcp_uring;
+
 pub use error::TransportError;
 pub use traits::{Connection, Listener, Transport};
 
