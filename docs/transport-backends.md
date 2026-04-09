@@ -1,9 +1,20 @@
 # Transport Backends
 
 IronSBE uses a pluggable transport architecture. The `ironsbe-transport` crate
-defines three traits — `Transport`, `Listener`, and `Connection` — that abstract
-over the underlying network implementation. Concrete backends are selected at
-compile time via Cargo feature flags.
+defines two parallel trait families:
+
+- **`Transport` / `Listener` / `Connection`** — multi-threaded backends
+  (`Send + Sync`).  Used by `tcp-tokio` and any future backend whose handle
+  types are safe to share across threads.
+- **`LocalTransport` / `LocalListener` / `LocalConnection`** — single-threaded
+  thread-per-core backends (`!Send`).  Used by `tcp-uring` (and any future
+  `monoio`/`io_uring`-style backend whose handle types contain `Rc<...>`).
+
+Both families share the same `BindConfig` / `ConnectConfig` plumbing and the
+same wire format (4-byte little-endian length prefix), so a server using one
+family can talk to a client using the other.
+
+Concrete backends are selected at compile time via Cargo feature flags.
 
 ## Default backend: `tcp-tokio`
 
@@ -130,6 +141,77 @@ pub trait Connection: Send + 'static {
     fn send<'a>(&'a mut self, msg: &'a [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a;
     fn peer_addr(&self) -> std::io::Result<SocketAddr>;
 }
+```
+
+## Linux io_uring backend: `tcp-uring`
+
+The `tcp-uring` feature provides an io_uring-based TCP backend built on
+[`tokio-uring`](https://crates.io/crates/tokio-uring).  It is **Linux-only**:
+on any other platform the feature flag compiles to a no-op so workspace
+builds with `--all-features` continue to work.
+
+| Type                  | Trait it implements |
+|-----------------------|---------------------|
+| `UringTcpTransport`   | `LocalTransport`    |
+| `UringListener`       | `LocalListener`     |
+| `UringConnection`     | `LocalConnection`   |
+
+### Why a separate trait family
+
+`tokio-uring`'s handle types (`TcpListener`, `TcpStream`) contain `Rc<...>`
+internally because the runtime is single-threaded by design.  They are
+therefore `!Send` and `!Sync`, and cannot satisfy the `Send + Sync` bounds
+of the multi-threaded `Transport` family.  Rather than relax those bounds
+(and break the `tcp-tokio` server), we expose a parallel
+`LocalTransport` / `LocalListener` / `LocalConnection` family with the
+`Send` bounds dropped.  Server integration code chooses which family to
+drive based on the backend it was compiled with.
+
+### Requirements
+
+- Linux kernel **≥ 5.10**.  Older kernels lack the syscalls used by
+  `tokio-uring 0.5`.
+- All transport operations must run inside a [`tokio_uring::start`] block:
+
+  ```rust
+  tokio_uring::start(async {
+      let listener = UringTcpTransport::bind_with(
+          UringServerConfig::new("0.0.0.0:9000".parse()?)
+      ).await?;
+      // ...
+  });
+  ```
+
+### Zero-copy `send_owned`
+
+The `Connection` and `LocalConnection` traits both expose
+`send_owned(Bytes)` with a default implementation that copies into a
+borrowed slice and forwards to `send`.  The io_uring backend overrides
+`send_owned` to keep the `Bytes` alive across the SQE submission so the
+kernel sees the buffer directly without an extra copy.
+
+### Wire format
+
+The io_uring backend uses the same 4-byte little-endian length-prefix
+framing as `tcp-tokio`, so the two backends are wire-compatible.
+
+### Scope
+
+This module ships the trait-level integration only.  Server integration
+(`ironsbe-server` running on a `tokio-uring` runtime), examples, and
+benchmark numbers are tracked in the follow-up issue.  Buffer pooling,
+registered buffers, registered fds and `IORING_OP_SEND_ZC` are also
+deferred to the same follow-up.
+
+### Building
+
+```sh
+# On Linux:
+cargo build -p ironsbe-transport --no-default-features --features tcp-uring
+
+# On macOS / Windows:
+# the feature flag is accepted but the module is gated out via cfg.
+cargo build -p ironsbe-transport --features tcp-uring
 ```
 
 ## Adding a new backend

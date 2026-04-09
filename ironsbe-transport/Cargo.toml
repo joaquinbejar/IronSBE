@@ -13,6 +13,9 @@ categories = ["network-programming", "asynchronous"]
 [features]
 default = ["tcp-tokio"]
 tcp-tokio = ["dep:tokio-util", "dep:futures", "dep:socket2"]
+# Linux-only io_uring backend.  Enabling this on a non-Linux platform compiles
+# the trait-level glue but the backend module is gated to `target_os = "linux"`.
+tcp-uring = ["dep:tokio-uring"]
 
 [dependencies]
 ironsbe-core = { workspace = true }
@@ -26,6 +29,9 @@ parking_lot = { workspace = true }
 tracing = { workspace = true }
 lru = { workspace = true }
 memmap2 = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-uring = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
