@@ -224,6 +224,93 @@ cargo build -p ironsbe-transport --no-default-features --features tcp-uring
 cargo build -p ironsbe-transport --features tcp-uring
 ```
 
+## AF_XDP partial kernel-bypass backend: `xdp-stacks` / `xdp`
+
+[AF_XDP](https://www.kernel.org/doc/html/latest/networking/af_xdp.html) is a
+Linux socket family that lets userspace receive and send raw Ethernet frames
+**directly from/to NIC queues** through a shared UMEM ring, bypassing the
+kernel TCP/IP stack on the queues we own while leaving the rest of the NIC's
+traffic on the normal kernel path.  It is the lowest-risk of the
+fast-path backends because it does not require dedicating the entire NIC to
+one process.
+
+The backend is split into two cargo features so the bulk of it can be used
+and tested without root or hardware:
+
+| Feature       | What it brings                                                                 | Where it compiles                  |
+|---------------|--------------------------------------------------------------------------------|------------------------------------|
+| `xdp-stacks`  | Pure-Rust frame parsers + `XdpStack` trait + `UdpStack` + `SmoltcpStack`       | Everywhere (macOS, Linux, Windows) |
+| `xdp` (TBD)   | `xdp-stacks` + the `xsk-rs`-based AF_XDP datapath that ferries frames in/out  | Linux ≥ 5.11 with an XDP-capable NIC |
+
+### Trait family
+
+AF_XDP is naturally thread-per-core (one socket per `(ifindex, queue_id)`)
+and the upcoming `xsk-rs` types are not designed for cross-thread sharing.
+The backend therefore implements the
+[`LocalTransport`](#single-threaded-trait-family) family, same as the
+io_uring backend.
+
+### Two stack options
+
+The L3/L4 layer above the AF_XDP raw frames is abstracted behind the
+[`XdpStack`] trait so users can pick the right trade-off:
+
+- **`UdpStack`** — minimal length-prefix framing on top of UDP/IPv4.  Lowest
+  latency, lowest complexity, but loses wire compatibility with the TCP
+  backends and the SBE message must fit in one UDP datagram.
+- **`SmoltcpStack`** — userspace TCP via the [`smoltcp`](https://crates.io/crates/smoltcp)
+  crate.  Wire-compatible with `tcp-tokio` / `tcp-uring`, at the cost of
+  higher complexity and per-connection state.
+
+```rust
+use ironsbe_transport::xdp::{
+    SmoltcpStack, SmoltcpStackConfig, UdpStack, UdpStackConfig,
+};
+use std::net::Ipv4Addr;
+
+let local_mac = [0x02, 0, 0, 0, 0, 0xaa];
+
+// UDP path: lowest latency, custom wire format.
+let udp = UdpStack::new(
+    UdpStackConfig::new(Ipv4Addr::new(10, 0, 0, 1), 9000, local_mac)
+        .max_frame_size(64 * 1024),
+);
+
+// TCP path: wire-compatible with tcp-tokio, full TCP semantics.
+let tcp = SmoltcpStack::new(
+    SmoltcpStackConfig::new(Ipv4Addr::new(10, 0, 0, 1), 24, 9000, local_mac)
+        .socket_buffer_size(64 * 1024)
+        .max_sessions(64),
+);
+```
+
+### Frame parsers
+
+The `xdp::frames` module exposes hand-rolled (RFC 826) ARP serialise /
+parse helpers and `etherparse`-based Ethernet/IPv4/UDP builders.  All
+parsers are pure functions returning `Result<_, FrameError>` and have
+unit tests that run on every host.
+
+### Scope of the current PR
+
+This first PR ships the **pure-Rust pieces only** (`xdp-stacks` feature):
+frame parsers, the `XdpStack` trait, `UdpStack` and `SmoltcpStack`, all
+covered by ~15 unit tests that run on macOS / Linux / Windows.
+
+The Linux-only `xdp` feature that brings in `xsk-rs` and the actual
+AF_XDP datapath is tracked separately in the follow-up issue, alongside
+the server integration (`ironsbe-server` worker-per-queue, core
+pinning), examples, and the benchmark suite that compares `tcp-tokio`,
+`tcp-uring` and `xdp` on real hardware.
+
+### Operational checklist (will move to the follow-up PR)
+
+The full operational guide — kernel ≥ 5.11, capabilities
+(`CAP_NET_ADMIN` / `CAP_NET_RAW` / `CAP_BPF`), `ethtool -N` queue
+steering recipe, copy-mode vs zero-copy fallback, driver matrix — will
+be added in the follow-up PR that lands the datapath, since it depends
+on the actual `xdp` cargo feature being usable.
+
 ## Adding a new backend
 
 1. **Create a module** under `ironsbe-transport/src/` (e.g., `io_uring/`).

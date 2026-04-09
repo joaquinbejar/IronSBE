@@ -1,0 +1,453 @@
+//! UDP-based [`XdpStack`](super::XdpStack) implementation.
+//!
+//! Each peer `(ip, port)` becomes one [`UdpConnection`].  Wire format on
+//! the UDP datagram payload is the standard SBE 4-byte little-endian
+//! length prefix followed by the message body.  Datagrams are not
+//! reassembled across UDP boundaries: each SBE message must fit in one
+//! datagram (subject to the path MTU).
+
+#![allow(clippy::module_name_repetitions)]
+
+use crate::traits::LocalConnection;
+use crate::xdp::frames::{
+    FrameError, MacAddr, build_arp_reply, build_udp_ipv4, parse_arp, parse_ipv4_udp,
+};
+use crate::xdp::stack::{FrameTxQueue, XdpStack};
+use bytes::{Bytes, BytesMut};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::rc::Rc;
+
+/// Length-prefix size in bytes (matches `SbeFrameCodec`).
+const LENGTH_PREFIX_BYTES: usize = 4;
+
+/// Per-peer connection state held inside [`UdpStack`].
+struct ConnectionState {
+    peer_ip: Ipv4Addr,
+    peer_port: u16,
+    peer_mac: MacAddr,
+    /// Inbound SBE frames waiting to be consumed by `recv`.
+    rx_queue: VecDeque<BytesMut>,
+}
+
+/// Configuration for [`UdpStack`].
+#[derive(Debug, Clone)]
+pub struct UdpStackConfig {
+    /// IPv4 address the stack will respond on.
+    pub local_ip: Ipv4Addr,
+    /// UDP port the stack will accept SBE messages on.
+    pub local_port: u16,
+    /// Local hardware (MAC) address used as the L2 source for outbound
+    /// frames and as the answer to ARP probes for `local_ip`.
+    pub local_mac: MacAddr,
+    /// Maximum SBE frame size in bytes.  Frames larger than this are
+    /// rejected on both rx and tx.
+    pub max_frame_size: usize,
+}
+
+impl UdpStackConfig {
+    /// Creates a new UDP stack config with the given local L3/L2 identity.
+    #[must_use]
+    pub fn new(local_ip: Ipv4Addr, local_port: u16, local_mac: MacAddr) -> Self {
+        Self {
+            local_ip,
+            local_port,
+            local_mac,
+            max_frame_size: 64 * 1024,
+        }
+    }
+
+    /// Sets the maximum SBE frame size.
+    #[must_use]
+    pub fn max_frame_size(mut self, size: usize) -> Self {
+        self.max_frame_size = size;
+        self
+    }
+}
+
+/// Shared state between the [`UdpStack`] and the [`UdpConnection`] handles
+/// it produces.
+struct UdpStackInner {
+    config: UdpStackConfig,
+    /// Map from peer `(ip, port)` to the per-connection state.
+    connections: HashMap<SocketAddrV4, ConnectionState>,
+    /// FIFO of newly accepted peers, drained by the listener.
+    pending_accepts: VecDeque<SocketAddrV4>,
+    /// Outbound frames built by `UdpConnection::send`.  The datapath
+    /// drains this on its next poll round.
+    pending_tx: VecDeque<Vec<u8>>,
+}
+
+impl UdpStackInner {
+    fn build_outbound(&self, peer: SocketAddrV4, payload: &[u8]) -> Result<Vec<u8>, FrameError> {
+        let state = self
+            .connections
+            .get(&peer)
+            .ok_or_else(|| FrameError::Malformed(format!("no connection state for peer {peer}")))?;
+        // Length-prefixed framing on top of UDP.
+        let frame_len = payload.len();
+        if frame_len > self.config.max_frame_size {
+            return Err(FrameError::BufferTooSmall {
+                needed: frame_len,
+                got: self.config.max_frame_size,
+            });
+        }
+        let frame_len_u32 = u32::try_from(frame_len)
+            .map_err(|_| FrameError::Malformed(format!("frame length {frame_len} > u32::MAX")))?;
+        let mut datagram = Vec::with_capacity(LENGTH_PREFIX_BYTES + frame_len);
+        datagram.extend_from_slice(&frame_len_u32.to_le_bytes());
+        datagram.extend_from_slice(payload);
+        build_udp_ipv4(
+            self.config.local_mac,
+            state.peer_mac,
+            self.config.local_ip,
+            state.peer_ip,
+            self.config.local_port,
+            state.peer_port,
+            &datagram,
+        )
+    }
+}
+
+/// UDP-based stack.  Single-threaded; not `Send`.
+pub struct UdpStack {
+    inner: Rc<RefCell<UdpStackInner>>,
+}
+
+impl UdpStack {
+    /// Creates a new UDP stack from `config`.
+    #[must_use]
+    pub fn new(config: UdpStackConfig) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(UdpStackInner {
+                config,
+                connections: HashMap::new(),
+                pending_accepts: VecDeque::new(),
+                pending_tx: VecDeque::new(),
+            })),
+        }
+    }
+
+    /// Drains the outbound queue into `out`.  Called by the datapath after
+    /// every rx round and timer poll.
+    pub fn drain_pending_tx(&self, out: &mut FrameTxQueue<'_>) {
+        let mut inner = self.inner.borrow_mut();
+        while let Some(frame) = inner.pending_tx.pop_front() {
+            out.push(frame);
+        }
+    }
+
+    /// Returns the next newly-accepted peer, if any.
+    #[must_use]
+    pub fn accept(&self) -> Option<UdpConnection> {
+        let mut inner = self.inner.borrow_mut();
+        let peer = inner.pending_accepts.pop_front()?;
+        Some(UdpConnection {
+            peer,
+            inner: Rc::clone(&self.inner),
+        })
+    }
+}
+
+/// Errors produced by the UDP stack.
+#[derive(Debug, thiserror::Error)]
+pub enum UdpStackError {
+    /// Frame parsing or construction failed.
+    #[error("frame error: {0}")]
+    Frame(#[from] FrameError),
+}
+
+impl XdpStack for UdpStack {
+    type Connection = UdpConnection;
+    type Error = UdpStackError;
+
+    fn on_rx(
+        &mut self,
+        frame: &[u8],
+        out: &mut FrameTxQueue<'_>,
+    ) -> Result<Option<UdpConnection>, UdpStackError> {
+        // Try ARP first (cheap, common during startup).
+        if let Some(arp) = parse_arp(frame).ok().flatten()
+            && arp.operation == 1
+            && arp.target_ip == self.inner.borrow().config.local_ip
+        {
+            let inner = self.inner.borrow();
+            let reply = build_arp_reply(
+                inner.config.local_mac,
+                inner.config.local_ip,
+                arp.sender_mac,
+                arp.sender_ip,
+            )?;
+            out.push(reply);
+            return Ok(None);
+        }
+
+        // Then UDP/IPv4.
+        let Some(udp) = parse_ipv4_udp(frame).ok().flatten() else {
+            return Ok(None);
+        };
+        if udp.dst_ip != self.inner.borrow().config.local_ip
+            || udp.dst_port != self.inner.borrow().config.local_port
+        {
+            return Ok(None);
+        }
+        // Length-prefix decode of the UDP payload.
+        if udp.payload.len() < LENGTH_PREFIX_BYTES {
+            return Ok(None);
+        }
+        let frame_len = u32::from_le_bytes([
+            udp.payload[0],
+            udp.payload[1],
+            udp.payload[2],
+            udp.payload[3],
+        ]) as usize;
+        if frame_len > self.inner.borrow().config.max_frame_size {
+            return Ok(None);
+        }
+        let total = LENGTH_PREFIX_BYTES
+            .checked_add(frame_len)
+            .filter(|t| *t <= udp.payload.len())
+            .ok_or_else(|| {
+                UdpStackError::Frame(FrameError::Malformed(format!(
+                    "udp payload {} too short for frame_len {}",
+                    udp.payload.len(),
+                    frame_len
+                )))
+            })?;
+        let payload = BytesMut::from(&udp.payload[LENGTH_PREFIX_BYTES..total]);
+
+        // Look up the source MAC from the Ethernet header so we can talk
+        // back to the same peer.
+        let parsed_eth = crate::xdp::frames::parse_ethernet(frame)?;
+        let peer_mac = parsed_eth.src_mac;
+        let peer_addr = SocketAddrV4::new(udp.src_ip, udp.src_port);
+
+        let mut inner = self.inner.borrow_mut();
+        let new_conn = if let std::collections::hash_map::Entry::Vacant(slot) =
+            inner.connections.entry(peer_addr)
+        {
+            slot.insert(ConnectionState {
+                peer_ip: udp.src_ip,
+                peer_port: udp.src_port,
+                peer_mac,
+                rx_queue: VecDeque::new(),
+            });
+            inner.pending_accepts.push_back(peer_addr);
+            true
+        } else {
+            false
+        };
+        if let Some(state) = inner.connections.get_mut(&peer_addr) {
+            state.rx_queue.push_back(payload);
+        }
+        drop(inner);
+
+        if new_conn {
+            Ok(Some(UdpConnection {
+                peer: peer_addr,
+                inner: Rc::clone(&self.inner),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn poll_timers(&mut self, _out: &mut FrameTxQueue<'_>) -> Result<(), UdpStackError> {
+        // UDP stack has no timers.
+        Ok(())
+    }
+
+    fn local_ip(&self) -> IpAddr {
+        IpAddr::V4(self.inner.borrow().config.local_ip)
+    }
+}
+
+/// One peer connection produced by [`UdpStack`].
+pub struct UdpConnection {
+    peer: SocketAddrV4,
+    inner: Rc<RefCell<UdpStackInner>>,
+}
+
+impl LocalConnection for UdpConnection {
+    type Error = io::Error;
+
+    async fn recv(&mut self) -> io::Result<Option<BytesMut>> {
+        // The datapath drains the rx queue synchronously by calling
+        // `XdpStack::on_rx`, so by the time `recv` is awaited, frames
+        // for this peer are already enqueued in `rx_queue`.  If none
+        // are available we return Ok(None) (no message yet); the outer
+        // listener loop drives the datapath again before re-polling.
+        let mut inner = self.inner.borrow_mut();
+        let state = inner.connections.get_mut(&self.peer).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                format!("peer {} dropped from stack state", self.peer),
+            )
+        })?;
+        Ok(state.rx_queue.pop_front())
+    }
+
+    async fn send(&mut self, msg: &[u8]) -> io::Result<()> {
+        let owned = Bytes::copy_from_slice(msg);
+        self.send_owned(owned).await
+    }
+
+    async fn send_owned(&mut self, msg: Bytes) -> io::Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        let frame = inner
+            .build_outbound(self.peer, &msg)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        inner.pending_tx.push_back(frame);
+        Ok(())
+    }
+
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        Ok(SocketAddr::V4(self.peer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOCAL_MAC: MacAddr = [0x02, 0, 0, 0, 0, 0xaa];
+    const PEER_MAC: MacAddr = [0x02, 0, 0, 0, 0, 0xbb];
+    const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+    const PEER_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+
+    fn make_stack() -> UdpStack {
+        UdpStack::new(UdpStackConfig::new(LOCAL_IP, 9000, LOCAL_MAC).max_frame_size(4096))
+    }
+
+    /// Builds an inbound UDP frame from peer to local with a length-prefixed
+    /// payload, ready to be fed into `on_rx`.
+    fn inbound_frame(payload: &[u8]) -> Vec<u8> {
+        let frame_len_u32 = payload.len() as u32;
+        let mut datagram = Vec::with_capacity(4 + payload.len());
+        datagram.extend_from_slice(&frame_len_u32.to_le_bytes());
+        datagram.extend_from_slice(payload);
+        build_udp_ipv4(
+            PEER_MAC, LOCAL_MAC, PEER_IP, LOCAL_IP, 5555, 9000, &datagram,
+        )
+        .expect("build inbound")
+    }
+
+    #[test]
+    fn test_first_frame_creates_connection_and_emits_payload() {
+        let mut stack = make_stack();
+        let mut tx = Vec::new();
+        let mut q = FrameTxQueue::new(&mut tx);
+        let frame = inbound_frame(b"hello");
+        let conn = stack.on_rx(&frame, &mut q).expect("on_rx ok");
+        assert!(conn.is_some(), "first frame should accept a new connection");
+        assert!(tx.is_empty(), "no outbound traffic on rx");
+    }
+
+    #[test]
+    fn test_second_frame_from_same_peer_reuses_connection() {
+        let mut stack = make_stack();
+        let mut tx = Vec::new();
+        let mut q = FrameTxQueue::new(&mut tx);
+        let frame1 = inbound_frame(b"first");
+        let frame2 = inbound_frame(b"second");
+        let conn = stack.on_rx(&frame1, &mut q).expect("on_rx 1");
+        assert!(conn.is_some());
+        let conn = stack.on_rx(&frame2, &mut q).expect("on_rx 2");
+        assert!(conn.is_none(), "second frame must not produce a new conn");
+    }
+
+    #[test]
+    fn test_frame_to_wrong_port_is_dropped() {
+        let mut stack = make_stack();
+        let mut tx = Vec::new();
+        let mut q = FrameTxQueue::new(&mut tx);
+        let datagram = {
+            let mut d = Vec::new();
+            d.extend_from_slice(&1u32.to_le_bytes());
+            d.push(b'x');
+            d
+        };
+        let frame = build_udp_ipv4(
+            PEER_MAC, LOCAL_MAC, PEER_IP, LOCAL_IP, 5555, 9999, &datagram,
+        )
+        .expect("build");
+        let conn = stack.on_rx(&frame, &mut q).expect("on_rx");
+        assert!(conn.is_none());
+    }
+
+    #[test]
+    fn test_arp_request_for_local_ip_emits_reply() {
+        use etherparse::{EtherType, Ethernet2Header};
+        // Hand-roll an ARP request (RFC 826) so the test does not depend
+        // on etherparse's evolving ARP types.
+        let eth = Ethernet2Header {
+            source: PEER_MAC,
+            destination: [0xff; 6],
+            ether_type: EtherType::ARP,
+        };
+        let mut frame = Vec::new();
+        eth.write(&mut frame).expect("eth");
+        frame.extend_from_slice(&1u16.to_be_bytes()); // HTYPE
+        frame.extend_from_slice(&0x0800u16.to_be_bytes()); // PTYPE
+        frame.push(6); // HLEN
+        frame.push(4); // PLEN
+        frame.extend_from_slice(&1u16.to_be_bytes()); // OPER = request
+        frame.extend_from_slice(&PEER_MAC);
+        frame.extend_from_slice(&PEER_IP.octets());
+        frame.extend_from_slice(&[0u8; 6]);
+        frame.extend_from_slice(&LOCAL_IP.octets());
+
+        let mut stack = make_stack();
+        let mut tx = Vec::new();
+        let mut q = FrameTxQueue::new(&mut tx);
+        let conn = stack.on_rx(&frame, &mut q).expect("on_rx");
+        assert!(conn.is_none(), "arp must not produce a Connection");
+        assert_eq!(tx.len(), 1, "arp request must produce exactly one reply");
+    }
+
+    #[test]
+    fn test_send_owned_then_accept_and_recv_round_trip() {
+        // Synchronous round-trip: feed one inbound frame, accept the
+        // connection, recv the payload, send a response, and verify the
+        // outbound frame appears in pending_tx.
+        let mut stack = make_stack();
+        let mut tx = Vec::new();
+        let mut q = FrameTxQueue::new(&mut tx);
+        let frame = inbound_frame(b"hello");
+        let mut conn = stack
+            .on_rx(&frame, &mut q)
+            .expect("on_rx")
+            .expect("conn produced");
+
+        // Drain rx via the LocalConnection trait method.  We poll the
+        // future once because the implementation is synchronous.
+        let fut = conn.recv();
+        let received = futures_lite_poll(fut).expect("recv ok").expect("frame");
+        assert_eq!(&received[..], b"hello");
+
+        // Send a response and confirm it ended up in pending_tx.
+        let send_fut = async { conn.send_owned(Bytes::from_static(b"world")).await };
+        let send_res = futures_lite_poll(send_fut);
+        assert!(send_res.is_ok(), "send_owned must succeed");
+        stack.drain_pending_tx(&mut q);
+        assert_eq!(tx.len(), 1, "exactly one outbound frame should be queued");
+    }
+
+    /// Synchronously poll a future that is known not to actually `.await`
+    /// anything (because the UDP stack is fully synchronous).  Used in
+    /// tests to avoid pulling in tokio just for `block_on`.
+    fn futures_lite_poll<T>(fut: impl std::future::Future<Output = T>) -> T {
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut fut = pin!(fut);
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("UdpStack futures must complete synchronously in tests"),
+        }
+    }
+}
