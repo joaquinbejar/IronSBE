@@ -38,20 +38,64 @@ pub trait Transport: Send + Sync + 'static {
     type Connection: Connection;
     /// Error type returned by transport operations.
     type Error: std::error::Error + Send + Sync + 'static;
+    /// Backend-specific configuration consumed by [`bind_with`](Self::bind_with).
+    ///
+    /// Must be constructible from a bare [`SocketAddr`] so generic callers
+    /// that only know the bind address can still spin up a listener with
+    /// default tunables.
+    type BindConfig: From<SocketAddr> + Clone + Send + Sync + 'static;
+    /// Backend-specific configuration consumed by [`connect_with`](Self::connect_with).
+    ///
+    /// Must be constructible from a bare [`SocketAddr`] for the same reason
+    /// as [`BindConfig`](Self::BindConfig).
+    type ConnectConfig: From<SocketAddr> + Clone + Send + Sync + 'static;
 
-    /// Binds a listener to `addr`.
+    /// Binds a listener using a backend-specific configuration.
+    ///
+    /// Backends must implement this method.  [`bind`](Self::bind) is provided
+    /// as a default that constructs `Self::BindConfig` from the address only.
     ///
     /// # Errors
     /// Returns an error if the address is already in use or binding fails.
-    fn bind(addr: SocketAddr) -> impl Future<Output = Result<Self::Listener, Self::Error>> + Send;
+    fn bind_with(
+        config: Self::BindConfig,
+    ) -> impl Future<Output = Result<Self::Listener, Self::Error>> + Send;
 
-    /// Opens a client connection to `addr`.
+    /// Opens a client connection using a backend-specific configuration.
+    ///
+    /// Backends must implement this method.  [`connect`](Self::connect) is
+    /// provided as a default that constructs `Self::ConnectConfig` from the
+    /// address only.
+    ///
+    /// # Errors
+    /// Returns an error if the connection cannot be established.
+    fn connect_with(
+        config: Self::ConnectConfig,
+    ) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send;
+
+    /// Binds a listener to `addr` using default tunables.
+    ///
+    /// Convenience wrapper around [`bind_with`](Self::bind_with) for callers
+    /// that do not need to override backend-specific options.
+    ///
+    /// # Errors
+    /// Returns an error if the address is already in use or binding fails.
+    fn bind(addr: SocketAddr) -> impl Future<Output = Result<Self::Listener, Self::Error>> + Send {
+        Self::bind_with(Self::BindConfig::from(addr))
+    }
+
+    /// Opens a client connection to `addr` using default tunables.
+    ///
+    /// Convenience wrapper around [`connect_with`](Self::connect_with) for
+    /// callers that do not need to override backend-specific options.
     ///
     /// # Errors
     /// Returns an error if the connection cannot be established.
     fn connect(
         addr: SocketAddr,
-    ) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send {
+        Self::connect_with(Self::ConnectConfig::from(addr))
+    }
 }
 
 /// Server-side listener that accepts incoming connections.

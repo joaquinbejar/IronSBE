@@ -40,6 +40,13 @@ impl Default for TcpClientConfig {
     }
 }
 
+impl From<SocketAddr> for TcpClientConfig {
+    /// Creates a config with default tunables targeting `addr`.
+    fn from(addr: SocketAddr) -> Self {
+        Self::new(addr)
+    }
+}
+
 impl TcpClientConfig {
     /// Creates a new client config with the specified server address.
     #[must_use]

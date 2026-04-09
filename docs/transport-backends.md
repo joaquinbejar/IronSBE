@@ -44,10 +44,37 @@ pub trait Transport: Send + Sync + 'static {
     type Listener: Listener;
     type Connection: Connection;
     type Error: std::error::Error + Send + Sync + 'static;
+    type BindConfig: From<SocketAddr> + Clone + Send + Sync + 'static;
+    type ConnectConfig: From<SocketAddr> + Clone + Send + Sync + 'static;
 
-    fn bind(addr: SocketAddr) -> impl Future<Output = Result<Self::Listener, Self::Error>> + Send;
-    fn connect(addr: SocketAddr) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send;
+    // Backends must implement these.
+    fn bind_with(config: Self::BindConfig)    -> impl Future<Output = Result<Self::Listener,   Self::Error>> + Send;
+    fn connect_with(config: Self::ConnectConfig) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send;
+
+    // Provided defaults: build a config from the address only.
+    fn bind(addr: SocketAddr)    -> impl Future<Output = Result<Self::Listener,   Self::Error>> + Send { /* ... */ }
+    fn connect(addr: SocketAddr) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send { /* ... */ }
 }
+```
+
+#### Backend tunables
+
+`BindConfig` and `ConnectConfig` are how each backend exposes its own tunables
+(frame size, NODELAY, socket buffers, queue depth, …) without leaking concrete
+types into upstream generic code.  For the Tokio TCP backend they are
+[`TcpServerConfig`] and [`TcpClientConfig`] respectively.
+
+`ServerBuilder::bind_config(cfg)` and `ClientBuilder::connect_config(cfg)` let
+callers supply a fully-constructed config.  When the `tcp-tokio` feature is
+enabled, both builders also expose a `max_frame_size(usize)` shortcut so the
+common case does not require importing the backend's config types.
+
+```rust
+let (server, _) = ServerBuilder::<MyHandler>::with_default_transport()
+    .bind("0.0.0.0:9000".parse()?)
+    .max_frame_size(256 * 1024) // raise above the 64 KiB default
+    .handler(handler)
+    .build();
 ```
 
 ### `Listener`
@@ -113,8 +140,31 @@ they are already generic over `T: Transport`.
 
 ```sh
 cargo check -p ironsbe-transport --no-default-features
+cargo check -p ironsbe-server    --no-default-features
+cargo check -p ironsbe-client    --no-default-features
 ```
 
 This compiles the trait definitions, error types, and non-TCP modules (UDP, IPC)
 but excludes all TCP code. Useful for environments that only need the trait
-interface (e.g., a test-double crate).
+interface (e.g., a test-double crate, or a downstream crate that plugs in its
+own backend).
+
+### Default type parameter gating
+
+`ServerBuilder<H, T>` and `ClientBuilder<T>` provide `T = DefaultTransport` as a
+default **only** when the `tcp-tokio` feature is enabled.  With the feature
+disabled the default is removed and `T` must be specified explicitly:
+
+```rust
+// With tcp-tokio (default): T inferred as DefaultTransport.
+let (server, _) = ServerBuilder::<MyHandler>::new().handler(h).build();
+
+// Without tcp-tokio: T must be supplied.
+let (server, _) = ServerBuilder::<MyHandler, MyCustomTransport>::new()
+    .handler(h)
+    .build();
+```
+
+This is intentional: if no backend feature is on, falling back to a stub
+`DefaultTransport` would silently fail at runtime instead of at compile time.
+We prefer the loud error.

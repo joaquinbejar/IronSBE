@@ -5,7 +5,6 @@
 //! and is the default backend when the `tcp-tokio` feature is enabled.
 
 use crate::traits;
-use std::net::SocketAddr;
 
 pub mod client;
 pub mod framing;
@@ -39,16 +38,24 @@ impl traits::Transport for TokioTcpTransport {
     type Listener = TcpServer;
     type Connection = TcpConnection;
     type Error = std::io::Error;
+    type BindConfig = TcpServerConfig;
+    type ConnectConfig = TcpClientConfig;
 
-    async fn bind(addr: SocketAddr) -> Result<TcpServer, std::io::Error> {
-        TcpServer::bind(TcpServerConfig::new(addr)).await
+    async fn bind_with(config: TcpServerConfig) -> Result<TcpServer, std::io::Error> {
+        TcpServer::bind(config).await
     }
 
-    async fn connect(addr: SocketAddr) -> Result<TcpConnection, std::io::Error> {
-        let stream = tokio::net::TcpStream::connect(addr).await?;
-        stream.set_nodelay(true)?;
+    async fn connect_with(config: TcpClientConfig) -> Result<TcpConnection, std::io::Error> {
+        let stream = tokio::time::timeout(
+            config.connect_timeout,
+            tokio::net::TcpStream::connect(config.server_addr),
+        )
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout"))??;
+        stream.set_nodelay(config.tcp_nodelay)?;
         let peer_addr = stream.peer_addr()?;
-        let framed = tokio_util::codec::Framed::new(stream, SbeFrameCodec::new(64 * 1024));
+        let framed =
+            tokio_util::codec::Framed::new(stream, SbeFrameCodec::new(config.max_frame_size));
         Ok(TcpConnection::from_framed(framed, peer_addr))
     }
 }

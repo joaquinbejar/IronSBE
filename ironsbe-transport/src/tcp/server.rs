@@ -33,6 +33,13 @@ impl Default for TcpServerConfig {
     }
 }
 
+impl From<SocketAddr> for TcpServerConfig {
+    /// Creates a config with default tunables bound to `addr`.
+    fn from(addr: SocketAddr) -> Self {
+        Self::new(addr)
+    }
+}
+
 impl TcpServerConfig {
     /// Creates a new server config with the specified bind address.
     #[must_use]
@@ -54,6 +61,13 @@ impl TcpServerConfig {
     #[must_use]
     pub fn max_frame_size(mut self, size: usize) -> Self {
         self.max_frame_size = size;
+        self
+    }
+
+    /// Sets TCP_NODELAY.
+    #[must_use]
+    pub fn tcp_nodelay(mut self, enabled: bool) -> Self {
+        self.tcp_nodelay = enabled;
         self
     }
 }
