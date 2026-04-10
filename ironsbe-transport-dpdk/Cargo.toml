@@ -1,0 +1,26 @@
+[package]
+name = "ironsbe-transport-dpdk"
+description = "DPDK transport backend for IronSBE (Linux-only, opt-in)"
+version = "0.3.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["dpdk", "transport", "low-latency", "kernel-bypass"]
+categories = ["network-programming"]
+
+# This crate is NOT in the default workspace members.  It requires
+# libdpdk-dev (DPDK 23.11+) installed on the build machine.  Add it
+# explicitly:
+#
+#   cargo build -p ironsbe-transport-dpdk
+
+[dependencies]
+ironsbe-transport = { workspace = true, features = ["xdp-stacks"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+
+[build-dependencies]
+pkg-config = "0.3"
