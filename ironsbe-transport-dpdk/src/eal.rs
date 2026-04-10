@@ -46,10 +46,9 @@ impl Eal {
         let ret = unsafe { ffi::rte_eal_init(ptrs.len() as i32, ptrs.as_mut_ptr()) };
 
         if ret < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("rte_eal_init failed with code {ret}"),
-            ));
+            return Err(io::Error::other(format!(
+                "rte_eal_init failed with code {ret}"
+            )));
         }
 
         tracing::info!(parsed_args = ret, "DPDK EAL initialized");
