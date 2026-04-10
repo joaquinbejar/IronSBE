@@ -10,11 +10,14 @@
 //! module are documented with `// SAFETY:` comments.
 
 use crate::xdp::stack::{FrameTxQueue, XdpStack};
+use std::ffi::CString;
 use std::io;
+use std::io::Write;
+use std::num::NonZeroU32;
 use xsk_rs::config::{Interface, SocketConfig, UmemConfig};
 use xsk_rs::socket::{RxQueue, TxQueue};
-use xsk_rs::umem::{CompQueue, FillQueue, Umem};
 use xsk_rs::umem::frame::FrameDesc;
+use xsk_rs::umem::{CompQueue, FillQueue, Umem};
 
 /// Configuration for the AF_XDP datapath.
 #[derive(Debug, Clone)]
@@ -23,7 +26,8 @@ pub struct DatapathConfig {
     pub if_name: String,
     /// NIC queue id this datapath is bound to.
     pub queue_id: u32,
-    /// Number of UMEM frames to allocate.  Must be a power of two.
+    /// Number of UMEM frames to allocate.  Must be a power of two and
+    /// non-zero.
     pub frame_count: u32,
     /// Per-frame size in bytes.  Must be a power of two ≥ 2048.
     pub frame_size: u32,
@@ -56,6 +60,9 @@ impl DatapathConfig {
     }
 }
 
+/// Maximum number of descriptors to process per poll round.
+const BATCH_SIZE: usize = 64;
+
 /// AF_XDP datapath bound to a single `(interface, queue)` pair.
 ///
 /// Holds the UMEM, the four ring queues, and the pool of frame
@@ -66,11 +73,15 @@ pub struct Datapath {
     comp_q: CompQueue,
     rx_q: RxQueue,
     tx_q: TxQueue,
-    /// Pool of free frame descriptors that can be submitted to the fill
-    /// queue (rx) or used for tx.  When a frame is consumed from the rx
-    /// ring its descriptor moves here; when a frame is submitted to the
-    /// tx ring its descriptor is taken from here.
-    frame_descs: Vec<FrameDesc>,
+    /// Pool of free frame descriptors.  Rx-consumed descriptors cycle
+    /// back here after their contents have been read; tx descriptors
+    /// are taken from here and returned via the completion queue.
+    free_descs: Vec<FrameDesc>,
+    /// Scratch space for rx consume calls (avoids re-allocating per
+    /// poll round).
+    rx_scratch: Vec<FrameDesc>,
+    /// Scratch space for completion queue consume.
+    comp_scratch: Vec<FrameDesc>,
 }
 
 impl Datapath {
@@ -82,59 +93,38 @@ impl Datapath {
     /// Returns an `io::Error` if the kernel rejects the bind (missing
     /// capabilities, bad interface name, queue out of range, …).
     ///
-    /// # Safety contract
-    /// The caller guarantees that no other `Datapath` is bound to the
-    /// same `(if_name, queue_id)` pair with the same `Umem`, or that
-    /// the `XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD` flag is set in the
-    /// socket config if so.  In practice this means "one `Datapath`
-    /// per queue per process".
+    /// # Safety contract (upheld by the caller)
+    /// No other `Datapath` may be bound to the same `(if_name, queue_id)`
+    /// pair with a shared `Umem`, unless
+    /// `XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD` is set.  In practice:
+    /// one `Datapath` per queue per process.
     pub fn bind(config: &DatapathConfig) -> io::Result<Self> {
-        let umem_config = UmemConfig::builder(
-            config.frame_count.try_into().map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "frame_count must be > 0",
-                )
-            })?,
-            config.frame_size.try_into().map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "frame_size must be > 0",
-                )
-            })?,
-        )
-        .build()
-        .map_err(|e| io::Error::other(format!("umem config: {e}")))?;
+        let frame_count = NonZeroU32::new(config.frame_count).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "frame_count must be > 0")
+        })?;
 
-        let (umem, mut frame_descs) = Umem::new(
-            umem_config,
-            config.frame_count.try_into().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "frame_count must be > 0")
-            })?,
-            false, // no huge pages
-        )
-        .map_err(|e| io::Error::other(format!("umem create: {e}")))?;
+        let umem_config = UmemConfig::builder()
+            .build()
+            .map_err(|e| io::Error::other(format!("umem config: {e}")))?;
+
+        let (umem, mut frame_descs) = Umem::new(umem_config, frame_count, false)
+            .map_err(|e| io::Error::other(format!("umem create: {e}")))?;
 
         let socket_config = SocketConfig::default();
-        let interface = Interface::new(config.if_name.as_str())
-            .map_err(|e| io::Error::other(format!("interface: {e}")))?;
+        let if_cstr = CString::new(config.if_name.as_str())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let interface = Interface::new(if_cstr);
 
         // SAFETY: We are the only Datapath binding to this
         // (if_name, queue_id) pair — the caller guarantees this per
-        // the doc contract.
+        // the doc contract above.
         let (tx_q, rx_q, fq_cq) = unsafe {
-            xsk_rs::socket::Socket::new(
-                socket_config,
-                &umem,
-                &interface,
-                config.queue_id,
-            )
+            xsk_rs::socket::Socket::new(socket_config, &umem, &interface, config.queue_id)
         }
         .map_err(|e| io::Error::other(format!("xsk socket create: {e}")))?;
 
-        let (mut fill_q, comp_q) = fq_cq.ok_or_else(|| {
-            io::Error::other("xsk-rs did not return fill/completion queues")
-        })?;
+        let (mut fill_q, comp_q) = fq_cq
+            .ok_or_else(|| io::Error::other("xsk-rs did not return fill/completion queues"))?;
 
         // Submit half the frames to the fill queue so the kernel has
         // somewhere to write inbound packets.  Keep the other half for
@@ -154,7 +144,9 @@ impl Datapath {
             comp_q,
             rx_q,
             tx_q,
-            frame_descs,
+            free_descs: frame_descs,
+            rx_scratch: vec![FrameDesc::default(); BATCH_SIZE],
+            comp_scratch: vec![FrameDesc::default(); BATCH_SIZE],
         })
     }
 
@@ -175,24 +167,27 @@ impl Datapath {
     where
         S::Error: std::fmt::Display,
     {
-        // 1. Reclaim completed tx descriptors so we can reuse them.
-        let mut comp_descs = Vec::with_capacity(64);
-        let n_comp = self.comp_q.consume(&mut comp_descs);
-        for desc in comp_descs.iter().take(n_comp) {
-            self.frame_descs.push(*desc);
+        // 1. Reclaim completed tx descriptors.
+        // SAFETY: comp_scratch is pre-allocated with valid default
+        // FrameDescs; consume overwrites them with completed descs.
+        let n_comp = unsafe { self.comp_q.consume(&mut self.comp_scratch) };
+        for desc in self.comp_scratch.iter().take(n_comp) {
+            self.free_descs.push(*desc);
         }
 
         // 2. Pull inbound frames from the rx ring.
-        let mut rx_descs = Vec::with_capacity(64);
-        let n_rx = self.rx_q.consume(&mut rx_descs);
+        // SAFETY: rx_scratch is pre-allocated; consume overwrites with
+        // received descriptors whose UMEM-backed data is valid until
+        // we return them to the fill queue.
+        let n_rx = unsafe { self.rx_q.consume(&mut self.rx_scratch) };
         let mut tx_buf: Vec<Vec<u8>> = Vec::new();
         let mut processed = 0usize;
 
-        for desc in rx_descs.iter().take(n_rx) {
-            // SAFETY: the descriptor was just returned by the rx ring
-            // and the backing UMEM slice is valid for the duration of
-            // this loop iteration.  We copy the frame data out before
-            // returning the descriptor to the fill queue.
+        for i in 0..n_rx {
+            let desc = &self.rx_scratch[i];
+            // SAFETY: descriptor was just returned by the rx ring;
+            // the UMEM slice is valid until we return the desc to
+            // the fill queue below.
             let data = unsafe { self.umem.data(desc) };
             let frame_bytes = data.contents();
 
@@ -203,13 +198,12 @@ impl Datapath {
             processed += 1;
         }
 
-        // Return rx descriptors to the fill queue so the kernel can
-        // reuse them.
+        // Return rx descriptors to the fill queue for kernel reuse.
         if n_rx > 0 {
-            // SAFETY: descriptors were consumed from the rx ring and
-            // are no longer referenced by the kernel.
+            // SAFETY: descriptors were consumed from rx and are no
+            // longer referenced.
             unsafe {
-                self.fill_q.produce(&rx_descs[..n_rx]);
+                self.fill_q.produce(&self.rx_scratch[..n_rx]);
             }
         }
 
@@ -223,22 +217,26 @@ impl Datapath {
 
         // 4. Submit pending tx frames.
         for frame_data in &tx_buf {
-            if let Some(mut desc) = self.frame_descs.pop() {
+            if let Some(mut desc) = self.free_descs.pop() {
                 // SAFETY: `desc` is a valid free descriptor from our
-                // pool, and `data_mut` gives exclusive access to its
-                // UMEM-backed buffer.
-                let data_mut = unsafe { self.umem.data_mut(&mut desc) };
-                let buf = data_mut.contents_mut();
-                let len = frame_data.len().min(buf.len());
-                buf[..len].copy_from_slice(&frame_data[..len]);
-                // Update the descriptor's data length.
-                desc.lengths_mut().set_data(len);
+                // pool; `data_mut` gives exclusive UMEM access.
+                let mut data_mut = unsafe { self.umem.data_mut(&mut desc) };
+                // `cursor()` sets the data length as we write.
+                let mut cursor = data_mut.cursor();
+                if let Err(e) = cursor.write_all(frame_data) {
+                    tracing::warn!("xdp: tx write failed: {e}");
+                    // Return the descriptor to the free pool.
+                    self.free_descs.push(desc);
+                    continue;
+                }
+                drop(cursor);
+                drop(data_mut);
 
-                // SAFETY: we just wrote valid data into the descriptor's
-                // UMEM region, and the descriptor has not been submitted
-                // to any other queue.
+                // SAFETY: we just wrote valid data into the
+                // descriptor's UMEM region.
                 unsafe {
-                    self.tx_q.produce_and_wakeup(&[desc])
+                    self.tx_q
+                        .produce_and_wakeup(&[desc])
                         .map_err(|e| io::Error::other(format!("tx produce: {e}")))?;
                 }
             } else {
