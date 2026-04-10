@@ -29,13 +29,17 @@ pub struct rte_mbuf {
 }
 
 /// Ethernet device configuration.
+///
+/// We zero-init the entire struct and let DPDK fill defaults.
 #[repr(C)]
-#[derive(Default)]
 pub struct rte_eth_conf {
-    /// We zero-init the entire struct (440 bytes in DPDK 23.11) and
-    /// let DPDK fill defaults.  The struct is large and mostly
-    /// zero-initialised in practice.
     pub _pad: [u8; 512],
+}
+
+impl Default for rte_eth_conf {
+    fn default() -> Self {
+        Self { _pad: [0u8; 512] }
+    }
 }
 
 /// Ethernet device info (returned by `rte_eth_dev_info_get`).
@@ -48,7 +52,7 @@ pub struct rte_eth_dev_info {
 // EAL
 // =====================================================================
 
-extern "C" {
+unsafe extern "C" {
     /// Initialise the DPDK EAL (Environment Abstraction Layer).
     ///
     /// Must be called exactly once, before any other DPDK function.
@@ -67,7 +71,7 @@ extern "C" {
 // Mempool
 // =====================================================================
 
-extern "C" {
+unsafe extern "C" {
     /// Creates a mempool for packet buffers (mbufs).
     pub fn rte_pktmbuf_pool_create(
         name: *const c_char,
@@ -86,7 +90,7 @@ extern "C" {
 // Ethdev — port configuration and rx/tx
 // =====================================================================
 
-extern "C" {
+unsafe extern "C" {
     /// Returns the number of available ethernet ports.
     pub fn rte_eth_dev_count_avail() -> u16;
 
@@ -147,7 +151,7 @@ extern "C" {
 // Mbuf access
 // =====================================================================
 
-extern "C" {
+unsafe extern "C" {
     /// Allocates an mbuf from a mempool.
     pub fn rte_pktmbuf_alloc(pool: *mut rte_mempool) -> *mut rte_mbuf;
 
@@ -180,7 +184,9 @@ pub unsafe fn mbuf_data_ptr(m: *const rte_mbuf) -> *const u8 {
     //   offset 16+2: data_off (u16)
     //
     // rte_pktmbuf_mtod(m) = (char*)m->buf_addr + m->data_off
-    let buf_addr = *(m as *const *const u8);
-    let data_off = *((m as *const u8).add(18) as *const u16);
-    buf_addr.add(data_off as usize)
+    unsafe {
+        let buf_addr = *(m as *const *const u8);
+        let data_off = *((m as *const u8).add(18) as *const u16);
+        buf_addr.add(data_off as usize)
+    }
 }
