@@ -32,6 +32,14 @@
 //! latency but requires hugepages, NIC unbinding, and core isolation.
 //! See `docs/transport-backends.md` for the full operational checklist.
 
+// Fail fast on non-Linux with a clear message rather than opaque
+// linker errors.
+#[cfg(not(target_os = "linux"))]
+compile_error!(
+    "ironsbe-transport-dpdk is Linux-only. \
+     It requires libdpdk-dev (DPDK 23.11+) which is not available on this platform."
+);
+
 pub mod eal;
 pub mod ffi;
 pub mod port;

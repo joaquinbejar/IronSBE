@@ -175,8 +175,28 @@ where
                 }
             }
 
+            // Let the stack flush timers (smoltcp retransmissions,
+            // ARP refresh, …) even when no frames were received.
+            {
+                let mut q = FrameTxQueue::new(&mut tx_buf);
+                self.stack
+                    .poll_timers(&mut q)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+            }
+
             // tx burst: send any frames the stack produced.
             for frame_data in &tx_buf {
+                // Validate length fits in u16 before the cast.
+                let len = match u16::try_from(frame_data.len()) {
+                    Ok(l) => l,
+                    Err(_) => {
+                        tracing::warn!(
+                            len = frame_data.len(),
+                            "dpdk: frame exceeds u16::MAX, dropping"
+                        );
+                        continue;
+                    }
+                };
                 // Allocate a fresh mbuf for each outbound frame.
                 let mbuf = unsafe { ffi::rte_pktmbuf_alloc(self.port.pool()) };
                 if mbuf.is_null() {
@@ -184,7 +204,7 @@ where
                     continue;
                 }
                 // SAFETY: mbuf is freshly allocated and valid.
-                let data_ptr = unsafe { ffi::rte_pktmbuf_append(mbuf, frame_data.len() as u16) };
+                let data_ptr = unsafe { ffi::rte_pktmbuf_append(mbuf, len) };
                 if data_ptr.is_null() {
                     tracing::warn!("dpdk: rte_pktmbuf_append returned null (frame too large?)");
                     unsafe {
@@ -203,7 +223,6 @@ where
                 // SAFETY: pkts contains a valid mbuf.
                 let sent = unsafe { self.port.tx_burst(&mut pkts, 1) };
                 if sent == 0 {
-                    // Free unsent mbuf.
                     unsafe {
                         ffi::rte_pktmbuf_free(mbuf);
                     }

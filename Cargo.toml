@@ -69,7 +69,6 @@ socket2 = "0.5"
 tokio-uring = "0.5"
 smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp"] }
 xsk-rs = "0.6"
-pkg-config = "0.3"
 etherparse = "0.18"
 futures = "0.3"
 async-trait = "0.1"

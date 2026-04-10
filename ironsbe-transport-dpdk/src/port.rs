@@ -159,10 +159,11 @@ impl Drop for DpdkPort {
     fn drop(&mut self) {
         unsafe {
             let _ = ffi::rte_eth_dev_stop(self.port_id);
+            let _ = ffi::rte_eth_dev_close(self.port_id);
             if !self.pool.is_null() {
                 ffi::rte_mempool_free(self.pool);
             }
         }
-        tracing::info!(port_id = self.port_id, "DPDK port stopped");
+        tracing::info!(port_id = self.port_id, "DPDK port stopped and closed");
     }
 }

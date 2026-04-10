@@ -127,6 +127,9 @@ unsafe extern "C" {
     /// Stops the ethernet device.
     pub fn rte_eth_dev_stop(port_id: u16) -> c_int;
 
+    /// Closes the ethernet device and releases its resources.
+    pub fn rte_eth_dev_close(port_id: u16) -> c_int;
+
     /// Retrieves a burst of input packets from an RX queue.
     pub fn rte_eth_rx_burst(
         port_id: u16,
