@@ -149,8 +149,7 @@ where
 
             let mut tx_buf: Vec<Vec<u8>> = Vec::new();
 
-            for i in 0..nb_rx as usize {
-                let mbuf = rx_pkts[i];
+            for &mbuf in rx_pkts.iter().take(nb_rx as usize) {
                 // SAFETY: mbuf was just returned by rte_eth_rx_burst
                 // and is valid until we free it.
                 let (data_ptr, data_len) = unsafe {

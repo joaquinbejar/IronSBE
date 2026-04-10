@@ -54,7 +54,7 @@ impl DpdkPort {
 
         // Create mbuf pool.
         let pool_name =
-            CString::new("MBUF_POOL").map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            CString::new("MBUF_POOL").map_err(io::Error::other)?;
         let pool = unsafe {
             ffi::rte_pktmbuf_pool_create(
                 pool_name.as_ptr(),
@@ -66,8 +66,7 @@ impl DpdkPort {
             )
         };
         if pool.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "rte_pktmbuf_pool_create returned NULL",
             ));
         }
@@ -76,8 +75,7 @@ impl DpdkPort {
         let eth_conf = ffi::rte_eth_conf::default();
         let ret = unsafe { ffi::rte_eth_dev_configure(port_id, 1, 1, &eth_conf) };
         if ret != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("rte_eth_dev_configure failed: {ret}"),
             ));
         }
@@ -87,8 +85,7 @@ impl DpdkPort {
             ffi::rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_DESC, socket_id, ptr::null(), pool)
         };
         if ret != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("rte_eth_rx_queue_setup failed: {ret}"),
             ));
         }
@@ -98,8 +95,7 @@ impl DpdkPort {
             ffi::rte_eth_tx_queue_setup(port_id, 0, DEFAULT_NB_DESC, socket_id, ptr::null())
         };
         if ret != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("rte_eth_tx_queue_setup failed: {ret}"),
             ));
         }
@@ -114,8 +110,7 @@ impl DpdkPort {
         // Start the port.
         let ret = unsafe { ffi::rte_eth_dev_start(port_id) };
         if ret != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("rte_eth_dev_start failed: {ret}"),
             ));
         }
