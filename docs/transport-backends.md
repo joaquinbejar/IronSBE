@@ -350,25 +350,41 @@ parse helpers and `etherparse`-based Ethernet/IPv4/UDP builders.  All
 parsers are pure functions returning `Result<_, FrameError>` and have
 unit tests that run on every host.
 
-### Scope of the current PR
+### AF_XDP datapath (`xdp` feature)
 
-This first PR ships the **pure-Rust pieces only** (`xdp-stacks` feature):
-frame parsers, the `XdpStack` trait, `UdpStack` and `SmoltcpStack`, all
-covered by ~15 unit tests that run on macOS / Linux / Windows.
+The `xdp` cargo feature brings in `xsk-rs` and the actual AF_XDP
+datapath layer that ferries frames between the kernel rx/tx/fill/
+completion rings and the `XdpStack` trait above.  This feature is
+Linux-only; on other platforms the flag compiles the pure-Rust stacks
+but not the datapath.
 
-The Linux-only `xdp` feature that brings in `xsk-rs` and the actual
-AF_XDP datapath is tracked separately in the follow-up issue, alongside
-the server integration (`ironsbe-server` worker-per-queue, core
-pinning), examples, and the benchmark suite that compares `tcp-tokio`,
-`tcp-uring` and `xdp` on real hardware.
+The datapath is driven via `Datapath::poll_once`, which in a single
+call: reclaims completed tx descriptors, pulls inbound frames from the
+rx ring (calling `XdpStack::on_rx` per frame), flushes stack timers,
+and submits any outbound frames the stack produced.
 
-### Operational checklist (will move to the follow-up PR)
+```sh
+# Build the full xdp backend on Linux:
+cargo build -p ironsbe-transport --no-default-features --features xdp
+```
 
-The full operational guide — kernel ≥ 5.11, capabilities
-(`CAP_NET_ADMIN` / `CAP_NET_RAW` / `CAP_BPF`), `ethtool -N` queue
-steering recipe, copy-mode vs zero-copy fallback, driver matrix — will
-be added in the follow-up PR that lands the datapath, since it depends
-on the actual `xdp` cargo feature being usable.
+### Operational checklist
+
+- **Kernel**: Linux ≥ 5.11 (required by `xsk-rs 0.6` / `libxdp`).
+- **Capabilities**: `CAP_NET_ADMIN`, `CAP_BPF` (or root).
+- **Build deps**: `libelf-dev`, `zlib1g-dev`, `libpcap-dev`, `clang`,
+  `m4` (for `libbpf-sys` / `libxdp-sys` build scripts).
+- **NIC driver**: must support XDP (`igc`, `i40e`, `ice`, `mlx5`,
+  `ixgbe`, `virtio_net` copy-mode).  Check with
+  `ethtool -i <iface> | grep driver`.
+- **Queue steering** (for isolating XDP traffic):
+  ```sh
+  # Steer TCP port 9000 to queue 4:
+  ethtool -N eth0 flow-type tcp4 dst-port 9000 action 4
+  ```
+- **Copy vs zero-copy**: AF_XDP defaults to copy mode.  Zero-copy
+  requires driver support and `XSK_FORCE_COPY=0` (not yet exposed by
+  the datapath module; planned for a follow-up).
 
 ## Adding a new backend
 

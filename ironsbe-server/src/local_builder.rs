@@ -234,15 +234,19 @@ where
         let _ = event_tx.try_send(ServerEvent::SessionCreated(session_id, addr));
 
         // `spawn_local` keeps the future on the current single-threaded
-        // runtime, satisfying the `!Send` connection bound.
+        // runtime, satisfying the `!Send` connection bound.  The span
+        // gives every log line inside the session the
+        // `sbe_session{session_id=N}:` prefix.
+        let span = tracing::info_span!("sbe_session", session_id, %addr);
         tokio::task::spawn_local(async move {
-            tracing::info!("Local session {} connected from {}", session_id, addr);
+            let _guard = span.enter();
+            tracing::info!("connected");
             if let Err(e) = handle_local_session(session_id, conn, handler.as_ref()).await {
-                tracing::error!("Local session {} error: {:?}", session_id, e);
+                tracing::error!(error = %e, "session error");
             }
+            tracing::info!("disconnected");
             handler.on_session_end(session_id);
             let _ = event_tx.try_send(ServerEvent::SessionClosed(session_id));
-            // Ask the run loop to release the SessionManager slot.
             let _ = cmd_tx.try_send(ServerCommand::CloseSession(session_id));
             cmd_notify.notify_one();
         });
@@ -313,11 +317,10 @@ where
                         }
                     }
                     Ok(None) => {
-                        tracing::info!("Local session {} disconnected", session_id);
                         return Ok(());
                     }
                     Err(e) => {
-                        tracing::error!("Local session {} read error: {}", session_id, e);
+                        tracing::error!(error = %e, "read error");
                         return Err(std::io::Error::other(e.to_string()));
                     }
                 }
@@ -325,7 +328,7 @@ where
 
             Some(msg) = rx.recv() => {
                 if let Err(e) = conn.send(&msg).await {
-                    tracing::error!("Local session {} write error: {}", session_id, e);
+                    tracing::error!(error = %e, "write error");
                     return Err(std::io::Error::other(e.to_string()));
                 }
             }

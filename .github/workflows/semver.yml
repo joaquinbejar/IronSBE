@@ -25,7 +25,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y make pkg-config build-essential
+          sudo apt-get update && sudo apt-get install -y make pkg-config build-essential libelf-dev zlib1g-dev libpcap-dev clang m4
 
       - name: Check semver for ironsbe-core
         uses: obi1kenobi/cargo-semver-checks-action@v2
