@@ -22,6 +22,10 @@ tcp-uring = ["dep:tokio-uring"]
 # real NIC queue is landed in a follow-up PR alongside the server
 # integration and benchmarks (it requires hardware to validate).
 xdp-stacks = ["dep:smoltcp", "dep:etherparse"]
+# Full AF_XDP backend.  Includes the pure-Rust stacks above plus the
+# `xsk-rs`-based datapath that binds to a real NIC queue.  Linux-only
+# (xsk-rs is target-conditional in the deps below).
+xdp = ["xdp-stacks", "dep:xsk-rs"]
 
 [dependencies]
 ironsbe-core = { workspace = true }
@@ -46,6 +50,7 @@ optional = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-uring = { workspace = true, optional = true }
+xsk-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
