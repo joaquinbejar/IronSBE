@@ -137,7 +137,7 @@ impl DpdkPort {
     #[inline]
     pub unsafe fn rx_burst(&self, pkts: &mut [*mut ffi::rte_mbuf; MAX_BURST]) -> u16 {
         // SAFETY: caller guarantees the array is large enough.
-        unsafe { ffi::rte_eth_rx_burst(self.port_id, 0, pkts.as_mut_ptr(), MAX_BURST as u16) }
+        unsafe { ffi::ironsbe_eth_rx_burst(self.port_id, 0, pkts.as_mut_ptr(), MAX_BURST as u16) }
     }
 
     /// Sends a burst of packets on the tx queue.
@@ -151,7 +151,7 @@ impl DpdkPort {
     #[inline]
     pub unsafe fn tx_burst(&self, pkts: &mut [*mut ffi::rte_mbuf], nb_pkts: u16) -> u16 {
         // SAFETY: caller guarantees valid mbuf pointers.
-        unsafe { ffi::rte_eth_tx_burst(self.port_id, 0, pkts.as_mut_ptr(), nb_pkts) }
+        unsafe { ffi::ironsbe_eth_tx_burst(self.port_id, 0, pkts.as_mut_ptr(), nb_pkts) }
     }
 }
 
