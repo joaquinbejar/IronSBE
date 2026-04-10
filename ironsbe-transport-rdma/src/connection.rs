@@ -19,9 +19,6 @@ use std::ptr;
 /// Length prefix size (matches all other IronSBE backends).
 const LENGTH_PREFIX_BYTES: usize = 4;
 
-/// Default max message size in bytes (excluding the 4-byte prefix).
-const DEFAULT_MAX_MSG_SIZE: usize = 64 * 1024;
-
 /// Number of pre-posted RECV work requests so the QP always has
 /// somewhere to land incoming messages.
 const RECV_DEPTH: usize = 16;
