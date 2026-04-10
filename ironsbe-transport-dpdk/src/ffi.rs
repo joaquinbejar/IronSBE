@@ -30,17 +30,32 @@
 // Include the bindgen output.
 include!(concat!(env!("OUT_DIR"), "/dpdk_bindings.rs"));
 
-// C shim functions wrapping macro-based DPDK accessors.
+// C shim functions wrapping inline / macro DPDK accessors.
+//
+// These are compiled from `shim.c` by the `cc` crate and linked into
+// this crate.  They exist because bindgen cannot generate Rust
+// bindings for `static inline` functions or preprocessor macros.
 unsafe extern "C" {
-    /// Returns a `const void*` to the start of the data in the mbuf.
-    ///
-    /// Wraps the `rte_pktmbuf_mtod` macro via `shim.c`.
+    // --- mbuf accessors ---
     pub fn ironsbe_pktmbuf_mtod(m: *const rte_mbuf) -> *const u8;
-
-    /// Returns the data length of the mbuf.
-    ///
-    /// Wraps the `rte_pktmbuf_data_len` inline function via `shim.c`.
     pub fn ironsbe_pktmbuf_data_len_shim(m: *const rte_mbuf) -> u16;
+    pub fn ironsbe_pktmbuf_alloc(pool: *mut rte_mempool) -> *mut rte_mbuf;
+    pub fn ironsbe_pktmbuf_free(m: *mut rte_mbuf);
+    pub fn ironsbe_pktmbuf_append(m: *mut rte_mbuf, len: u16)
+        -> *mut core::ffi::c_char;
+    // --- ethdev rx/tx burst ---
+    pub fn ironsbe_eth_rx_burst(
+        port_id: u16,
+        queue_id: u16,
+        rx_pkts: *mut *mut rte_mbuf,
+        nb_pkts: u16,
+    ) -> u16;
+    pub fn ironsbe_eth_tx_burst(
+        port_id: u16,
+        queue_id: u16,
+        tx_pkts: *mut *mut rte_mbuf,
+        nb_pkts: u16,
+    ) -> u16;
 }
 
 #[cfg(test)]

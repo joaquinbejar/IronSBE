@@ -171,7 +171,7 @@ where
                 // Free the mbuf.
                 // SAFETY: we are done reading this mbuf.
                 unsafe {
-                    ffi::rte_pktmbuf_free(mbuf);
+                    ffi::ironsbe_pktmbuf_free(mbuf);
                 }
             }
 
@@ -198,17 +198,17 @@ where
                     }
                 };
                 // Allocate a fresh mbuf for each outbound frame.
-                let mbuf = unsafe { ffi::rte_pktmbuf_alloc(self.port.pool()) };
+                let mbuf = unsafe { ffi::ironsbe_pktmbuf_alloc(self.port.pool()) };
                 if mbuf.is_null() {
                     tracing::warn!("dpdk: rte_pktmbuf_alloc returned null, dropping tx frame");
                     continue;
                 }
                 // SAFETY: mbuf is freshly allocated and valid.
-                let data_ptr = unsafe { ffi::rte_pktmbuf_append(mbuf, len) };
+                let data_ptr = unsafe { ffi::ironsbe_pktmbuf_append(mbuf, len) };
                 if data_ptr.is_null() {
                     tracing::warn!("dpdk: rte_pktmbuf_append returned null (frame too large?)");
                     unsafe {
-                        ffi::rte_pktmbuf_free(mbuf);
+                        ffi::ironsbe_pktmbuf_free(mbuf);
                     }
                     continue;
                 }
@@ -224,7 +224,7 @@ where
                 let sent = unsafe { self.port.tx_burst(&mut pkts, 1) };
                 if sent == 0 {
                     unsafe {
-                        ffi::rte_pktmbuf_free(mbuf);
+                        ffi::ironsbe_pktmbuf_free(mbuf);
                     }
                 }
             }
