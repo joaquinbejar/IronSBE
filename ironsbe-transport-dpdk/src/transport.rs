@@ -153,8 +153,8 @@ where
                 // SAFETY: mbuf was just returned by rte_eth_rx_burst
                 // and is valid until we free it.
                 let (data_ptr, data_len) = unsafe {
-                    let ptr = ffi::mbuf_data_ptr(mbuf);
-                    let len = ffi::rte_pktmbuf_data_len(mbuf);
+                    let ptr = ffi::ironsbe_pktmbuf_mtod(mbuf);
+                    let len = ffi::ironsbe_pktmbuf_data_len_shim(mbuf);
                     (ptr, len as usize)
                 };
                 let frame = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };

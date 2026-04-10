@@ -25,3 +25,5 @@ tokio = { workspace = true }
 
 [build-dependencies]
 pkg-config = "0.3"
+bindgen = "0.71"
+cc = "1"
