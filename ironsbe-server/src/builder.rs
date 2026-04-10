@@ -289,18 +289,19 @@ where
         handler.on_session_start(session_id);
         let _ = event_tx.try_send(ServerEvent::SessionCreated(session_id, addr));
 
-        // Spawn connection handler task
+        // Spawn connection handler task.  The span gives every log
+        // line inside the session the `sbe_session{session_id=N}:`
+        // prefix so operators can correlate messages per peer.
+        let span = tracing::info_span!("sbe_session", session_id, %addr);
         tokio::spawn(async move {
-            tracing::info!("Session {} connected from {}", session_id, addr);
+            let _guard = span.enter();
+            tracing::info!("connected");
 
             if let Err(e) = handle_session(session_id, conn, handler.as_ref()).await {
-                tracing::error!("Session {} error: {:?}", session_id, e);
+                tracing::error!(error = %e, "session error");
             }
 
-            // When done, notify and ask the run loop to release the
-            // SessionManager slot.
-            // When done, notify and ask the run loop to release the
-            // SessionManager slot.
+            tracing::info!("disconnected");
             handler.on_session_end(session_id);
             let _ = event_tx.try_send(ServerEvent::SessionClosed(session_id));
             let _ = cmd_tx.try_send(ServerCommand::CloseSession(session_id));
@@ -450,11 +451,10 @@ where
                         }
                     }
                     Ok(None) => {
-                        tracing::info!("Session {} disconnected", session_id);
                         return Ok(());
                     }
                     Err(e) => {
-                        tracing::error!("Session {} read error: {}", session_id, e);
+                        tracing::error!(error = %e, "read error");
                         return Err(std::io::Error::other(e));
                     }
                 }
@@ -463,7 +463,7 @@ where
             // Send outgoing messages
             Some(msg) = rx.recv() => {
                 if let Err(e) = conn.send(&msg).await {
-                    tracing::error!("Session {} write error: {}", session_id, e);
+                    tracing::error!(error = %e, "write error");
                     return Err(std::io::Error::other(e));
                 }
             }
