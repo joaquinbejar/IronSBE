@@ -21,7 +21,7 @@
 //! [`io::ErrorKind::Unsupported`].
 
 use super::datapath::{Datapath, DatapathConfig};
-use super::stack::{FrameTxQueue, XdpStack};
+use super::stack::XdpStack;
 use crate::traits::{LocalListener, LocalTransport};
 use std::io;
 use std::marker::PhantomData;
