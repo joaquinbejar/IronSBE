@@ -55,6 +55,11 @@ tcp-uring = [
     "ironsbe-client/tcp-uring",
     "ironsbe-transport/tcp-uring",
 ]
+xdp = [
+    "ironsbe-server/xdp",
+    "ironsbe-client/xdp",
+    "ironsbe-transport/xdp",
+]
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tokio-uring = { workspace = true }

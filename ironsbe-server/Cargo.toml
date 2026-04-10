@@ -16,6 +16,7 @@ tcp-tokio = ["ironsbe-transport/tcp-tokio"]
 # Linux-only io_uring backend.  Brings in the LocalServer integration
 # tests and gates them on Linux + the matching transport feature.
 tcp-uring = ["ironsbe-transport/tcp-uring"]
+xdp = ["ironsbe-transport/xdp"]
 
 [dependencies]
 ironsbe-core = { workspace = true }
