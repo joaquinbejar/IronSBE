@@ -80,10 +80,25 @@ fn main() {
         .expect("failed to write dpdk_bindings.rs");
 
     // 3. Compile the C shim.
+    //
+    // DPDK headers use architecture-specific intrinsics (SSE/AVX in
+    // rte_memcpy, etc.) and require `-include rte_config.h` plus
+    // arch flags like `-march=corei7`.  We extract these from the
+    // pkg-config CFLAGS and pass them through to `cc`.
     let mut cc_build = cc::Build::new();
     cc_build.file("src/shim.c");
     for path in &dpdk.include_paths {
         cc_build.include(path);
+    }
+    // Forward all CFLAGS that pkg-config advertises.  This includes
+    // `-include rte_config.h`, `-march=corei7`, `-mrtm`, etc.
+    let cflags_output = std::process::Command::new("pkg-config")
+        .args(["--cflags", "libdpdk"])
+        .output()
+        .expect("failed to run pkg-config --cflags libdpdk");
+    let cflags = String::from_utf8_lossy(&cflags_output.stdout);
+    for flag in cflags.split_whitespace() {
+        cc_build.flag(flag);
     }
     cc_build.compile("ironsbe_dpdk_shim");
 
