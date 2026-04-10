@@ -13,10 +13,8 @@
 mod imp {
     use ironsbe_core::header::MessageHeader;
     use ironsbe_server::{LocalServerBuilder, MessageHandler, Responder, ServerError};
-    use ironsbe_transport::xdp::{
-        DatapathConfig, UdpStack, XdpConfig, XdpTransport,
-    };
     use ironsbe_transport::xdp::stack::udp::UdpStackConfig;
+    use ironsbe_transport::xdp::{DatapathConfig, UdpStack, XdpConfig, XdpTransport};
     use std::net::Ipv4Addr;
 
     struct EchoHandler;

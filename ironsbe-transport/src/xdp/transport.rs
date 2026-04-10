@@ -22,7 +22,7 @@
 
 use super::datapath::{Datapath, DatapathConfig};
 use super::stack::{FrameTxQueue, XdpStack};
-use crate::traits::{LocalConnection, LocalListener, LocalTransport};
+use crate::traits::{LocalListener, LocalTransport};
 use std::io;
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
@@ -69,9 +69,11 @@ impl From<SocketAddr> for XdpConfig<super::stack::UdpStack> {
             IpAddr::V6(_) => std::net::Ipv4Addr::LOCALHOST,
         };
         let mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01]; // locally-administered
-        let stack = super::stack::UdpStack::new(
-            super::stack::udp::UdpStackConfig::new(ip, addr.port(), mac),
-        );
+        let stack = super::stack::UdpStack::new(super::stack::udp::UdpStackConfig::new(
+            ip,
+            addr.port(),
+            mac,
+        ));
         Self {
             datapath: DatapathConfig::new("lo", 0),
             stack,
@@ -171,9 +173,11 @@ where
             // This is a temporary simplification; a future refactor
             // will thread the connection out of poll_once directly.
             let mut q = FrameTxQueue::new(&mut tx_buf);
-            if let Some(conn) = self.stack.on_rx(&[], &mut q).map_err(|e| {
-                io::Error::other(format!("stack on_rx: {e}"))
-            })? {
+            if let Some(conn) = self
+                .stack
+                .on_rx(&[], &mut q)
+                .map_err(|e| io::Error::other(format!("stack on_rx: {e}")))?
+            {
                 return Ok(conn);
             }
         }

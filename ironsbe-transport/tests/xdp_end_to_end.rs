@@ -20,11 +20,9 @@
 
 #![cfg(all(feature = "xdp", target_os = "linux"))]
 
-use ironsbe_transport::xdp::{
-    DatapathConfig, UdpStack, XdpConfig, XdpTransport,
-};
-use ironsbe_transport::xdp::stack::udp::UdpStackConfig;
 use ironsbe_transport::traits::{LocalListener, LocalTransport};
+use ironsbe_transport::xdp::stack::udp::UdpStackConfig;
+use ironsbe_transport::xdp::{DatapathConfig, UdpStack, XdpConfig, XdpTransport};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 
 const LOCAL_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
@@ -61,13 +59,10 @@ fn test_xdp_udp_stack_receives_frame_from_regular_socket() {
             .expect("send");
 
         // Accept the connection produced by UdpStack::on_rx.
-        let conn = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            listener.accept(),
-        )
-        .await
-        .expect("accept timeout")
-        .expect("accept error");
+        let conn = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+            .await
+            .expect("accept timeout")
+            .expect("accept error");
 
         // The first recv should yield the payload we sent.
         use ironsbe_transport::traits::LocalConnection;
