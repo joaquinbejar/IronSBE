@@ -21,6 +21,38 @@
 
 include!(concat!(env!("OUT_DIR"), "/rdma_bindings.rs"));
 
+// =====================================================================
+// C shim functions wrapping inline ibverbs functions.
+// =====================================================================
+unsafe extern "C" {
+    pub fn ironsbe_ibv_post_send(
+        qp: *mut ibv_qp,
+        wr: *mut ibv_send_wr,
+        bad_wr: *mut *mut ibv_send_wr,
+    ) -> ::core::ffi::c_int;
+    pub fn ironsbe_ibv_post_recv(
+        qp: *mut ibv_qp,
+        wr: *mut ibv_recv_wr,
+        bad_wr: *mut *mut ibv_recv_wr,
+    ) -> ::core::ffi::c_int;
+    pub fn ironsbe_ibv_poll_cq(
+        cq: *mut ibv_cq,
+        num_entries: ::core::ffi::c_int,
+        wc: *mut ibv_wc,
+    ) -> ::core::ffi::c_int;
+}
+
+// =====================================================================
+// Constants not picked up by bindgen (enum values / #defines).
+// =====================================================================
+
+/// `IBV_ACCESS_LOCAL_WRITE` — allow local writes to registered MR.
+pub const IBV_ACCESS_LOCAL_WRITE: u32 = 1;
+/// `IBV_ACCESS_REMOTE_WRITE` — allow RDMA writes from remote.
+pub const IBV_ACCESS_REMOTE_WRITE: u32 = 2;
+/// `IBV_SEND_SIGNALED` — request a CQ completion entry for this send.
+pub const IBV_SEND_SIGNALED: u32 = 1 << 2;
+
 #[cfg(test)]
 mod tests {
     use super::*;

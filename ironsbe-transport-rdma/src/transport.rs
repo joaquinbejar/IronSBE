@@ -2,9 +2,8 @@
 
 use crate::connection::RdmaConnection;
 use crate::listener::RdmaListener;
-use ironsbe_transport::traits::{LocalListener, LocalTransport};
+use ironsbe_transport::traits::LocalTransport;
 use std::io;
-use std::marker::PhantomData;
 use std::net::SocketAddr;
 
 /// RDMA transport configuration.

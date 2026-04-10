@@ -87,7 +87,7 @@ impl RdmaConnection {
                 pd,
                 send_buf.as_mut_ptr().cast(),
                 buf_size,
-                (ffi::IBV_ACCESS_LOCAL_WRITE | ffi::IBV_ACCESS_REMOTE_WRITE) as i32,
+                (ffi::IBV_ACCESS_LOCAL_WRITE | ffi::IBV_ACCESS_REMOTE_WRITE) as core::ffi::c_int,
             )
         };
         if send_mr.is_null() {
@@ -104,7 +104,7 @@ impl RdmaConnection {
                     pd,
                     buf.as_mut_ptr().cast(),
                     buf_size,
-                    ffi::IBV_ACCESS_LOCAL_WRITE as i32,
+                    ffi::IBV_ACCESS_LOCAL_WRITE as core::ffi::c_int,
                 )
             };
             if mr.is_null() {
@@ -151,7 +151,7 @@ impl RdmaConnection {
 
         let mut bad_wr: *mut ffi::ibv_recv_wr = ptr::null_mut();
         let qp = unsafe { (*self.cm_id).qp };
-        let ret = unsafe { ffi::ibv_post_recv(qp, &mut wr, &mut bad_wr) };
+        let ret = unsafe { ffi::ironsbe_ibv_post_recv(qp, &mut wr, &mut bad_wr) };
         if ret != 0 {
             return Err(io::Error::other(format!("ibv_post_recv failed: {ret}")));
         }
@@ -166,7 +166,7 @@ impl LocalConnection for RdmaConnection {
         // Poll the CQ for a RECV completion.
         loop {
             let mut wc: ffi::ibv_wc = unsafe { std::mem::zeroed() };
-            let n = unsafe { ffi::ibv_poll_cq(self.cq, 1, &mut wc) };
+            let n = unsafe { ffi::ironsbe_ibv_poll_cq(self.cq, 1, &mut wc) };
             if n < 0 {
                 return Err(io::Error::other("ibv_poll_cq failed"));
             }
@@ -234,11 +234,11 @@ impl LocalConnection for RdmaConnection {
         wr.sg_list = &mut sge;
         wr.num_sge = 1;
         wr.opcode = ffi::ibv_wr_opcode_IBV_WR_SEND;
-        wr.send_flags = ffi::ibv_send_flags_IBV_SEND_SIGNALED;
+        wr.send_flags = ffi::IBV_SEND_SIGNALED;
 
         let mut bad_wr: *mut ffi::ibv_send_wr = ptr::null_mut();
         let qp = unsafe { (*self.cm_id).qp };
-        let ret = unsafe { ffi::ibv_post_send(qp, &mut wr, &mut bad_wr) };
+        let ret = unsafe { ffi::ironsbe_ibv_post_send(qp, &mut wr, &mut bad_wr) };
         if ret != 0 {
             return Err(io::Error::other(format!("ibv_post_send failed: {ret}")));
         }

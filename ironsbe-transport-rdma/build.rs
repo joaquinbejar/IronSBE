@@ -84,5 +84,14 @@ fn main() {
         .write_to_file(out_dir.join("rdma_bindings.rs"))
         .expect("failed to write rdma_bindings.rs");
 
+    // Compile the C shim for inline ibverbs functions.
+    let mut cc_build = cc::Build::new();
+    cc_build.file("src/shim.c");
+    for path in &verbs.include_paths {
+        cc_build.include(path);
+    }
+    cc_build.compile("ironsbe_rdma_shim");
+
     println!("cargo:rerun-if-changed=src/rdma_wrapper.h");
+    println!("cargo:rerun-if-changed=src/shim.c");
 }
