@@ -1,0 +1,27 @@
+[package]
+name = "ironsbe-transport-rdma"
+description = "RDMA/ibverbs transport backend for IronSBE (Linux-only, opt-in)"
+version = "0.3.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["rdma", "ibverbs", "transport", "low-latency", "kernel-bypass"]
+categories = ["network-programming"]
+
+# This crate requires libibverbs-dev + librdmacm-dev installed.
+# It is NOT built by default — opt in explicitly:
+#
+#   cargo build -p ironsbe-transport-rdma
+
+[dependencies]
+ironsbe-transport = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+
+[build-dependencies]
+pkg-config = "0.3"
+bindgen = "0.71"

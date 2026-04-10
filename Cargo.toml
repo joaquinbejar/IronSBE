@@ -17,6 +17,8 @@ members = [
     # so `cargo build` / `cargo test` skip it unless you opt in:
     #   cargo build -p ironsbe-transport-dpdk
     "ironsbe-transport-dpdk",
+    # ironsbe-transport-rdma requires libibverbs-dev + librdmacm-dev.
+    "ironsbe-transport-rdma",
 ]
 default-members = [
     "ironsbe",
