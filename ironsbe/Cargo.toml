@@ -45,6 +45,14 @@ path = "examples/uring_server.rs"
 name = "uring_client"
 path = "examples/uring_client.rs"
 
+[[example]]
+name = "xdp_server"
+path = "examples/xdp_server.rs"
+
+[[example]]
+name = "xdp_client"
+path = "examples/xdp_client.rs"
+
 [features]
 default = []
 # Linux-only io_uring backend.  Forwards to the matching feature in

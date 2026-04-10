@@ -150,6 +150,12 @@ impl UdpStackInner {
 }
 
 /// UDP-based stack.  Single-threaded; not `Send`.
+///
+/// `Clone` produces a shared handle (via `Rc` clone) to the same
+/// internal state.  This is only used to satisfy the `Clone` bound on
+/// `LocalTransport::BindConfig` at the type level; the stack is never
+/// actually cloned at runtime.
+#[derive(Clone)]
 pub struct UdpStack {
     inner: Rc<RefCell<UdpStackInner>>,
 }

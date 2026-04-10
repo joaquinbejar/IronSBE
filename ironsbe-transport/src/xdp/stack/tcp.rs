@@ -359,6 +359,11 @@ impl SmoltcpStackInner {
 }
 
 /// `smoltcp`-based TCP stack.  Single-threaded; not `Send`.
+///
+/// `Clone` produces a shared handle (via `Rc` clone) to the same
+/// internal state, mirroring [`super::udp::UdpStack`].  This is only
+/// used to satisfy the `Clone` bound on `LocalTransport::BindConfig`.
+#[derive(Clone)]
 pub struct SmoltcpStack {
     inner: Rc<RefCell<SmoltcpStackInner>>,
 }

@@ -159,11 +159,16 @@ impl Datapath {
     /// 4. Submits any frames the stack produced into the tx queue.
     /// 5. Re-fills the fill queue with reclaimed descriptors.
     ///
-    /// Returns the number of inbound frames processed.
+    /// Returns a tuple of `(frames_processed, new_connections)`.  The
+    /// caller should drain the connections vector to hand them to the
+    /// application (e.g. via `LocalListener::accept`).
     ///
     /// # Errors
     /// Returns an `io::Error` if any ring operation fails.
-    pub fn poll_once<S: XdpStack>(&mut self, stack: &mut S) -> io::Result<usize>
+    pub fn poll_once<S: XdpStack>(
+        &mut self,
+        stack: &mut S,
+    ) -> io::Result<(usize, Vec<S::Connection>)>
     where
         S::Error: std::fmt::Display,
     {
@@ -182,6 +187,7 @@ impl Datapath {
         let n_rx = unsafe { self.rx_q.consume(&mut self.rx_scratch) };
         let mut tx_buf: Vec<Vec<u8>> = Vec::new();
         let mut processed = 0usize;
+        let mut new_conns: Vec<S::Connection> = Vec::new();
 
         for i in 0..n_rx {
             let desc = &self.rx_scratch[i];
@@ -192,9 +198,12 @@ impl Datapath {
             let frame_bytes = data.contents();
 
             let mut q = FrameTxQueue::new(&mut tx_buf);
-            stack
+            if let Some(conn) = stack
                 .on_rx(frame_bytes, &mut q)
-                .map_err(|e| io::Error::other(e.to_string()))?;
+                .map_err(|e| io::Error::other(e.to_string()))?
+            {
+                new_conns.push(conn);
+            }
             processed += 1;
         }
 
@@ -251,6 +260,6 @@ impl Datapath {
             self.tx_q.wakeup()?;
         }
 
-        Ok(processed)
+        Ok((processed, new_conns))
     }
 }
