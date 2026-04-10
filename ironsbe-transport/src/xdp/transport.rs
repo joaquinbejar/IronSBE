@@ -110,6 +110,7 @@ where
             datapath,
             stack: config.stack,
             local_addr: SocketAddr::new(local_ip, listen_port),
+            pending_conns: std::collections::VecDeque::new(),
         })
     }
 
@@ -128,6 +129,9 @@ pub struct XdpListener<S: XdpStack> {
     datapath: Datapath,
     stack: S,
     local_addr: SocketAddr,
+    /// Buffer for connections that were accepted during a single
+    /// `poll_once` round but not yet returned by `accept`.
+    pending_conns: std::collections::VecDeque<S::Connection>,
 }
 
 impl<S> LocalListener for XdpListener<S>
@@ -140,45 +144,33 @@ where
     type Error = io::Error;
 
     async fn accept(&mut self) -> io::Result<S::Connection> {
-        // Busy-poll the datapath + stack until a new connection is
-        // yielded.  This is the expected pattern for a kernel-bypass
-        // tight loop.  In a cooperative runtime the caller should
-        // wrap this in a dedicated thread or use `spawn_blocking`.
         loop {
-            let mut tx_buf: Vec<Vec<u8>> = Vec::new();
-
-            // Drive one round of rx → stack → tx.
-            self.datapath.poll_once(&mut self.stack)?;
-
-            // Drain any outbound frames the stack produced (ARP
-            // replies, TCP SYN-ACK, …).  The datapath's poll_once
-            // already submitted them to the tx ring internally via
-            // the FrameTxQueue plumbing, so there is nothing extra
-            // to do here — the frames were already handed to the
-            // kernel.
-
-            // Check if the stack accepted a new connection.
-            // For UdpStack this happens on the first packet from a
-            // new peer; for SmoltcpStack this happens when a TCP
-            // handshake completes.
-            //
-            // We re-poll immediately rather than yielding because
-            // busy-polling is the whole point of AF_XDP.
-            //
-            // TODO: the XdpStack::on_rx already returns
-            // Option<Connection> from inside poll_once but we don't
-            // surface it here yet.  For now we rely on the stack's
-            // internal accept queue and drain it below.
-            //
-            // This is a temporary simplification; a future refactor
-            // will thread the connection out of poll_once directly.
-            let mut q = FrameTxQueue::new(&mut tx_buf);
-            if let Some(conn) = self
-                .stack
-                .on_rx(&[], &mut q)
-                .map_err(|e| io::Error::other(format!("stack on_rx: {e}")))?
-            {
+            // 1. Drain any connections buffered from a previous
+            //    poll_once round.
+            if let Some(conn) = self.pending_conns.pop_front() {
                 return Ok(conn);
+            }
+
+            // 2. Drive one round of rx → stack → tx.  poll_once now
+            //    surfaces any connections that on_rx produced.
+            let (n_rx, new_conns) = self.datapath.poll_once(&mut self.stack)?;
+
+            for conn in new_conns {
+                self.pending_conns.push_back(conn);
+            }
+
+            // If we got a connection this round, return it
+            // immediately.
+            if let Some(conn) = self.pending_conns.pop_front() {
+                return Ok(conn);
+            }
+
+            // 3. If no frames were processed, yield to the executor
+            //    so session tasks and timers can make progress.
+            //    When frames ARE flowing we stay in the busy loop
+            //    (the whole point of AF_XDP).
+            if n_rx == 0 {
+                tokio::task::yield_now().await;
             }
         }
     }
