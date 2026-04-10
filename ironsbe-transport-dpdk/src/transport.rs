@@ -12,7 +12,6 @@ use crate::ffi;
 use crate::port::{DpdkPort, MAX_BURST};
 use ironsbe_transport::traits::{LocalListener, LocalTransport};
 use ironsbe_transport::xdp::stack::{FrameTxQueue, XdpStack};
-use std::ffi::CString;
 use std::io;
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
@@ -59,11 +58,8 @@ impl From<SocketAddr> for DpdkConfig<ironsbe_transport::xdp::UdpStack> {
             IpAddr::V6(_) => std::net::Ipv4Addr::LOCALHOST,
         };
         let mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
-        let stack = ironsbe_transport::xdp::UdpStack::new(UdpStackConfig::new(
-            ip,
-            addr.port(),
-            mac,
-        ));
+        let stack =
+            ironsbe_transport::xdp::UdpStack::new(UdpStackConfig::new(ip, addr.port(), mac));
         Self {
             eal_args: vec![
                 "ironsbe".into(),
@@ -147,8 +143,7 @@ where
             }
 
             // rx burst
-            let mut rx_pkts: [*mut ffi::rte_mbuf; MAX_BURST] =
-                [std::ptr::null_mut(); MAX_BURST];
+            let mut rx_pkts: [*mut ffi::rte_mbuf; MAX_BURST] = [std::ptr::null_mut(); MAX_BURST];
             // SAFETY: rx_pkts is a valid array of MAX_BURST pointers.
             let nb_rx = unsafe { self.port.rx_burst(&mut rx_pkts) };
 
@@ -190,12 +185,12 @@ where
                     continue;
                 }
                 // SAFETY: mbuf is freshly allocated and valid.
-                let data_ptr = unsafe {
-                    ffi::rte_pktmbuf_append(mbuf, frame_data.len() as u16)
-                };
+                let data_ptr = unsafe { ffi::rte_pktmbuf_append(mbuf, frame_data.len() as u16) };
                 if data_ptr.is_null() {
                     tracing::warn!("dpdk: rte_pktmbuf_append returned null (frame too large?)");
-                    unsafe { ffi::rte_pktmbuf_free(mbuf); }
+                    unsafe {
+                        ffi::rte_pktmbuf_free(mbuf);
+                    }
                     continue;
                 }
                 unsafe {
@@ -210,7 +205,9 @@ where
                 let sent = unsafe { self.port.tx_burst(&mut pkts, 1) };
                 if sent == 0 {
                     // Free unsent mbuf.
-                    unsafe { ffi::rte_pktmbuf_free(mbuf); }
+                    unsafe {
+                        ffi::rte_pktmbuf_free(mbuf);
+                    }
                 }
             }
 

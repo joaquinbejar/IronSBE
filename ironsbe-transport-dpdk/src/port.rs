@@ -84,14 +84,7 @@ impl DpdkPort {
 
         // Setup rx queue.
         let ret = unsafe {
-            ffi::rte_eth_rx_queue_setup(
-                port_id,
-                0,
-                DEFAULT_NB_DESC,
-                socket_id,
-                ptr::null(),
-                pool,
-            )
+            ffi::rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_DESC, socket_id, ptr::null(), pool)
         };
         if ret != 0 {
             return Err(io::Error::new(
@@ -154,9 +147,7 @@ impl DpdkPort {
     #[inline]
     pub unsafe fn rx_burst(&self, pkts: &mut [*mut ffi::rte_mbuf; MAX_BURST]) -> u16 {
         // SAFETY: caller guarantees the array is large enough.
-        unsafe {
-            ffi::rte_eth_rx_burst(self.port_id, 0, pkts.as_mut_ptr(), MAX_BURST as u16)
-        }
+        unsafe { ffi::rte_eth_rx_burst(self.port_id, 0, pkts.as_mut_ptr(), MAX_BURST as u16) }
     }
 
     /// Sends a burst of packets on the tx queue.
