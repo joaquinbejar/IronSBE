@@ -5,10 +5,13 @@
 //! and types actually used by this crate are included (see
 //! `build.rs` allowlists).
 //!
-//! The C shim (`shim.c`) exposes `rte_pktmbuf_mtod` and
-//! `rte_pktmbuf_data_len` — which are macros / inline functions in
-//! the DPDK headers — as real `extern "C"` functions callable from
-//! Rust.
+//! The C shim (`shim.c`) exposes the following DPDK APIs as real
+//! `extern "C"` functions callable from Rust, bypassing bindgen:
+//! `rte_pktmbuf_mtod`, `rte_pktmbuf_data_len`,
+//! `rte_pktmbuf_alloc`, `rte_pktmbuf_free`,
+//! `rte_pktmbuf_append`, `rte_eth_rx_burst`, and
+//! `rte_eth_tx_burst`.  These are provided by the shim because they
+//! are macros / inline functions in the DPDK headers.
 
 #![allow(
     non_camel_case_types,
@@ -75,7 +78,10 @@ mod tests {
 
     #[test]
     fn test_rte_mbuf_has_expected_minimum_size() {
-        // rte_mbuf is at least 128 bytes in all DPDK versions.
+        // Conservative sanity check: rte_mbuf should not be
+        // suspiciously small.  The real size is ~128 bytes in DPDK
+        // 23.11 but we only assert >= 64 to stay resilient across
+        // minor layout changes.
         assert!(
             std::mem::size_of::<rte_mbuf>() >= 64,
             "rte_mbuf size {} is suspiciously small",

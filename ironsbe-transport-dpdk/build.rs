@@ -71,10 +71,24 @@ fn main() {
         // free-form text that rustdoc tries to parse as doctests.
         .generate_comments(false);
 
-    // Pass the include paths from pkg-config so clang can find the
-    // DPDK headers.
-    for path in &dpdk.include_paths {
-        builder = builder.clang_arg(format!("-I{}", path.display()));
+    // Pass the full CFLAGS from pkg-config (include paths, arch flags,
+    // `-include rte_config.h`, …) so clang sees exactly the same
+    // struct layout as the C compiler.  Just `-I` paths are not enough
+    // because config macros can change struct sizes.
+    let cflags_bg = std::process::Command::new("pkg-config")
+        .args(["--cflags", "libdpdk"])
+        .output()
+        .expect("failed to run pkg-config --cflags libdpdk for bindgen");
+    if !cflags_bg.status.success() {
+        let stderr = String::from_utf8_lossy(&cflags_bg.stderr);
+        panic!(
+            "pkg-config --cflags libdpdk failed ({}): {}",
+            cflags_bg.status,
+            stderr.trim()
+        );
+    }
+    for flag in String::from_utf8_lossy(&cflags_bg.stdout).split_whitespace() {
+        builder = builder.clang_arg(flag);
     }
 
     let bindings = builder
@@ -101,6 +115,14 @@ fn main() {
         .args(["--cflags", "libdpdk"])
         .output()
         .expect("failed to run pkg-config --cflags libdpdk");
+    if !cflags_output.status.success() {
+        let stderr = String::from_utf8_lossy(&cflags_output.stderr);
+        panic!(
+            "pkg-config --cflags libdpdk failed ({}): {}",
+            cflags_output.status,
+            stderr.trim()
+        );
+    }
     let cflags = String::from_utf8_lossy(&cflags_output.stdout);
     for flag in cflags.split_whitespace() {
         cc_build.flag(flag);
