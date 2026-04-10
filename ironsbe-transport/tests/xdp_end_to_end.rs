@@ -23,7 +23,7 @@
 use ironsbe_transport::traits::{LocalListener, LocalTransport};
 use ironsbe_transport::xdp::stack::udp::UdpStackConfig;
 use ironsbe_transport::xdp::{DatapathConfig, UdpStack, XdpConfig, XdpTransport};
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, UdpSocket};
 
 const LOCAL_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
