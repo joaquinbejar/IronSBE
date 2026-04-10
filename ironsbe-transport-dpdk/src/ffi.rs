@@ -25,6 +25,9 @@
     clippy::redundant_static_lifetimes,
     // Some generated Default impls reference large arrays.
     clippy::derivable_impls,
+    // Bindgen-generated unsafe functions don't have # Safety docs.
+    clippy::missing_safety_doc,
+    clippy::missing_docs_in_private_items,
 )]
 
 // Include the bindgen output.

@@ -66,7 +66,10 @@ fn main() {
         // Generate Rust 2021-compatible code so `unsafe fn` bodies
         // don't need explicit `unsafe {}` blocks (Rust 2024 changed
         // the default).
-        .rust_edition(bindgen::RustEdition::Edition2021);
+        .rust_edition(bindgen::RustEdition::Edition2021)
+        // Don't emit doc comments from DPDK headers — they contain
+        // free-form text that rustdoc tries to parse as doctests.
+        .generate_comments(false);
 
     // Pass the include paths from pkg-config so clang can find the
     // DPDK headers.
