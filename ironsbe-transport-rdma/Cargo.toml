@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true }
+libc = "0.2"
 
 [build-dependencies]
 pkg-config = "0.3"
