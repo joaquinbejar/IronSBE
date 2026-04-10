@@ -77,7 +77,9 @@ fn main() {
         builder = builder.clang_arg(format!("-I{}", path.display()));
     }
 
-    let bindings = builder.generate().expect("bindgen failed to generate DPDK bindings");
+    let bindings = builder
+        .generate()
+        .expect("bindgen failed to generate DPDK bindings");
     bindings
         .write_to_file(out_dir.join("dpdk_bindings.rs"))
         .expect("failed to write dpdk_bindings.rs");

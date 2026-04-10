@@ -28,6 +28,7 @@
     // Bindgen-generated unsafe functions don't have # Safety docs.
     clippy::missing_safety_doc,
     clippy::missing_docs_in_private_items,
+    clippy::ptr_offset_with_cast,
 )]
 
 // Include the bindgen output.
@@ -44,8 +45,7 @@ unsafe extern "C" {
     pub fn ironsbe_pktmbuf_data_len_shim(m: *const rte_mbuf) -> u16;
     pub fn ironsbe_pktmbuf_alloc(pool: *mut rte_mempool) -> *mut rte_mbuf;
     pub fn ironsbe_pktmbuf_free(m: *mut rte_mbuf);
-    pub fn ironsbe_pktmbuf_append(m: *mut rte_mbuf, len: u16)
-        -> *mut core::ffi::c_char;
+    pub fn ironsbe_pktmbuf_append(m: *mut rte_mbuf, len: u16) -> *mut core::ffi::c_char;
     // --- ethdev rx/tx burst ---
     pub fn ironsbe_eth_rx_burst(
         port_id: u16,
