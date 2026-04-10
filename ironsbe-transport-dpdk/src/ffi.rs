@@ -15,6 +15,9 @@
     non_snake_case,
     non_upper_case_globals,
     dead_code,
+    // Bindgen generates `unsafe fn` bodies that call other unsafe
+    // functions without explicit `unsafe {}` blocks (Rust 2024 default).
+    unsafe_op_in_unsafe_fn,
     // bindgen generates types that may trigger these:
     clippy::useless_transmute,
     clippy::unnecessary_cast,

@@ -62,7 +62,11 @@ fn main() {
         .derive_default(true)
         // Use core types for no_std compat (even though we use std).
         .use_core()
-        .layout_tests(true);
+        .layout_tests(true)
+        // Generate Rust 2021-compatible code so `unsafe fn` bodies
+        // don't need explicit `unsafe {}` blocks (Rust 2024 changed
+        // the default).
+        .rust_edition(bindgen::RustEdition::Edition2021);
 
     // Pass the include paths from pkg-config so clang can find the
     // DPDK headers.
