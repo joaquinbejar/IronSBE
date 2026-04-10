@@ -218,19 +218,21 @@ impl Datapath {
         // 4. Submit pending tx frames.
         for frame_data in &tx_buf {
             if let Some(mut desc) = self.free_descs.pop() {
-                // SAFETY: `desc` is a valid free descriptor from our
-                // pool; `data_mut` gives exclusive UMEM access.
-                let mut data_mut = unsafe { self.umem.data_mut(&mut desc) };
-                // `cursor()` sets the data length as we write.
-                let mut cursor = data_mut.cursor();
-                if let Err(e) = cursor.write_all(frame_data) {
-                    tracing::warn!("xdp: tx write failed: {e}");
-                    // Return the descriptor to the free pool.
-                    self.free_descs.push(desc);
-                    continue;
+                // Write the frame data into the descriptor's UMEM
+                // region via a scoped block so the mutable borrow on
+                // `desc` ends before we hand it to the tx queue.
+                {
+                    // SAFETY: `desc` is a valid free descriptor from
+                    // our pool; `data_mut` gives exclusive UMEM access.
+                    let mut data_mut = unsafe { self.umem.data_mut(&mut desc) };
+                    // `cursor()` sets the data length as we write.
+                    let mut cursor = data_mut.cursor();
+                    if let Err(e) = cursor.write_all(frame_data) {
+                        tracing::warn!("xdp: tx write failed: {e}");
+                        self.free_descs.push(desc);
+                        continue;
+                    }
                 }
-                drop(cursor);
-                drop(data_mut);
 
                 // SAFETY: we just wrote valid data into the
                 // descriptor's UMEM region.
