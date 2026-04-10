@@ -40,8 +40,6 @@ pub struct RdmaConnection {
     /// Pre-registered receive buffers.
     recv_bufs: Vec<Vec<u8>>,
     recv_mrs: Vec<*mut ffi::ibv_mr>,
-    /// Index into recv_bufs for the next RECV to re-post.
-    recv_idx: usize,
     max_msg_size: usize,
     peer_addr: SocketAddr,
 }
@@ -114,7 +112,7 @@ impl RdmaConnection {
             recv_mrs.push(mr);
         }
 
-        let mut conn = Self {
+        let conn = Self {
             cm_id,
             pd,
             cq,
@@ -122,7 +120,6 @@ impl RdmaConnection {
             send_mr,
             recv_bufs,
             recv_mrs,
-            recv_idx: 0,
             max_msg_size,
             peer_addr,
         };
@@ -190,15 +187,13 @@ impl LocalConnection for RdmaConnection {
                     continue;
                 }
                 let buf = &self.recv_bufs[idx];
-                let msg_len =
-                    u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+                let msg_len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
                 let total = LENGTH_PREFIX_BYTES + msg_len;
                 if total > byte_len || msg_len > self.max_msg_size {
                     self.post_recv(idx)?;
                     continue;
                 }
-                let payload =
-                    BytesMut::from(&buf[LENGTH_PREFIX_BYTES..total]);
+                let payload = BytesMut::from(&buf[LENGTH_PREFIX_BYTES..total]);
                 // Re-post the buffer for the next message.
                 self.post_recv(idx)?;
                 return Ok(Some(payload));
@@ -219,10 +214,8 @@ impl LocalConnection for RdmaConnection {
             ));
         }
         let frame_len = msg.len() as u32;
-        self.send_buf[..LENGTH_PREFIX_BYTES]
-            .copy_from_slice(&frame_len.to_le_bytes());
-        self.send_buf[LENGTH_PREFIX_BYTES..LENGTH_PREFIX_BYTES + msg.len()]
-            .copy_from_slice(msg);
+        self.send_buf[..LENGTH_PREFIX_BYTES].copy_from_slice(&frame_len.to_le_bytes());
+        self.send_buf[LENGTH_PREFIX_BYTES..LENGTH_PREFIX_BYTES + msg.len()].copy_from_slice(msg);
         let total = LENGTH_PREFIX_BYTES + msg.len();
 
         let mut sge = ffi::ibv_sge {

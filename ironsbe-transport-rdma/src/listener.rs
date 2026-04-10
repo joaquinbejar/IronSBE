@@ -10,9 +10,6 @@ use std::ptr;
 /// Default backlog for `rdma_listen`.
 const LISTEN_BACKLOG: i32 = 16;
 
-/// Default max message size for accepted connections.
-const DEFAULT_MAX_MSG_SIZE: usize = 64 * 1024;
-
 /// RDMA CM listener.
 ///
 /// Wraps a `rdma_cm_id` in listening mode.  `accept()` waits for an
@@ -129,9 +126,8 @@ impl LocalListener for RdmaListener {
             }
 
             let cq_size = 32i32;
-            let cq = unsafe {
-                ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0)
-            };
+            let cq =
+                unsafe { ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0) };
             if cq.is_null() {
                 tracing::warn!("ibv_create_cq failed for accepted connection");
                 unsafe {
@@ -189,9 +185,7 @@ impl LocalListener for RdmaListener {
             }
 
             let peer_addr = self.local_addr; // approximation for now
-            let conn = unsafe {
-                RdmaConnection::from_cm_id(new_id, peer_addr, self.max_msg_size)
-            }?;
+            let conn = unsafe { RdmaConnection::from_cm_id(new_id, peer_addr, self.max_msg_size) }?;
 
             tracing::info!("RDMA connection accepted");
             return Ok(conn);

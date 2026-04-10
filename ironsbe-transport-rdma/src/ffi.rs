@@ -16,7 +16,7 @@
     clippy::redundant_static_lifetimes,
     clippy::derivable_impls,
     clippy::missing_safety_doc,
-    clippy::ptr_offset_with_cast,
+    clippy::ptr_offset_with_cast
 )]
 
 include!(concat!(env!("OUT_DIR"), "/rdma_bindings.rs"));
