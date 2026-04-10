@@ -53,8 +53,7 @@ impl DpdkPort {
         let socket_id = unsafe { ffi::rte_socket_id() };
 
         // Create mbuf pool.
-        let pool_name =
-            CString::new("MBUF_POOL").map_err(io::Error::other)?;
+        let pool_name = CString::new("MBUF_POOL").map_err(io::Error::other)?;
         let pool = unsafe {
             ffi::rte_pktmbuf_pool_create(
                 pool_name.as_ptr(),
@@ -66,18 +65,16 @@ impl DpdkPort {
             )
         };
         if pool.is_null() {
-            return Err(io::Error::other(
-                "rte_pktmbuf_pool_create returned NULL",
-            ));
+            return Err(io::Error::other("rte_pktmbuf_pool_create returned NULL"));
         }
 
         // Configure the port with 1 rx + 1 tx queue.
         let eth_conf = ffi::rte_eth_conf::default();
         let ret = unsafe { ffi::rte_eth_dev_configure(port_id, 1, 1, &eth_conf) };
         if ret != 0 {
-            return Err(io::Error::other(
-                format!("rte_eth_dev_configure failed: {ret}"),
-            ));
+            return Err(io::Error::other(format!(
+                "rte_eth_dev_configure failed: {ret}"
+            )));
         }
 
         // Setup rx queue.
@@ -85,9 +82,9 @@ impl DpdkPort {
             ffi::rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_DESC, socket_id, ptr::null(), pool)
         };
         if ret != 0 {
-            return Err(io::Error::other(
-                format!("rte_eth_rx_queue_setup failed: {ret}"),
-            ));
+            return Err(io::Error::other(format!(
+                "rte_eth_rx_queue_setup failed: {ret}"
+            )));
         }
 
         // Setup tx queue.
@@ -95,9 +92,9 @@ impl DpdkPort {
             ffi::rte_eth_tx_queue_setup(port_id, 0, DEFAULT_NB_DESC, socket_id, ptr::null())
         };
         if ret != 0 {
-            return Err(io::Error::other(
-                format!("rte_eth_tx_queue_setup failed: {ret}"),
-            ));
+            return Err(io::Error::other(format!(
+                "rte_eth_tx_queue_setup failed: {ret}"
+            )));
         }
 
         // Enable promiscuous mode (receive all packets, important for
@@ -110,9 +107,7 @@ impl DpdkPort {
         // Start the port.
         let ret = unsafe { ffi::rte_eth_dev_start(port_id) };
         if ret != 0 {
-            return Err(io::Error::other(
-                format!("rte_eth_dev_start failed: {ret}"),
-            ));
+            return Err(io::Error::other(format!("rte_eth_dev_start failed: {ret}")));
         }
 
         tracing::info!(port_id, "DPDK port started");
