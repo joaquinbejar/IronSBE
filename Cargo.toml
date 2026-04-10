@@ -12,11 +12,25 @@ members = [
     "ironsbe-client",
     "ironsbe-marketdata",
     "ironsbe-bench",
+    # ironsbe-transport-dpdk requires libdpdk-dev (Linux-only, DPDK 23.11+).
+    # It is in the workspace for dep resolution but NOT in default-members
+    # so `cargo build` / `cargo test` skip it unless you opt in:
+    #   cargo build -p ironsbe-transport-dpdk
+    "ironsbe-transport-dpdk",
 ]
-# ironsbe-transport-dpdk is excluded from the default build because it
-# requires libdpdk-dev (Linux-only).  Build it explicitly:
-#   cargo build -p ironsbe-transport-dpdk
-exclude = ["ironsbe-transport-dpdk"]
+default-members = [
+    "ironsbe",
+    "ironsbe-core",
+    "ironsbe-schema",
+    "ironsbe-codegen",
+    "ironsbe-derive",
+    "ironsbe-channel",
+    "ironsbe-transport",
+    "ironsbe-server",
+    "ironsbe-client",
+    "ironsbe-marketdata",
+    "ironsbe-bench",
+]
 
 [workspace.package]
 edition = "2024"
