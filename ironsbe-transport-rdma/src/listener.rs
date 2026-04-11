@@ -13,8 +13,9 @@ const LISTEN_BACKLOG: i32 = 16;
 /// RDMA CM listener.
 ///
 /// Wraps a `rdma_cm_id` in listening mode.  `accept()` waits for an
-/// incoming RDMA CM connection request, creates a QP on the new CM
-/// ID, and returns an [`RdmaConnection`].
+/// incoming RDMA CM connection request, creates a QP + PD + CQ on
+/// the new CM ID, hands them to [`RdmaConnection`] for ownership,
+/// and returns the new connection.
 pub struct RdmaListener {
     listen_id: *mut ffi::rdma_cm_id,
     event_channel: *mut ffi::rdma_event_channel,
@@ -24,6 +25,9 @@ pub struct RdmaListener {
 
 impl RdmaListener {
     /// Binds and listens on `addr`.
+    ///
+    /// On any error, releases partially-allocated resources before
+    /// returning.
     ///
     /// # Errors
     /// Returns an `io::Error` if any RDMA CM call fails.
@@ -43,19 +47,25 @@ impl RdmaListener {
             )
         };
         if ret != 0 {
+            unsafe { ffi::rdma_destroy_event_channel(ec) };
             return Err(io::Error::other(format!("rdma_create_id failed: {ret}")));
         }
 
-        // Convert SocketAddr to sockaddr_in.
+        // Convert SocketAddr to sockaddr_in.  `sin_addr.s_addr` is
+        // in network byte order, so build it from BE bytes.
         let sockaddr = match addr {
             SocketAddr::V4(v4) => {
                 let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
                 sa.sin_family = libc::AF_INET as u16;
                 sa.sin_port = v4.port().to_be();
-                sa.sin_addr.s_addr = u32::from_ne_bytes(v4.ip().octets());
+                sa.sin_addr.s_addr = u32::from_be_bytes(v4.ip().octets());
                 sa
             }
             SocketAddr::V6(_) => {
+                unsafe {
+                    ffi::rdma_destroy_id(listen_id);
+                    ffi::rdma_destroy_event_channel(ec);
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "IPv6 not supported for RDMA listener",
@@ -70,11 +80,19 @@ impl RdmaListener {
             )
         };
         if ret != 0 {
+            unsafe {
+                ffi::rdma_destroy_id(listen_id);
+                ffi::rdma_destroy_event_channel(ec);
+            }
             return Err(io::Error::other(format!("rdma_bind_addr failed: {ret}")));
         }
 
         let ret = unsafe { ffi::rdma_listen(listen_id, LISTEN_BACKLOG) };
         if ret != 0 {
+            unsafe {
+                ffi::rdma_destroy_id(listen_id);
+                ffi::rdma_destroy_event_channel(ec);
+            }
             return Err(io::Error::other(format!("rdma_listen failed: {ret}")));
         }
 
@@ -89,6 +107,31 @@ impl RdmaListener {
     }
 }
 
+/// Cleanup helper: tears down the CM ID + QP + CQ + PD chain for
+/// a partially-accepted connection when something fails along the
+/// accept path.
+unsafe fn cleanup_accept_resources(
+    cm_id: *mut ffi::rdma_cm_id,
+    pd: *mut ffi::ibv_pd,
+    cq: *mut ffi::ibv_cq,
+    had_qp: bool,
+) {
+    unsafe {
+        if had_qp && !cm_id.is_null() {
+            ffi::rdma_destroy_qp(cm_id);
+        }
+        if !cq.is_null() {
+            ffi::ibv_destroy_cq(cq);
+        }
+        if !pd.is_null() {
+            ffi::ibv_dealloc_pd(pd);
+        }
+        if !cm_id.is_null() {
+            ffi::rdma_destroy_id(cm_id);
+        }
+    }
+}
+
 impl LocalListener for RdmaListener {
     type Connection = RdmaConnection;
     type Error = io::Error;
@@ -98,8 +141,8 @@ impl LocalListener for RdmaListener {
             let mut event: *mut ffi::rdma_cm_event = ptr::null_mut();
             let ret = unsafe { ffi::rdma_get_cm_event(self.event_channel, &mut event) };
             if ret != 0 {
-                tokio::task::yield_now().await;
-                continue;
+                // Surface the real errno instead of spinning forever.
+                return Err(io::Error::last_os_error());
             }
 
             let event_type = unsafe { (*event).event };
@@ -110,30 +153,29 @@ impl LocalListener for RdmaListener {
                 continue;
             }
 
-            // Create a QP on the new CM ID.
+            // Create PD + CQ + QP on the new CM ID.  From here on
+            // any failure path must tear down the partial resources.
             let verbs = unsafe { (*new_id).verbs };
             if verbs.is_null() {
-                tracing::warn!("accepted CM ID has no verbs context, skipping");
                 unsafe { ffi::rdma_destroy_id(new_id) };
+                tracing::warn!("accepted CM ID has no verbs context, skipping");
                 continue;
             }
 
             let pd = unsafe { ffi::ibv_alloc_pd(verbs) };
             if pd.is_null() {
-                tracing::warn!("ibv_alloc_pd failed for accepted connection");
                 unsafe { ffi::rdma_destroy_id(new_id) };
+                tracing::warn!("ibv_alloc_pd failed for accepted connection");
                 continue;
             }
 
             let cq_size = 32i32;
-            let cq =
-                unsafe { ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0) };
+            let cq = unsafe {
+                ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0)
+            };
             if cq.is_null() {
+                unsafe { cleanup_accept_resources(new_id, pd, ptr::null_mut(), false) };
                 tracing::warn!("ibv_create_cq failed for accepted connection");
-                unsafe {
-                    ffi::ibv_dealloc_pd(pd);
-                    ffi::rdma_destroy_id(new_id);
-                }
                 continue;
             }
 
@@ -148,12 +190,8 @@ impl LocalListener for RdmaListener {
 
             let ret = unsafe { ffi::rdma_create_qp(new_id, pd, &mut qp_attr) };
             if ret != 0 {
+                unsafe { cleanup_accept_resources(new_id, pd, cq, false) };
                 tracing::warn!("rdma_create_qp failed: {ret}");
-                unsafe {
-                    ffi::ibv_destroy_cq(cq);
-                    ffi::ibv_dealloc_pd(pd);
-                    ffi::rdma_destroy_id(new_id);
-                }
                 continue;
             }
 
@@ -163,32 +201,33 @@ impl LocalListener for RdmaListener {
             conn_param.responder_resources = 1;
             let ret = unsafe { ffi::rdma_accept(new_id, &mut conn_param) };
             if ret != 0 {
+                unsafe { cleanup_accept_resources(new_id, pd, cq, true) };
                 tracing::warn!("rdma_accept failed: {ret}");
-                unsafe {
-                    ffi::rdma_destroy_qp(new_id);
-                    ffi::ibv_destroy_cq(cq);
-                    ffi::ibv_dealloc_pd(pd);
-                    ffi::rdma_destroy_id(new_id);
-                }
                 continue;
             }
 
-            // Build the connection.  Note: RdmaConnection::from_cm_id
-            // allocates its own PD/CQ/MRs, so we destroy the ones we
-            // created above and let the connection own fresh ones.
-            //
-            // TODO: refactor to pass the already-created PD/CQ through
-            // instead of double-allocating.
-            unsafe {
-                ffi::ibv_destroy_cq(cq);
-                ffi::ibv_dealloc_pd(pd);
+            // Hand ownership of cm_id/pd/cq to the connection.  On
+            // success the connection's Drop owns cleanup; on failure
+            // we release all resources explicitly.
+            let peer_addr = self.local_addr; // TODO: extract real peer (tracked in follow-up)
+            match unsafe {
+                RdmaConnection::from_accepted_cm_id(
+                    new_id,
+                    pd,
+                    cq,
+                    peer_addr,
+                    self.max_msg_size,
+                )
+            } {
+                Ok(conn) => {
+                    tracing::info!("RDMA connection accepted");
+                    return Ok(conn);
+                }
+                Err(e) => {
+                    unsafe { cleanup_accept_resources(new_id, pd, cq, true) };
+                    return Err(e);
+                }
             }
-
-            let peer_addr = self.local_addr; // approximation for now
-            let conn = unsafe { RdmaConnection::from_cm_id(new_id, peer_addr, self.max_msg_size) }?;
-
-            tracing::info!("RDMA connection accepted");
-            return Ok(conn);
         }
     }
 

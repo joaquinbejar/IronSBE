@@ -16,7 +16,7 @@ fn main() {
             );
         });
 
-    let _rdmacm = pkg_config::Config::new()
+    let rdmacm = pkg_config::Config::new()
         .probe("librdmacm")
         .unwrap_or_else(|e| {
             panic!(
@@ -73,7 +73,10 @@ fn main() {
         .rust_edition(bindgen::RustEdition::Edition2021)
         .generate_comments(false);
 
-    for path in &verbs.include_paths {
+    // Pass both libibverbs AND librdmacm include paths to bindgen so
+    // <rdma/rdma_cma.h> is resolvable even when the two libs ship
+    // their headers in separate include dirs.
+    for path in verbs.include_paths.iter().chain(rdmacm.include_paths.iter()) {
         builder = builder.clang_arg(format!("-I{}", path.display()));
     }
 
@@ -87,7 +90,7 @@ fn main() {
     // Compile the C shim for inline ibverbs functions.
     let mut cc_build = cc::Build::new();
     cc_build.file("src/shim.c");
-    for path in &verbs.include_paths {
+    for path in verbs.include_paths.iter().chain(rdmacm.include_paths.iter()) {
         cc_build.include(path);
     }
     cc_build.compile("ironsbe_rdma_shim");
