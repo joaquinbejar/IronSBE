@@ -507,11 +507,25 @@ where
                 }
             }
 
-            // Send outgoing messages
+            // Send outgoing messages.  The send is itself raced
+            // against `session_token.cancelled()` so that an in-flight
+            // write to a stalled peer (TCP backpressure) cannot pin
+            // the session task open after Shutdown / CloseSession —
+            // the outer `select!` only races at the future level, so
+            // once we enter this arm we are committed until the inner
+            // `await` resolves.
             Some(msg) = rx.recv() => {
-                if let Err(e) = conn.send(&msg).await {
-                    tracing::error!(error = %e, "write error");
-                    return Err(std::io::Error::other(e));
+                tokio::select! {
+                    send_result = conn.send(&msg) => {
+                        if let Err(e) = send_result {
+                            tracing::error!(error = %e, "write error");
+                            return Err(std::io::Error::other(e));
+                        }
+                    }
+                    _ = session_token.cancelled() => {
+                        tracing::debug!("session cancelled mid-send");
+                        return Ok(());
+                    }
                 }
             }
 
