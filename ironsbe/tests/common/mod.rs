@@ -3,8 +3,10 @@
 //! These tests spin up a real `Server` + `Client` over the
 //! `tcp-tokio` backend, bind to an ephemeral port (`127.0.0.1:0`),
 //! and drive the full request/response lifecycle through the
-//! high-level APIs.  Every wait is event-driven with an explicit
-//! deadline — no fixed sleeps — so the tests are flake-free.
+//! high-level APIs.  Waits are bounded by explicit per-op deadlines
+//! and use a short polling interval (5 ms) against real event
+//! sources, keeping the suite reliable without arbitrary sleeps
+//! between steps.
 
 #![allow(dead_code)]
 

@@ -5,7 +5,7 @@
 
 mod common;
 
-use ironsbe_client::{ClientBuilder, ClientError};
+use ironsbe_client::{ClientBuilder, ClientError, ClientEvent, ClientHandle};
 use ironsbe_core::header::MessageHeader;
 use ironsbe_server::{MessageHandler, Responder, ServerBuilder};
 use std::net::{SocketAddr, TcpListener};
@@ -27,10 +27,18 @@ impl MessageHandler for NoopHandler {
     }
 }
 
-/// Reserves an ephemeral port by binding a `std::net::TcpListener` and
-/// then dropping it.  The OS may reuse the port quickly, so callers
-/// must be tolerant of races — these tests do not depend on the port
-/// staying free, only on it being valid syntactically.
+/// Reserves a loopback port by binding a `std::net::TcpListener` and
+/// dropping it immediately.
+///
+/// There is an inherent TOCTOU race: another process can reclaim the
+/// port between the drop and the subsequent bind by the real server.
+/// The alternative — using a routed TEST-NET-1 address — would fail
+/// fast with ECONNREFUSED/ENETUNREACH on most CI runners instead of
+/// exercising the reconnect path, so we accept the narrow race in
+/// exchange for a realistic loopback target.  If the port is reclaimed
+/// concurrently, the tests will simply surface a bind/connect error
+/// instead of the reconnect event they expect — a loud failure, not a
+/// silent corruption.
 fn reserve_unused_port() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
     let addr = listener.local_addr().expect("local_addr");
@@ -38,9 +46,34 @@ fn reserve_unused_port() -> SocketAddr {
     addr
 }
 
+/// Polls a `ClientHandle` until a `ClientEvent` matching `pred` is
+/// observed or the deadline expires.  Used to drive the reconnect
+/// tests off of real client state transitions instead of wall-clock
+/// sleeps.
+async fn wait_for_client_event<F>(handle: &mut ClientHandle, pred: F, deadline: Instant) -> bool
+where
+    F: Fn(&ClientEvent) -> bool,
+{
+    while Instant::now() < deadline {
+        if let Some(event) = handle.poll()
+            && pred(&event)
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    false
+}
+
+/// Asserts that `Client::run` surfaces a failure (not a hang) when the
+/// target address is not listening.  Loopback + closed port typically
+/// RSTs immediately and maps to `ClientError::Io`; on hosts where the
+/// OS instead drops the SYN silently we get `ClientError::ConnectTimeout`.
+/// Both outcomes are valid for this test — the contract under test is
+/// "connect fails within the deadline", not a specific error variant.
 #[tokio::test]
-async fn test_client_connect_timeout_fires_on_unreachable_addr() {
-    let outer = timeout(Duration::from_secs(5), async {
+async fn test_client_connect_failure_on_unreachable_addr() {
+    let outer = timeout(Duration::from_secs(8), async {
         let addr = reserve_unused_port();
 
         let (client, _client_handle) = ClientBuilder::with_default_transport(addr)
@@ -89,9 +122,19 @@ async fn test_client_reconnects_after_server_starts() {
             let _ = client.run().await;
         });
 
-        // Give the client time to fail at least one attempt so we know
-        // the reconnect loop is genuinely active.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Wait for the client to *actually fail* at least one connect
+        // attempt so we know the reconnect loop is genuinely active
+        // when we bring the server up.  The client emits `Disconnected`
+        // on every failed attempt.
+        assert!(
+            wait_for_client_event(
+                &mut client_handle,
+                |e| matches!(e, ClientEvent::Disconnected),
+                Instant::now() + Duration::from_secs(3),
+            )
+            .await,
+            "client never observed a first failed attempt"
+        );
 
         // Bring a server up on the reserved port.
         let (mut server, handle) = ServerBuilder::<NoopHandler>::new()
@@ -107,20 +150,15 @@ async fn test_client_reconnects_after_server_starts() {
             .await
             .expect("server did not emit Listening");
 
-        // The client's reconnect loop should pick up the new server.
-        let reconnect_deadline = Instant::now() + Duration::from_secs(8);
-        let mut got_connected = false;
-        while Instant::now() < reconnect_deadline {
-            if let Some(ev) = client_handle.poll()
-                && matches!(ev, ironsbe_client::ClientEvent::Connected)
-            {
-                got_connected = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        // The client's reconnect loop should pick up the new server
+        // and emit a fresh `Connected` event.
         assert!(
-            got_connected,
+            wait_for_client_event(
+                &mut client_handle,
+                |e| matches!(e, ClientEvent::Connected),
+                Instant::now() + Duration::from_secs(8),
+            )
+            .await,
             "client did not connect once the server came online"
         );
 

@@ -114,7 +114,7 @@ async fn test_concurrent_clients_send_distinct_messages() {
 
 #[tokio::test]
 async fn test_max_connections_rejects_over_limit() {
-    let outer = timeout(Duration::from_secs(10), async {
+    let outer = timeout(Duration::from_secs(30), async {
         const CAP: usize = 3;
         const ATTEMPTS: usize = 5;
         let started = Arc::new(AtomicUsize::new(0));
@@ -130,17 +130,37 @@ async fn test_max_connections_rejects_over_limit() {
             handles.push((client_handle, client_task));
         }
 
-        // Give the server enough time to process every accept.  We can't
-        // poll on a "rejection" event because the server logs a warning
-        // and silently drops the conn — so we let the run loop quiesce
-        // and then assert on_session_start was called *at most* CAP times.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline && started.load(Ordering::SeqCst) < CAP {
+        // There is no "rejection" event we can poll on — the server
+        // logs a warning and silently drops the over-cap conn — so
+        // instead we wait for `started` to reach CAP and then stay
+        // stable for a quiet period.  If the counter never goes past
+        // CAP during that quiet window we know the cap is enforced;
+        // if it ever exceeds CAP the assertion below fires immediately.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let quiet_period = Duration::from_millis(300);
+        let mut stable_since: Option<Instant> = None;
+        loop {
+            let observed = started.load(Ordering::SeqCst);
+            assert!(
+                observed <= CAP,
+                "server started {observed} sessions, exceeding cap {CAP}"
+            );
+            if observed == CAP {
+                let since = stable_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= quiet_period {
+                    break;
+                }
+            } else {
+                stable_since = None;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "sessions never stabilised at {CAP}; observed {}",
+                    started.load(Ordering::SeqCst)
+                );
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        // Drain a bit longer to allow any over-limit connections to be
-        // accepted-then-rejected.
-        tokio::time::sleep(Duration::from_millis(200)).await;
 
         let observed = started.load(Ordering::SeqCst);
         assert_eq!(

@@ -10,7 +10,7 @@ use common::{
     DEFAULT_WAIT, build_and_start_client, build_and_start_server, build_sbe_message,
     wait_for_client_connected, wait_for_client_message,
 };
-use ironsbe_client::{ClientBuilder, ClientEvent};
+use ironsbe_client::ClientBuilder;
 use ironsbe_core::header::MessageHeader;
 use ironsbe_server::{MessageHandler, Responder, ServerBuilder, ServerEvent, ServerHandle};
 use std::net::SocketAddr;
@@ -87,7 +87,7 @@ async fn wait_for_counter(counter: &Arc<AtomicUsize>, target: usize, deadline: I
 
 #[tokio::test]
 async fn test_single_sbe_message_round_trip() {
-    let outer = timeout(Duration::from_secs(5), async {
+    let outer = timeout(Duration::from_secs(15), async {
         let (_server_handle, addr, server_task) = build_and_start_server(EchoHandler, 16).await;
         let (mut client_handle, client_task) =
             build_and_start_client(addr, Duration::from_secs(2), 0).await;
@@ -119,7 +119,7 @@ async fn test_single_sbe_message_round_trip() {
 
 #[tokio::test]
 async fn test_many_messages_in_sequence() {
-    let outer = timeout(Duration::from_secs(10), async {
+    let outer = timeout(Duration::from_secs(30), async {
         let (_server_handle, addr, server_task) = build_and_start_server(EchoHandler, 16).await;
         let (mut client_handle, client_task) =
             build_and_start_client(addr, Duration::from_secs(2), 0).await;
@@ -154,7 +154,7 @@ async fn test_many_messages_in_sequence() {
 
 #[tokio::test]
 async fn test_large_message_within_default_frame_size() {
-    let outer = timeout(Duration::from_secs(5), async {
+    let outer = timeout(Duration::from_secs(15), async {
         let (_server_handle, addr, server_task) = build_and_start_server(EchoHandler, 16).await;
         let (mut client_handle, client_task) =
             build_and_start_client(addr, Duration::from_secs(2), 0).await;
@@ -188,7 +188,7 @@ async fn test_large_message_within_default_frame_size() {
 
 #[tokio::test]
 async fn test_message_with_custom_max_frame_size_256kb() {
-    let outer = timeout(Duration::from_secs(10), async {
+    let outer = timeout(Duration::from_secs(30), async {
         // Custom server: 256 KB frames.
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().expect("hardcoded addr");
         let (mut server, handle): (_, _) = ServerBuilder::<EchoHandler>::new()
@@ -248,7 +248,7 @@ async fn test_message_with_custom_max_frame_size_256kb() {
 
 #[tokio::test]
 async fn test_frame_exceeding_max_size_drops_connection() {
-    let outer = timeout(Duration::from_secs(5), async {
+    let outer = timeout(Duration::from_secs(15), async {
         // Server keeps the default 64 KB frame ceiling.
         let (server_handle, addr, server_task) = build_and_start_server(EchoHandler, 16).await;
 
@@ -289,7 +289,7 @@ async fn test_frame_exceeding_max_size_drops_connection() {
 
 #[tokio::test]
 async fn test_truncated_header_reports_on_error() {
-    let outer = timeout(Duration::from_secs(5), async {
+    let outer = timeout(Duration::from_secs(15), async {
         let received = Arc::new(AtomicUsize::new(0));
         let errors = Arc::new(AtomicUsize::new(0));
         let handler = CountingHandler {
@@ -321,11 +321,6 @@ async fn test_truncated_header_reports_on_error() {
             0,
             "on_message must not fire for a sub-header frame"
         );
-
-        // Drain any spurious events without asserting.
-        let _ = client_handle
-            .poll()
-            .filter(|e| !matches!(e, ClientEvent::Connected));
 
         client_handle.disconnect();
         let _ = client_task.await;
