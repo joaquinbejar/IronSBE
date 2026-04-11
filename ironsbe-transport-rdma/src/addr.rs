@@ -25,9 +25,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 /// `sockaddr_in`, 28 bytes for `sockaddr_in6`).  In practice RDMA CM
 /// always fills a full `sockaddr_storage` (128 bytes), so a pointer
 /// into the `rdma_addr` union satisfies this trivially.
-pub(crate) unsafe fn sockaddr_to_socket_addr(
-    sa: *const libc::sockaddr,
-) -> io::Result<SocketAddr> {
+pub(crate) unsafe fn sockaddr_to_socket_addr(sa: *const libc::sockaddr) -> io::Result<SocketAddr> {
     if sa.is_null() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

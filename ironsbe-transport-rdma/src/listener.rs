@@ -305,9 +305,8 @@ impl LocalListener for RdmaListener {
             }
 
             let cq_size = 32i32;
-            let cq = unsafe {
-                ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0)
-            };
+            let cq =
+                unsafe { ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0) };
             if cq.is_null() {
                 unsafe { cleanup_accept_resources(new_id, pd, ptr::null_mut(), false) };
                 tracing::warn!("ibv_create_cq failed for accepted connection");
@@ -360,13 +359,7 @@ impl LocalListener for RdmaListener {
             // success the connection's Drop owns cleanup; on failure
             // we release all resources explicitly.
             match unsafe {
-                RdmaConnection::from_accepted_cm_id(
-                    new_id,
-                    pd,
-                    cq,
-                    peer_addr,
-                    self.max_msg_size,
-                )
+                RdmaConnection::from_accepted_cm_id(new_id, pd, cq, peer_addr, self.max_msg_size)
             } {
                 Ok(conn) => {
                     tracing::info!(%peer_addr, "RDMA connection accepted");

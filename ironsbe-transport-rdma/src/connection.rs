@@ -285,10 +285,7 @@ impl RdmaConnection {
     /// Consumes a buffered [`PendingRecv`] (if any) and turns it
     /// into an `Option<BytesMut>` using the same framing rules as
     /// the live-CQ path.  Re-posts the receive buffer on the way out.
-    fn consume_pending_recv(
-        &mut self,
-        pending: PendingRecv,
-    ) -> io::Result<Option<BytesMut>> {
+    fn consume_pending_recv(&mut self, pending: PendingRecv) -> io::Result<Option<BytesMut>> {
         let idx = pending.buf_idx;
         let byte_len = pending.byte_len as usize;
 
@@ -296,9 +293,7 @@ impl RdmaConnection {
             self.post_recv(idx)?;
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "malformed RDMA frame: byte_len {byte_len} < prefix {LENGTH_PREFIX_BYTES}"
-                ),
+                format!("malformed RDMA frame: byte_len {byte_len} < prefix {LENGTH_PREFIX_BYTES}"),
             ));
         }
 
