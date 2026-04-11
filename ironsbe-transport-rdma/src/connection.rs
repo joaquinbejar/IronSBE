@@ -415,12 +415,10 @@ impl LocalConnection for RdmaConnection {
         // are to the CQ ceiling.  `checked_add` guards the (in
         // practice unreachable) `u32::MAX` overflow because
         // `pending_sends` is bounded by `CQ_CAPACITY` in steady state.
-        self.pending_sends = self.pending_sends.checked_add(1).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                "pending_sends counter overflow",
-            )
-        })?;
+        self.pending_sends = self
+            .pending_sends
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("pending_sends counter overflow"))?;
         Ok(())
     }
 
