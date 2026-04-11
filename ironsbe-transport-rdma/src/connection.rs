@@ -56,6 +56,16 @@ const CQ_DRAIN_HIGH_WATER: u32 = 24;
 /// right at the high-water mark.
 const CQ_DRAIN_LOW_WATER: u32 = 16;
 
+// Compile-time invariant for the CQ draining watermarks:
+//   LOW_WATER < HIGH_WATER < CQ_CAPACITY
+// The `drain_until_low_water` loop uses `pending_sends >= LOW_WATER`
+// as its exit predicate, so violating these orderings would either
+// spin forever or overflow the CQ.  This `const _` forces the check
+// at compile time — no runtime cost, no clippy noise about asserting
+// on constants.
+const _: () = assert!(CQ_DRAIN_LOW_WATER < CQ_DRAIN_HIGH_WATER);
+const _: () = assert!(CQ_DRAIN_HIGH_WATER < CQ_CAPACITY);
+
 /// A RECV completion that was observed while the `send` path was
 /// draining the CQ.  Stored in [`RdmaConnection::pending_recvs`] so
 /// the next [`RdmaConnection::recv`] call can return its bytes
@@ -426,12 +436,6 @@ impl RdmaConnection {
     /// with an empty CQ implies the peer has gone silently away
     /// and our counter is stale, which the caller should surface.
     fn drain_until_low_water(&mut self) -> io::Result<()> {
-        // Assert via debug_assert only — in release the constants
-        // are compile-time visible and this is a correctness
-        // invariant on the CQ sizing.
-        debug_assert!(CQ_DRAIN_LOW_WATER < CQ_DRAIN_HIGH_WATER);
-        debug_assert!(u32::from(CQ_DRAIN_HIGH_WATER) < CQ_CAPACITY);
-
         while self.pending_sends >= CQ_DRAIN_LOW_WATER {
             match self.drain_cq()? {
                 Drained::Empty => {
@@ -515,14 +519,5 @@ mod tests {
         assert_eq!(third.buf_idx, 5);
 
         assert!(q.pop_front().is_none());
-    }
-
-    /// Watermark constants must stay strictly ordered: the drain
-    /// runs `while pending_sends >= LOW_WATER`, so LOW < HIGH <
-    /// CQ_CAPACITY is a correctness invariant.  See #39.
-    #[test]
-    fn test_drain_watermark_constants_are_ordered() {
-        assert!(CQ_DRAIN_LOW_WATER < CQ_DRAIN_HIGH_WATER);
-        assert!(u32::from(CQ_DRAIN_HIGH_WATER) < CQ_CAPACITY);
     }
 }
