@@ -6,10 +6,12 @@ use crate::session::SessionManager;
 use ironsbe_channel::mpsc::{MpscChannel, MpscReceiver, MpscSender};
 use ironsbe_core::header::MessageHeader;
 use ironsbe_transport::traits::{Connection, Listener, Transport};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Notify, mpsc as tokio_mpsc};
+use tokio_util::sync::CancellationToken;
 
 /// Builder for configuring and creating a server.
 ///
@@ -125,6 +127,8 @@ impl<H: MessageHandler, T: Transport> ServerBuilder<H, T> {
             event_tx,
             sessions: SessionManager::new(),
             cmd_notify: Arc::clone(&cmd_notify),
+            shutdown_token: CancellationToken::new(),
+            session_tokens: HashMap::new(),
             _transport: PhantomData,
         };
 
@@ -193,6 +197,15 @@ pub struct Server<H, T: Transport = ironsbe_transport::DefaultTransport> {
     event_tx: MpscSender<ServerEvent>,
     sessions: SessionManager,
     cmd_notify: Arc<Notify>,
+    /// Parent cancellation token. `cancel()` fans out to every live
+    /// child token in `session_tokens`, so `ServerCommand::Shutdown`
+    /// triggers cooperative tear-down on every spawned session task.
+    shutdown_token: CancellationToken,
+    /// Per-session child tokens. Inserted in `handle_connection`,
+    /// removed (and cancelled) in `handle_command(CloseSession)` or
+    /// cleared on `Shutdown`. No lock is needed: only the
+    /// single-threaded run loop touches this map.
+    session_tokens: HashMap<u64, CancellationToken>,
     _transport: PhantomData<T>,
 }
 
@@ -212,6 +225,10 @@ pub struct Server<H, T: Transport> {
     event_tx: MpscSender<ServerEvent>,
     sessions: SessionManager,
     cmd_notify: Arc<Notify>,
+    /// See the field with the same name on the `tcp-tokio` variant.
+    shutdown_token: CancellationToken,
+    /// See the field with the same name on the `tcp-tokio` variant.
+    session_tokens: HashMap<u64, CancellationToken>,
     _transport: PhantomData<T>,
 }
 
@@ -286,6 +303,13 @@ where
         let cmd_tx = self.cmd_tx.clone();
         let cmd_notify = Arc::clone(&self.cmd_notify);
 
+        // Per-session cancellation token, derived from the parent
+        // shutdown token so `Shutdown` cancels every active session at
+        // once and `CloseSession(id)` cancels exactly one.  See #42.
+        let session_token = self.shutdown_token.child_token();
+        self.session_tokens
+            .insert(session_id, session_token.clone());
+
         handler.on_session_start(session_id);
         let _ = event_tx.try_send(ServerEvent::SessionCreated(session_id, addr));
 
@@ -297,7 +321,8 @@ where
             let _guard = span.enter();
             tracing::info!("connected");
 
-            if let Err(e) = handle_session(session_id, conn, handler.as_ref()).await {
+            if let Err(e) = handle_session(session_id, conn, handler.as_ref(), session_token).await
+            {
                 tracing::error!(error = %e, "session error");
             }
 
@@ -313,9 +338,23 @@ where
         match cmd {
             ServerCommand::Shutdown => {
                 tracing::info!("Server shutdown requested");
+                // Cancel the parent token, which fans out to every
+                // live child token in `session_tokens`. Each spawned
+                // session task will wake from its `select!`, drop the
+                // connection, and run its `on_session_end` cleanup.
+                self.shutdown_token.cancel();
+                self.session_tokens.clear();
                 true
             }
             ServerCommand::CloseSession(session_id) => {
+                // External `close_session` cancels the matching child
+                // token so the spawned task tears the connection down.
+                // Idempotent: a second CloseSession (e.g. the spawned
+                // task's own cleanup signal) finds the entry already
+                // gone and is a no-op.
+                if let Some(token) = self.session_tokens.remove(&session_id) {
+                    token.cancel();
+                }
                 self.sessions.close_session(session_id);
                 false
             }
@@ -423,10 +462,18 @@ impl Responder for SessionResponder {
 }
 
 /// Handles a single client session over a transport [`Connection`].
+///
+/// `session_token` is the per-session [`CancellationToken`] cloned out
+/// of `Server::session_tokens`. When the run loop fires
+/// `ServerCommand::Shutdown` (cancels the parent) or
+/// `ServerCommand::CloseSession(id)` (cancels just this child), this
+/// function returns `Ok(())` and the spawned task drops `conn`,
+/// closing the underlying socket so the peer observes EOF.
 async fn handle_session<H, C>(
     session_id: u64,
     mut conn: C,
     handler: &H,
+    session_token: CancellationToken,
 ) -> Result<(), std::io::Error>
 where
     H: MessageHandler,
@@ -466,6 +513,14 @@ where
                     tracing::error!(error = %e, "write error");
                     return Err(std::io::Error::other(e));
                 }
+            }
+
+            // Cooperative cancellation from the run loop. Cleanup
+            // (on_session_end + ServerEvent::SessionClosed) runs in
+            // the spawned task closure once we return.
+            _ = session_token.cancelled() => {
+                tracing::debug!("session cancelled");
+                return Ok(());
             }
         }
     }
@@ -590,5 +645,111 @@ mod tests {
             .handler(TestHandler)
             .build();
         handle.broadcast(vec![1, 2, 3]);
+    }
+
+    /// `Server` is built with a fresh, uncancelled parent token and an
+    /// empty session-token registry.  See #42.
+    #[test]
+    fn test_server_starts_with_uncancelled_shutdown_token() {
+        let (server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        assert!(
+            !server.shutdown_token.is_cancelled(),
+            "fresh server should have an uncancelled shutdown_token"
+        );
+        assert!(
+            server.session_tokens.is_empty(),
+            "fresh server should have an empty session_tokens registry"
+        );
+    }
+
+    /// Cancelling the parent shutdown token must propagate to every
+    /// child token derived from it — this is the mechanism that
+    /// `ServerCommand::Shutdown` relies on to terminate every spawned
+    /// session task at once.  See #42.
+    #[tokio::test]
+    async fn test_shutdown_handler_cancels_every_child_token() {
+        let (mut server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        // Pre-seed two child tokens as if two sessions had been
+        // accepted, then drive the Shutdown command directly.
+        let child_a = server.shutdown_token.child_token();
+        let child_b = server.shutdown_token.child_token();
+        server.session_tokens.insert(1, child_a.clone());
+        server.session_tokens.insert(2, child_b.clone());
+
+        let exited = server.handle_command(ServerCommand::Shutdown).await;
+
+        assert!(exited, "Shutdown must signal the run loop to exit");
+        assert!(
+            server.shutdown_token.is_cancelled(),
+            "parent token must be cancelled after Shutdown"
+        );
+        assert!(
+            child_a.is_cancelled() && child_b.is_cancelled(),
+            "every child token must be cancelled by the parent"
+        );
+        assert!(
+            server.session_tokens.is_empty(),
+            "session_tokens registry must be drained on Shutdown"
+        );
+    }
+
+    /// `CloseSession(id)` must cancel exactly one child token and
+    /// leave its siblings live.  This is the contract that
+    /// `ServerHandle::close_session` exposes — without it the targeted
+    /// session keeps running.  See #42.
+    #[tokio::test]
+    async fn test_close_session_handler_cancels_only_that_token() {
+        let (mut server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        let child_a = server.shutdown_token.child_token();
+        let child_b = server.shutdown_token.child_token();
+        server.session_tokens.insert(1, child_a.clone());
+        server.session_tokens.insert(2, child_b.clone());
+
+        let exited = server.handle_command(ServerCommand::CloseSession(1)).await;
+
+        assert!(!exited, "CloseSession must not stop the run loop");
+        assert!(
+            child_a.is_cancelled(),
+            "the targeted child token must be cancelled"
+        );
+        assert!(
+            !child_b.is_cancelled(),
+            "untargeted siblings must remain live"
+        );
+        assert!(
+            !server.session_tokens.contains_key(&1),
+            "the closed session entry must be removed from the registry"
+        );
+        assert!(
+            server.session_tokens.contains_key(&2),
+            "untargeted entries must stay in the registry"
+        );
+    }
+
+    /// `CloseSession` for an unknown id is a no-op (idempotent
+    /// cleanup) — the spawned task fires its own `CloseSession` after
+    /// it exits, and that second message must not panic or affect
+    /// other state.  See #42.
+    #[tokio::test]
+    async fn test_close_session_handler_unknown_id_is_noop() {
+        let (mut server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        let exited = server
+            .handle_command(ServerCommand::CloseSession(999))
+            .await;
+
+        assert!(!exited);
+        assert!(server.session_tokens.is_empty());
     }
 }
