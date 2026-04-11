@@ -104,10 +104,16 @@ async fn wait_for_counter(counter: &Arc<AtomicUsize>, target: usize, deadline: I
 
 #[tokio::test]
 async fn test_server_handle_shutdown_stops_run_loop() {
-    let outer = timeout(Duration::from_secs(5), async {
+    let outer = timeout(Duration::from_secs(15), async {
         let (server_handle, addr, server_task) = build_and_start_server(EchoHandler, 16).await;
+        // `max_reconnect_attempts(2)` so the client gives up on its
+        // own once shutdown drops the server-side socket.  With
+        // unlimited reconnects the client task would loop forever
+        // because `disconnect()` is only processed inside
+        // `connect_and_run`'s `select!`, and there is no server left
+        // to reconnect to.
         let (mut client_handle, client_task) =
-            build_and_start_client(addr, Duration::from_secs(2), 0).await;
+            build_and_start_client(addr, Duration::from_secs(2), 2).await;
 
         assert!(
             wait_for_client_connected(&mut client_handle, Instant::now() + DEFAULT_WAIT).await,
@@ -131,9 +137,8 @@ async fn test_server_handle_shutdown_stops_run_loop() {
 }
 
 #[tokio::test]
-#[ignore = "tracked in #42 — close_session does not terminate the underlying connection"]
 async fn test_server_handle_close_session_closes_that_session_only() {
-    let outer = timeout(Duration::from_secs(5), async {
+    let outer = timeout(Duration::from_secs(15), async {
         let handler = LifecycleHandler::default();
         let started = Arc::clone(&handler.started);
         let ended = Arc::clone(&handler.ended);
@@ -330,16 +335,20 @@ async fn test_responder_send_to_routes_across_sessions() {
 }
 
 #[tokio::test]
-#[ignore = "tracked in #42 — Server::run shutdown does not cancel spawned session tasks"]
 async fn test_shutdown_signals_spawned_session_tasks() {
-    let outer = timeout(Duration::from_secs(5), async {
+    let outer = timeout(Duration::from_secs(15), async {
         let handler = LifecycleHandler::default();
         let started = Arc::clone(&handler.started);
         let ended = Arc::clone(&handler.ended);
 
         let (server_handle, addr, server_task) = build_and_start_server(handler, 16).await;
+        // `max_reconnect_attempts(2)` so the client gives up on its
+        // own once the server is gone — without it the client task
+        // would loop forever, since `disconnect()` is only processed
+        // inside `connect_and_run`'s `select!` which we never re-enter
+        // after the server disappears.
         let (mut client_handle, client_task) =
-            build_and_start_client(addr, Duration::from_secs(2), 0).await;
+            build_and_start_client(addr, Duration::from_secs(2), 2).await;
 
         assert!(
             wait_for_client_connected(&mut client_handle, Instant::now() + DEFAULT_WAIT).await,

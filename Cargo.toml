@@ -66,7 +66,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
 tokio = { version = "1.51", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
 socket2 = "0.5"
 tokio-uring = "0.5"
 smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp"] }
