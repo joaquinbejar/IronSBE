@@ -2,11 +2,6 @@
 //!
 //! Exercises every command-channel surface on `ServerHandle` and
 //! `ClientHandle` against a real running server + client.
-//!
-//! Several tests in this file are gated `#[ignore]` because they
-//! surface real bugs in the server's command-handling path.  Each
-//! ignore reason links the GitHub issue tracking the fix; once the
-//! fix lands the gate can be removed.
 
 mod common;
 
@@ -185,9 +180,8 @@ async fn test_server_handle_close_session_closes_that_session_only() {
 }
 
 #[tokio::test]
-#[ignore = "tracked in #40 — ServerCommand::Broadcast is a no-op"]
 async fn test_server_handle_broadcast_reaches_all_sessions() {
-    let outer = timeout(Duration::from_secs(5), async {
+    let outer = timeout(Duration::from_secs(15), async {
         let (server_handle, addr, server_task) = build_and_start_server(EchoHandler, 16).await;
 
         // Connect two clients and confirm the server saw both.
@@ -282,9 +276,8 @@ async fn test_client_handle_wait_event_resolves_on_message() {
 }
 
 #[tokio::test]
-#[ignore = "tracked in #41 — Responder::send_to ignores session_id"]
 async fn test_responder_send_to_routes_across_sessions() {
-    let outer = timeout(Duration::from_secs(5), async {
+    let outer = timeout(Duration::from_secs(15), async {
         let last_session = Arc::new(AtomicU64::new(0));
         let target = Arc::new(AtomicU64::new(0));
         let routed_payloads = Arc::new(Mutex::new(Vec::new()));

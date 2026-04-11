@@ -6,12 +6,20 @@ use crate::session::SessionManager;
 use ironsbe_channel::mpsc::{MpscChannel, MpscReceiver, MpscSender};
 use ironsbe_core::header::MessageHeader;
 use ironsbe_transport::traits::{Connection, Listener, Transport};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Notify, mpsc as tokio_mpsc};
 use tokio_util::sync::CancellationToken;
+
+/// Shared per-session outbound-sender registry.  Populated in
+/// [`Server::handle_connection`], drained in
+/// [`Server::handle_command`] on `CloseSession` / `Shutdown`, and
+/// cloned into every [`SessionResponder`] so `send_to` can resolve
+/// the target against the live session table.  See #40, #41.
+type SessionSenderMap = Arc<RwLock<HashMap<u64, tokio_mpsc::UnboundedSender<Vec<u8>>>>>;
 
 /// Builder for configuring and creating a server.
 ///
@@ -129,6 +137,7 @@ impl<H: MessageHandler, T: Transport> ServerBuilder<H, T> {
             cmd_notify: Arc::clone(&cmd_notify),
             shutdown_token: CancellationToken::new(),
             session_tokens: HashMap::new(),
+            session_senders: Arc::new(RwLock::new(HashMap::new())),
             _transport: PhantomData,
         };
 
@@ -206,6 +215,11 @@ pub struct Server<H, T: Transport = ironsbe_transport::DefaultTransport> {
     /// cleared on `Shutdown`. No lock is needed: only the
     /// single-threaded run loop touches this map.
     session_tokens: HashMap<u64, CancellationToken>,
+    /// Live per-session outbound channels, shared with every
+    /// [`SessionResponder`] so `send_to(target, msg)` can resolve
+    /// `target` against the live table and `ServerCommand::Broadcast`
+    /// can iterate.  See #40, #41.
+    session_senders: SessionSenderMap,
     _transport: PhantomData<T>,
 }
 
@@ -229,6 +243,8 @@ pub struct Server<H, T: Transport> {
     shutdown_token: CancellationToken,
     /// See the field with the same name on the `tcp-tokio` variant.
     session_tokens: HashMap<u64, CancellationToken>,
+    /// See the field with the same name on the `tcp-tokio` variant.
+    session_senders: SessionSenderMap,
     _transport: PhantomData<T>,
 }
 
@@ -310,6 +326,17 @@ where
         self.session_tokens
             .insert(session_id, session_token.clone());
 
+        // Per-session outbound channel.  The sender is registered in
+        // `session_senders` (so `Broadcast` and cross-session
+        // `send_to` can find it) and also moved into the spawned
+        // task's `SessionResponder`, which uses it as its fast-path
+        // `send()` local sender.  See #40, #41.
+        let (out_tx, out_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        self.session_senders
+            .write()
+            .insert(session_id, out_tx.clone());
+        let senders = Arc::clone(&self.session_senders);
+
         handler.on_session_start(session_id);
         let _ = event_tx.try_send(ServerEvent::SessionCreated(session_id, addr));
 
@@ -321,7 +348,16 @@ where
             let _guard = span.enter();
             tracing::info!("connected");
 
-            if let Err(e) = handle_session(session_id, conn, handler.as_ref(), session_token).await
+            if let Err(e) = handle_session(
+                session_id,
+                conn,
+                handler.as_ref(),
+                session_token,
+                out_tx,
+                out_rx,
+                senders,
+            )
+            .await
             {
                 tracing::error!(error = %e, "session error");
             }
@@ -344,6 +380,7 @@ where
                 // connection, and run its `on_session_end` cleanup.
                 self.shutdown_token.cancel();
                 self.session_tokens.clear();
+                self.session_senders.write().clear();
                 true
             }
             ServerCommand::CloseSession(session_id) => {
@@ -355,11 +392,19 @@ where
                 if let Some(token) = self.session_tokens.remove(&session_id) {
                     token.cancel();
                 }
+                self.session_senders.write().remove(&session_id);
                 self.sessions.close_session(session_id);
                 false
             }
-            ServerCommand::Broadcast(_message) => {
-                // Broadcast to all sessions
+            ServerCommand::Broadcast(message) => {
+                // Push the bytes to every live session.  Any entry
+                // whose channel is already closed (a session that has
+                // exited but hasn't yet fired its own CloseSession
+                // cleanup back to the run loop) is opportunistically
+                // dropped from the registry via `retain`.  See #40.
+                self.session_senders
+                    .write()
+                    .retain(|_, sender| sender.send(message.clone()).is_ok());
                 false
             }
         }
@@ -444,20 +489,38 @@ pub enum ServerEvent {
 }
 
 /// Session responder that sends messages back to the client.
+///
+/// Holds two channel references:
+///
+/// - `tx` is the fast path used by [`Responder::send`] — the
+///   responder's own session's sender, so the common case is a
+///   single channel push with no map lookup and no locking.
+/// - `senders` is a clone of the shared per-session sender table on
+///   [`Server`], used by [`Responder::send_to`] to resolve the
+///   target session against the live registry.  See #40, #41.
 struct SessionResponder {
     tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
+    senders: SessionSenderMap,
+    session_id: u64,
 }
 
 impl Responder for SessionResponder {
     fn send(&self, message: &[u8]) -> Result<(), SendError> {
         self.tx.send(message.to_vec()).map_err(|_| SendError {
-            message: "channel closed".to_string(),
+            message: format!("session {} channel closed", self.session_id),
         })
     }
 
-    fn send_to(&self, _session_id: u64, message: &[u8]) -> Result<(), SendError> {
-        // For now, just send to current session
-        self.send(message)
+    fn send_to(&self, session_id: u64, message: &[u8]) -> Result<(), SendError> {
+        let senders = self.senders.read();
+        match senders.get(&session_id) {
+            Some(sender) => sender.send(message.to_vec()).map_err(|_| SendError {
+                message: format!("session {session_id} channel closed"),
+            }),
+            None => Err(SendError {
+                message: format!("unknown session {session_id}"),
+            }),
+        }
     }
 }
 
@@ -469,19 +532,31 @@ impl Responder for SessionResponder {
 /// `ServerCommand::CloseSession(id)` (cancels just this child), this
 /// function returns `Ok(())` and the spawned task drops `conn`,
 /// closing the underlying socket so the peer observes EOF.
+///
+/// `out_tx` / `out_rx` are the two halves of the per-session
+/// outbound channel, created in [`Server::handle_connection`] so the
+/// sender can be registered in [`Server::session_senders`] before the
+/// spawn.  `senders` is a clone of that shared map, handed into the
+/// [`SessionResponder`] so cross-session `send_to` and
+/// `ServerCommand::Broadcast` can find live sessions.  See #40, #41.
 async fn handle_session<H, C>(
     session_id: u64,
     mut conn: C,
     handler: &H,
     session_token: CancellationToken,
+    out_tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
+    mut out_rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
+    senders: SessionSenderMap,
 ) -> Result<(), std::io::Error>
 where
     H: MessageHandler,
     C: Connection,
 {
-    // Channel for sending responses
-    let (tx, mut rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
-    let responder = SessionResponder { tx };
+    let responder = SessionResponder {
+        tx: out_tx,
+        senders,
+        session_id,
+    };
 
     loop {
         tokio::select! {
@@ -514,7 +589,7 @@ where
             // the outer `select!` only races at the future level, so
             // once we enter this arm we are committed until the inner
             // `await` resolves.
-            Some(msg) = rx.recv() => {
+            Some(msg) = out_rx.recv() => {
                 tokio::select! {
                     send_result = conn.send(&msg) => {
                         if let Err(e) = send_result {
@@ -765,5 +840,196 @@ mod tests {
 
         assert!(!exited);
         assert!(server.session_tokens.is_empty());
+    }
+
+    /// `Broadcast` with an empty session table must be a no-op: no
+    /// panic, no error, and the registry stays empty.  See #40.
+    #[tokio::test]
+    async fn test_broadcast_handler_with_no_sessions_is_noop() {
+        let (mut server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        let exited = server
+            .handle_command(ServerCommand::Broadcast(b"anything".to_vec()))
+            .await;
+
+        assert!(!exited);
+        assert!(server.session_senders.read().is_empty());
+    }
+
+    /// `Broadcast` must push the exact payload bytes to every live
+    /// session's outbound channel.  See #40.
+    #[tokio::test]
+    async fn test_broadcast_handler_pushes_to_every_session() {
+        let (mut server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        let (tx1, mut rx1) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx2, mut rx2) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        {
+            let mut senders = server.session_senders.write();
+            senders.insert(1, tx1);
+            senders.insert(2, tx2);
+        }
+
+        let payload = b"hello-broadcast".to_vec();
+        let exited = server
+            .handle_command(ServerCommand::Broadcast(payload.clone()))
+            .await;
+
+        assert!(!exited);
+        match rx1.try_recv() {
+            Ok(bytes) => assert_eq!(bytes, payload),
+            other => panic!("session 1 did not receive broadcast: {other:?}"),
+        }
+        match rx2.try_recv() {
+            Ok(bytes) => assert_eq!(bytes, payload),
+            other => panic!("session 2 did not receive broadcast: {other:?}"),
+        }
+        // Both entries must still be live — their channels are
+        // healthy.
+        assert_eq!(server.session_senders.read().len(), 2);
+    }
+
+    /// `Broadcast` must drop entries whose receiver has already been
+    /// closed (a session that exited but whose `CloseSession`
+    /// cleanup has not yet reached the run loop).  See #40.
+    #[tokio::test]
+    async fn test_broadcast_handler_drops_closed_senders() {
+        let (mut server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        let (tx_live, mut rx_live) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx_dead, rx_dead) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        drop(rx_dead); // simulate a gone-away session
+        {
+            let mut senders = server.session_senders.write();
+            senders.insert(1, tx_live);
+            senders.insert(2, tx_dead);
+        }
+
+        let _ = server
+            .handle_command(ServerCommand::Broadcast(b"ping".to_vec()))
+            .await;
+
+        // The live entry must have received the message and must
+        // still be in the registry; the dead entry must be gone.
+        match rx_live.try_recv() {
+            Ok(bytes) => assert_eq!(bytes, b"ping"),
+            other => panic!("live session did not receive broadcast: {other:?}"),
+        }
+        let senders = server.session_senders.read();
+        assert_eq!(senders.len(), 1);
+        assert!(senders.contains_key(&1));
+        assert!(!senders.contains_key(&2));
+    }
+
+    /// `CloseSession` must remove the matching entry from
+    /// `session_senders` alongside the cancellation bookkeeping.
+    /// See #40, #41, #42.
+    #[tokio::test]
+    async fn test_close_session_handler_removes_session_sender() {
+        let (mut server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        let (tx1, _rx1) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx2, _rx2) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        {
+            let mut senders = server.session_senders.write();
+            senders.insert(1, tx1);
+            senders.insert(2, tx2);
+        }
+
+        let _ = server.handle_command(ServerCommand::CloseSession(1)).await;
+
+        let senders = server.session_senders.read();
+        assert!(!senders.contains_key(&1));
+        assert!(senders.contains_key(&2));
+    }
+
+    /// `SessionResponder::send_to` with a session id that is not in
+    /// the registry must return `SendError`, not silently succeed.
+    /// See #41.
+    #[test]
+    fn test_session_responder_send_to_unknown_session_returns_err() {
+        let senders: SessionSenderMap = Arc::new(RwLock::new(HashMap::new()));
+        let (tx, _rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let responder = SessionResponder {
+            tx,
+            senders,
+            session_id: 1,
+        };
+
+        let result = responder.send_to(99, b"payload");
+        match result {
+            Err(err) => assert!(
+                err.message.contains("unknown session 99"),
+                "unexpected error: {err}"
+            ),
+            Ok(()) => panic!("send_to on unknown session must fail"),
+        }
+    }
+
+    /// `SessionResponder::send_to` must route the payload to the
+    /// target's channel and only the target's channel.  See #41.
+    #[test]
+    fn test_session_responder_send_to_routes_to_target() {
+        let senders: SessionSenderMap = Arc::new(RwLock::new(HashMap::new()));
+        let (tx_self, mut rx_self) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx_other, mut rx_other) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        senders.write().insert(1, tx_self.clone());
+        senders.write().insert(2, tx_other);
+
+        let responder = SessionResponder {
+            tx: tx_self,
+            senders,
+            session_id: 1,
+        };
+
+        let result = responder.send_to(2, b"cross-routed");
+        assert!(result.is_ok(), "send_to should succeed for a live target");
+
+        match rx_other.try_recv() {
+            Ok(bytes) => assert_eq!(bytes, b"cross-routed"),
+            other => panic!("target session did not receive payload: {other:?}"),
+        }
+        // The responder's own channel must NOT have received the
+        // message — this is the bug #41 was filed for.
+        assert!(
+            rx_self.try_recv().is_err(),
+            "send_to must not fall through to the sender's own session"
+        );
+    }
+
+    /// `SessionResponder::send_to` must return `SendError` when the
+    /// target exists in the registry but its receiver has been
+    /// dropped (channel closed).  See #41.
+    #[test]
+    fn test_session_responder_send_to_closed_channel_returns_err() {
+        let senders: SessionSenderMap = Arc::new(RwLock::new(HashMap::new()));
+        let (tx_self, _rx_self) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx_dead, rx_dead) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        drop(rx_dead);
+        senders.write().insert(1, tx_self.clone());
+        senders.write().insert(2, tx_dead);
+
+        let responder = SessionResponder {
+            tx: tx_self,
+            senders,
+            session_id: 1,
+        };
+
+        let result = responder.send_to(2, b"lost");
+        match result {
+            Err(err) => assert!(
+                err.message.contains("channel closed"),
+                "unexpected error: {err}"
+            ),
+            Ok(()) => panic!("send_to on closed channel must fail"),
+        }
     }
 }
