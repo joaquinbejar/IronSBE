@@ -39,6 +39,7 @@ jobs:
           --all-features
           --workspace
           --exclude ironsbe-transport-dpdk
+          --exclude ironsbe-transport-rdma
           --timeout 180
           --out Xml
 
