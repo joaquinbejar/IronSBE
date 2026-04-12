@@ -27,14 +27,20 @@
 //!   bytes are ever dropped.
 
 use crate::ffi;
+use crate::listener::{
+    BorrowedEventFd, cleanup_accept_resources, create_qp_resources, extract_dst_addr,
+    wait_for_cm_event,
+};
 use bytes::BytesMut;
 use ironsbe_transport::traits::LocalConnection;
 use std::collections::VecDeque;
 use std::io;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
+use std::os::fd::RawFd;
 use std::ptr;
 use std::rc::Rc;
+use tokio::io::unix::AsyncFd;
 
 /// Length prefix size (matches all other IronSBE backends).
 const LENGTH_PREFIX_BYTES: usize = 4;
@@ -122,6 +128,10 @@ pub struct RdmaConnection {
     /// `send` path.  The next `recv` call pops from the head of this
     /// queue before polling the CQ directly.
     pending_recvs: VecDeque<PendingRecv>,
+    /// Owned event channel for client-initiated connections.  `None`
+    /// for server-side (accepted) connections — the listener owns
+    /// theirs.  Cleaned up in [`Drop`] after `rdma_destroy_id`.
+    event_channel: Option<*mut ffi::rdma_event_channel>,
     /// Makes this type `!Send` + `!Sync`.
     _not_send: PhantomData<Rc<()>>,
 }
@@ -207,6 +217,7 @@ impl RdmaConnection {
             max_msg_size,
             peer_addr,
             pending_sends: 0,
+            event_channel: None,
             pending_recvs: VecDeque::with_capacity(RECV_DEPTH),
             _not_send: PhantomData,
         };
@@ -217,6 +228,214 @@ impl RdmaConnection {
             conn.post_recv(i)?;
         }
 
+        Ok(conn)
+    }
+
+    /// Establishes a client-side RDMA connection to `addr`.
+    ///
+    /// Drives the full RDMA CM client handshake:
+    /// `resolve_addr` → `resolve_route` → `create QP` → `connect`,
+    /// waiting for each CM event via
+    /// [`tokio::io::unix::AsyncFd`] so the runtime is never blocked.
+    ///
+    /// The event channel created for the handshake is kept alive for
+    /// the lifetime of the connection (rdma-core requires it) and
+    /// cleaned up in [`Drop`].
+    ///
+    /// # Errors
+    /// Returns `io::Error` if any RDMA CM step fails or if the
+    /// event-channel fd cannot be registered with the tokio reactor.
+    pub async fn connect(addr: SocketAddr, max_msg_size: usize) -> io::Result<Self> {
+        /// Timeout in milliseconds for `rdma_resolve_addr` /
+        /// `rdma_resolve_route`.
+        const RESOLVE_TIMEOUT_MS: i32 = 5000;
+
+        // --- event channel + CM ID ----------------------------------
+        let ec = unsafe { ffi::rdma_create_event_channel() };
+        if ec.is_null() {
+            return Err(io::Error::other("rdma_create_event_channel failed"));
+        }
+
+        let event_fd: RawFd = unsafe { (*ec).fd };
+        let flags = unsafe { libc::fcntl(event_fd, libc::F_GETFL) };
+        if flags < 0 {
+            unsafe { ffi::rdma_destroy_event_channel(ec) };
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(event_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            let err = io::Error::last_os_error();
+            unsafe { ffi::rdma_destroy_event_channel(ec) };
+            return Err(err);
+        }
+
+        let async_fd = match AsyncFd::new(BorrowedEventFd(event_fd)) {
+            Ok(fd) => fd,
+            Err(e) => {
+                unsafe { ffi::rdma_destroy_event_channel(ec) };
+                return Err(e);
+            }
+        };
+
+        let mut cm_id: *mut ffi::rdma_cm_id = ptr::null_mut();
+        let ret = unsafe {
+            ffi::rdma_create_id(
+                ec,
+                &mut cm_id,
+                ptr::null_mut(),
+                ffi::rdma_port_space_RDMA_PS_TCP,
+            )
+        };
+        if ret != 0 {
+            drop(async_fd);
+            unsafe { ffi::rdma_destroy_event_channel(ec) };
+            return Err(io::Error::other(format!("rdma_create_id failed: {ret}")));
+        }
+
+        // --- resolve address ----------------------------------------
+        let dst_sockaddr = match addr {
+            SocketAddr::V4(v4) => {
+                let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+                sa.sin_family = libc::AF_INET as u16;
+                sa.sin_port = v4.port().to_be();
+                sa.sin_addr.s_addr = u32::from_ne_bytes(v4.ip().octets());
+                sa
+            }
+            SocketAddr::V6(_) => {
+                drop(async_fd);
+                unsafe {
+                    ffi::rdma_destroy_id(cm_id);
+                    ffi::rdma_destroy_event_channel(ec);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "IPv6 not supported for RDMA connect",
+                ));
+            }
+        };
+
+        // Cleanup helper for the pre-QP phase: only cm_id + ec exist.
+        // `async_fd` is on the stack and drops naturally on function exit.
+        macro_rules! cleanup_pre_qp {
+            () => {
+                unsafe {
+                    ffi::rdma_destroy_id(cm_id);
+                    ffi::rdma_destroy_event_channel(ec);
+                }
+            };
+        }
+
+        tracing::debug!("rdma_resolve_addr → {addr}");
+        let ret = unsafe {
+            ffi::rdma_resolve_addr(
+                cm_id,
+                ptr::null_mut(), // src: let the kernel pick
+                &dst_sockaddr as *const libc::sockaddr_in as *mut ffi::sockaddr,
+                RESOLVE_TIMEOUT_MS,
+            )
+        };
+        if ret != 0 {
+            cleanup_pre_qp!();
+            return Err(io::Error::other(format!("rdma_resolve_addr failed: {ret}")));
+        }
+        tracing::debug!("waiting for ADDR_RESOLVED");
+
+        if let Err(e) = wait_for_cm_event(
+            &async_fd,
+            ec,
+            ffi::rdma_cm_event_type_RDMA_CM_EVENT_ADDR_RESOLVED,
+        )
+        .await
+        {
+            cleanup_pre_qp!();
+            return Err(io::Error::other(format!("waiting for ADDR_RESOLVED: {e}")));
+        }
+        tracing::debug!("ADDR_RESOLVED received");
+
+        // --- resolve route ------------------------------------------
+        let ret = unsafe { ffi::rdma_resolve_route(cm_id, RESOLVE_TIMEOUT_MS) };
+        if ret != 0 {
+            cleanup_pre_qp!();
+            return Err(io::Error::other(format!(
+                "rdma_resolve_route failed: {ret}"
+            )));
+        }
+        tracing::debug!("waiting for ROUTE_RESOLVED");
+
+        if let Err(e) = wait_for_cm_event(
+            &async_fd,
+            ec,
+            ffi::rdma_cm_event_type_RDMA_CM_EVENT_ROUTE_RESOLVED,
+        )
+        .await
+        {
+            cleanup_pre_qp!();
+            return Err(io::Error::other(format!("waiting for ROUTE_RESOLVED: {e}")));
+        }
+        tracing::debug!("ROUTE_RESOLVED received, creating QP resources");
+
+        // --- create PD + CQ + QP -----------------------------------
+        let (pd, cq) = match unsafe { create_qp_resources(cm_id) } {
+            Ok(res) => res,
+            Err(e) => {
+                cleanup_pre_qp!();
+                return Err(e);
+            }
+        };
+        tracing::debug!("QP resources created, connecting");
+
+        // From here on, QP resources exist and must be torn down
+        // via `cleanup_accept_resources` on failure.
+        macro_rules! cleanup_post_qp {
+            () => {
+                unsafe { cleanup_accept_resources(cm_id, pd, cq, true) };
+                unsafe { ffi::rdma_destroy_event_channel(ec) };
+            };
+        }
+
+        // --- connect ------------------------------------------------
+        let mut conn_param: ffi::rdma_conn_param = unsafe { std::mem::zeroed() };
+        conn_param.initiator_depth = 1;
+        conn_param.responder_resources = 1;
+        let ret = unsafe { ffi::rdma_connect(cm_id, &mut conn_param) };
+        if ret != 0 {
+            cleanup_post_qp!();
+            return Err(io::Error::other(format!("rdma_connect failed: {ret}")));
+        }
+
+        // Yield to the runtime so the reactor can poll epoll and
+        // deliver the CONNECT_REQUEST edge-trigger to the server's
+        // accept future before we enter our own wait.  Without this,
+        // both futures go Pending in the same tick and the
+        // edge-triggered notification from rdma_connect may not
+        // propagate to the server's AsyncFd on SoftRoCE.
+        tokio::task::yield_now().await;
+
+        if let Err(e) = wait_for_cm_event(
+            &async_fd,
+            ec,
+            ffi::rdma_cm_event_type_RDMA_CM_EVENT_ESTABLISHED,
+        )
+        .await
+        {
+            cleanup_post_qp!();
+            return Err(io::Error::other(format!("waiting for ESTABLISHED: {e}")));
+        }
+
+        // AsyncFd drops naturally at function exit; the fd stays open
+        // via the event channel that we transfer to the connection.
+        let peer_addr = unsafe { extract_dst_addr(cm_id) }.unwrap_or(addr);
+
+        tracing::info!(%addr, %peer_addr, "RDMA client connected");
+
+        let mut conn =
+            match unsafe { Self::from_accepted_cm_id(cm_id, pd, cq, peer_addr, max_msg_size) } {
+                Ok(c) => c,
+                Err(e) => {
+                    cleanup_post_qp!();
+                    return Err(e);
+                }
+            };
+        conn.event_channel = Some(ec);
         Ok(conn)
     }
 
@@ -437,9 +656,12 @@ impl RdmaConnection {
         while self.pending_sends >= CQ_DRAIN_LOW_WATER {
             match self.drain_cq()? {
                 Drained::Empty => {
-                    // Completions may not have arrived yet; yield
-                    // and retry instead of failing the send.
-                    tokio::task::yield_now().await;
+                    // Completions may not have arrived from the NIC
+                    // yet.  A short sleep (rather than a bare
+                    // yield_now) gives the kernel's SoftRoCE / NIC
+                    // driver time to produce CQ entries before we
+                    // re-poll.
+                    tokio::time::sleep(std::time::Duration::from_micros(10)).await;
                 }
                 // SEND, RECV, Other all count as progress — the
                 // loop predicate (`pending_sends >= low_water`) is
@@ -472,6 +694,13 @@ impl Drop for RdmaConnection {
             }
             if !self.pd.is_null() {
                 ffi::ibv_dealloc_pd(self.pd);
+            }
+            // Client-initiated connections own their event channel;
+            // destroy it after the cm_id is gone.
+            if let Some(ec) = self.event_channel
+                && !ec.is_null()
+            {
+                ffi::rdma_destroy_event_channel(ec);
             }
         }
     }

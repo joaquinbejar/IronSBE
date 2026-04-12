@@ -32,7 +32,7 @@ const LISTEN_BACKLOG: i32 = 16;
 /// must only be closed by `rdma_destroy_event_channel`, so this
 /// wrapper deliberately holds only a [`RawFd`] and has no `Drop` to
 /// avoid accidentally closing it.
-struct BorrowedEventFd(RawFd);
+pub(crate) struct BorrowedEventFd(pub(crate) RawFd);
 
 impl AsRawFd for BorrowedEventFd {
     fn as_raw_fd(&self) -> RawFd {
@@ -124,7 +124,7 @@ impl RdmaListener {
                 let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
                 sa.sin_family = libc::AF_INET as u16;
                 sa.sin_port = v4.port().to_be();
-                sa.sin_addr.s_addr = u32::from_be_bytes(v4.ip().octets());
+                sa.sin_addr.s_addr = u32::from_ne_bytes(v4.ip().octets());
                 sa
             }
             SocketAddr::V6(_) => {
@@ -213,7 +213,7 @@ impl RdmaListener {
 ///
 /// # Safety
 /// `cm_id` must be a valid, bound `rdma_cm_id` pointer.
-unsafe fn extract_src_addr(cm_id: *mut ffi::rdma_cm_id) -> io::Result<SocketAddr> {
+pub(crate) unsafe fn extract_src_addr(cm_id: *mut ffi::rdma_cm_id) -> io::Result<SocketAddr> {
     // SAFETY: caller guarantees validity.  The field path is
     // `(*cm_id).route.addr.__bindgen_anon_1.src_addr`, where
     // `__bindgen_anon_1` is the source-address union containing
@@ -228,7 +228,7 @@ unsafe fn extract_src_addr(cm_id: *mut ffi::rdma_cm_id) -> io::Result<SocketAddr
 ///
 /// # Safety
 /// `cm_id` must be a valid, connected `rdma_cm_id` pointer.
-unsafe fn extract_dst_addr(cm_id: *mut ffi::rdma_cm_id) -> io::Result<SocketAddr> {
+pub(crate) unsafe fn extract_dst_addr(cm_id: *mut ffi::rdma_cm_id) -> io::Result<SocketAddr> {
     // SAFETY: caller guarantees validity.  See `extract_src_addr`
     // for the union path rationale — `__bindgen_anon_2` is the
     // destination-address union.
@@ -239,7 +239,7 @@ unsafe fn extract_dst_addr(cm_id: *mut ffi::rdma_cm_id) -> io::Result<SocketAddr
 /// Cleanup helper: tears down the CM ID + QP + CQ + PD chain for
 /// a partially-accepted connection when something fails along the
 /// accept path.
-unsafe fn cleanup_accept_resources(
+pub(crate) unsafe fn cleanup_accept_resources(
     cm_id: *mut ffi::rdma_cm_id,
     pd: *mut ffi::ibv_pd,
     cq: *mut ffi::ibv_cq,
@@ -261,124 +261,171 @@ unsafe fn cleanup_accept_resources(
     }
 }
 
+/// Waits for a specific RDMA CM event on a non-blocking event
+/// channel.  Returns the `cm_id` from the event on success.
+///
+/// Loops via [`AsyncFd::readable`] → `rdma_get_cm_event` → check
+/// type → ack.  On `EAGAIN` clears readiness and re-arms.  Any
+/// unexpected event type is acked and skipped (logged at WARN).
+///
+/// Used by both the `accept` path (waiting for
+/// `CONNECT_REQUEST`) and the `connect` path (waiting for
+/// `ADDR_RESOLVED`, `ROUTE_RESOLVED`, `ESTABLISHED`).  See #48.
+pub(crate) async fn wait_for_cm_event(
+    async_fd: &AsyncFd<BorrowedEventFd>,
+    event_channel: *mut ffi::rdma_event_channel,
+    expected: ffi::rdma_cm_event_type,
+) -> io::Result<*mut ffi::rdma_cm_id> {
+    tracing::debug!(expected, "wait_for_cm_event: entering loop");
+    loop {
+        tracing::debug!(expected, "wait_for_cm_event: awaiting readable");
+        let mut guard = async_fd.readable().await?;
+        tracing::debug!(
+            expected,
+            "wait_for_cm_event: fd is readable, polling cm event"
+        );
+
+        let mut event: *mut ffi::rdma_cm_event = ptr::null_mut();
+        let ret = unsafe { ffi::rdma_get_cm_event(event_channel, &mut event) };
+        if ret != 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EAGAIN) || err.kind() == io::ErrorKind::WouldBlock {
+                tracing::debug!(expected, "wait_for_cm_event: EAGAIN, clearing readiness");
+                guard.clear_ready();
+                continue;
+            }
+            return Err(err);
+        }
+
+        let event_type = unsafe { (*event).event };
+        let id = unsafe { (*event).id };
+        tracing::debug!(expected, event_type, "wait_for_cm_event: got event");
+        unsafe { ffi::rdma_ack_cm_event(event) };
+
+        if event_type == expected {
+            tracing::debug!(expected, "wait_for_cm_event: matched, returning");
+            return Ok(id);
+        }
+        tracing::warn!(
+            event_type,
+            expected,
+            "unexpected CM event (expected {expected}, got {event_type}), skipping"
+        );
+    }
+}
+
+/// Creates PD + CQ + QP on a CM ID, mirroring the resource-setup
+/// block used in both the `accept` and `connect` paths.
+///
+/// On success returns `(pd, cq)`.  On failure tears down partial
+/// resources and returns an error (the cm_id itself is NOT
+/// destroyed — the caller owns that).
+///
+/// # Safety
+/// `cm_id` must be a valid `rdma_cm_id` with a non-null `verbs`
+/// context.
+pub(crate) unsafe fn create_qp_resources(
+    cm_id: *mut ffi::rdma_cm_id,
+) -> io::Result<(*mut ffi::ibv_pd, *mut ffi::ibv_cq)> {
+    let verbs = unsafe { (*cm_id).verbs };
+    if verbs.is_null() {
+        return Err(io::Error::other("CM ID has no verbs context"));
+    }
+
+    let pd = unsafe { ffi::ibv_alloc_pd(verbs) };
+    if pd.is_null() {
+        return Err(io::Error::other("ibv_alloc_pd failed"));
+    }
+
+    let cq_size = crate::connection::CQ_CAPACITY as i32;
+    let cq = unsafe { ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0) };
+    if cq.is_null() {
+        unsafe { ffi::ibv_dealloc_pd(pd) };
+        return Err(io::Error::other("ibv_create_cq failed"));
+    }
+
+    let mut qp_attr: ffi::ibv_qp_init_attr = unsafe { std::mem::zeroed() };
+    qp_attr.send_cq = cq;
+    qp_attr.recv_cq = cq;
+    qp_attr.qp_type = ffi::ibv_qp_type_IBV_QPT_RC;
+    qp_attr.cap.max_send_wr = 16;
+    qp_attr.cap.max_recv_wr = 16;
+    qp_attr.cap.max_send_sge = 1;
+    qp_attr.cap.max_recv_sge = 1;
+
+    let ret = unsafe { ffi::rdma_create_qp(cm_id, pd, &mut qp_attr) };
+    if ret != 0 {
+        unsafe {
+            ffi::ibv_destroy_cq(cq);
+            ffi::ibv_dealloc_pd(pd);
+        }
+        return Err(io::Error::other(format!("rdma_create_qp failed: {ret}")));
+    }
+
+    Ok((pd, cq))
+}
+
 impl LocalListener for RdmaListener {
     type Connection = RdmaConnection;
     type Error = io::Error;
 
     async fn accept(&mut self) -> io::Result<RdmaConnection> {
-        loop {
-            // Wait for the event-channel fd to become readable via
-            // the tokio reactor — this yields to the runtime instead
-            // of blocking the worker thread (see #39).
-            let async_fd = self.async_fd.as_ref().ok_or_else(|| {
-                io::Error::other("RdmaListener was dropped or partially initialised")
-            })?;
-            let mut guard = async_fd.readable().await?;
+        let async_fd = self
+            .async_fd
+            .as_ref()
+            .ok_or_else(|| io::Error::other("RdmaListener was dropped or partially initialised"))?;
 
-            let mut event: *mut ffi::rdma_cm_event = ptr::null_mut();
-            let ret = unsafe { ffi::rdma_get_cm_event(self.event_channel, &mut event) };
-            if ret != 0 {
-                let err = io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EAGAIN)
-                    || err.kind() == io::ErrorKind::WouldBlock
-                {
-                    // No event yet — clear readiness and loop back
-                    // to re-arm the reactor for the next wakeup.
-                    guard.clear_ready();
-                    continue;
-                }
-                return Err(err);
-            }
+        // Wait for an incoming connection request via the shared
+        // `wait_for_cm_event` helper (see #48).
+        let new_id = wait_for_cm_event(
+            async_fd,
+            self.event_channel,
+            ffi::rdma_cm_event_type_RDMA_CM_EVENT_CONNECT_REQUEST,
+        )
+        .await?;
 
-            let event_type = unsafe { (*event).event };
-            let new_id = unsafe { (*event).id };
-            unsafe { ffi::rdma_ack_cm_event(event) };
-
-            if event_type != ffi::rdma_cm_event_type_RDMA_CM_EVENT_CONNECT_REQUEST {
-                continue;
-            }
-
-            // Create PD + CQ + QP on the new CM ID.  From here on
-            // any failure path must tear down the partial resources.
-            let verbs = unsafe { (*new_id).verbs };
-            if verbs.is_null() {
+        // Create PD + CQ + QP on the new CM ID.
+        let (pd, cq) = match unsafe { create_qp_resources(new_id) } {
+            Ok(res) => res,
+            Err(e) => {
                 unsafe { ffi::rdma_destroy_id(new_id) };
-                tracing::warn!("accepted CM ID has no verbs context, skipping");
-                continue;
+                return Err(e);
             }
+        };
 
-            let pd = unsafe { ffi::ibv_alloc_pd(verbs) };
-            if pd.is_null() {
-                unsafe { ffi::rdma_destroy_id(new_id) };
-                tracing::warn!("ibv_alloc_pd failed for accepted connection");
-                continue;
+        // Accept the connection.
+        let mut conn_param: ffi::rdma_conn_param = unsafe { std::mem::zeroed() };
+        conn_param.initiator_depth = 1;
+        conn_param.responder_resources = 1;
+        let ret = unsafe { ffi::rdma_accept(new_id, &mut conn_param) };
+        if ret != 0 {
+            unsafe { cleanup_accept_resources(new_id, pd, cq, true) };
+            return Err(io::Error::other(format!("rdma_accept failed: {ret}")));
+        }
+
+        // Extract the real peer address from the connected CM ID.
+        let peer_addr = match unsafe { extract_dst_addr(new_id) } {
+            Ok(real) => real,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not extract peer address, falling back to local_addr"
+                );
+                self.local_addr
             }
+        };
 
-            let cq_size = crate::connection::CQ_CAPACITY as i32;
-            let cq =
-                unsafe { ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0) };
-            if cq.is_null() {
-                unsafe { cleanup_accept_resources(new_id, pd, ptr::null_mut(), false) };
-                tracing::warn!("ibv_create_cq failed for accepted connection");
-                continue;
+        // Hand ownership of cm_id/pd/cq to the connection.
+        match unsafe {
+            RdmaConnection::from_accepted_cm_id(new_id, pd, cq, peer_addr, self.max_msg_size)
+        } {
+            Ok(conn) => {
+                tracing::info!(%peer_addr, "RDMA connection accepted");
+                Ok(conn)
             }
-
-            let mut qp_attr: ffi::ibv_qp_init_attr = unsafe { std::mem::zeroed() };
-            qp_attr.send_cq = cq;
-            qp_attr.recv_cq = cq;
-            qp_attr.qp_type = ffi::ibv_qp_type_IBV_QPT_RC;
-            qp_attr.cap.max_send_wr = 16;
-            qp_attr.cap.max_recv_wr = 16;
-            qp_attr.cap.max_send_sge = 1;
-            qp_attr.cap.max_recv_sge = 1;
-
-            let ret = unsafe { ffi::rdma_create_qp(new_id, pd, &mut qp_attr) };
-            if ret != 0 {
-                unsafe { cleanup_accept_resources(new_id, pd, cq, false) };
-                tracing::warn!("rdma_create_qp failed: {ret}");
-                continue;
-            }
-
-            // Accept the connection.
-            let mut conn_param: ffi::rdma_conn_param = unsafe { std::mem::zeroed() };
-            conn_param.initiator_depth = 1;
-            conn_param.responder_resources = 1;
-            let ret = unsafe { ffi::rdma_accept(new_id, &mut conn_param) };
-            if ret != 0 {
+            Err(e) => {
                 unsafe { cleanup_accept_resources(new_id, pd, cq, true) };
-                tracing::warn!("rdma_accept failed: {ret}");
-                continue;
-            }
-
-            // Extract the real peer address from the connected CM
-            // ID.  Previously we plumbed `self.local_addr` as a
-            // placeholder — now the new connection reports the
-            // remote side of the link as its `peer_addr`.  See #39.
-            let peer_addr = match unsafe { extract_dst_addr(new_id) } {
-                Ok(real) => real,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "could not extract peer address from accepted CM ID, falling back to local_addr"
-                    );
-                    self.local_addr
-                }
-            };
-
-            // Hand ownership of cm_id/pd/cq to the connection.  On
-            // success the connection's Drop owns cleanup; on failure
-            // we release all resources explicitly.
-            match unsafe {
-                RdmaConnection::from_accepted_cm_id(new_id, pd, cq, peer_addr, self.max_msg_size)
-            } {
-                Ok(conn) => {
-                    tracing::info!(%peer_addr, "RDMA connection accepted");
-                    return Ok(conn);
-                }
-                Err(e) => {
-                    unsafe { cleanup_accept_resources(new_id, pd, cq, true) };
-                    return Err(e);
-                }
+                Err(e)
             }
         }
     }

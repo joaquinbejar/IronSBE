@@ -55,13 +55,6 @@ impl LocalTransport for RdmaTransport {
     }
 
     async fn connect_with(config: RdmaConfig) -> io::Result<RdmaConnection> {
-        // Client-side RDMA connect — establish a QP to the remote.
-        // For now return unsupported; the first priority is the
-        // server (listener) side.
-        let _ = config;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "RDMA client connect not yet implemented",
-        ))
+        RdmaConnection::connect(config.bind_addr, config.max_msg_size).await
     }
 }
