@@ -4,6 +4,10 @@
 //! runtime because both ends need separate epoll reactors to handle
 //! RDMA CM event channels on SoftRoCE.
 //!
+//! Every server thread wraps its work in `tokio::time::timeout` so
+//! it cannot hang if the client fails, and `server.join()` is called
+//! on every exit path (success, client timeout, panic).  See #50.
+//!
 //! When no RDMA device is available the tests print a message and
 //! return early, so `cargo test` on a host without RDMA succeeds.
 
@@ -34,14 +38,11 @@ fn try_bind_listener(addr: SocketAddr, max_msg: usize) -> Option<RdmaListener> {
 ///
 /// Respects `IRONSBE_LOOPBACK_IPV4` env var as an explicit override.
 /// Otherwise enumerates interfaces and prefers `eth*`/`en*`/`ib*`
-/// names over Docker/bridge/veth virtual interfaces, which would
-/// fail on multi-homed hosts even when SoftRoCE is correctly
-/// configured on the physical NIC.
+/// names over Docker/bridge/veth virtual interfaces.
 fn first_non_loopback_ipv4() -> Option<std::net::Ipv4Addr> {
     use std::ffi::CStr;
     use std::net::Ipv4Addr;
 
-    // Explicit override wins.
     if let Ok(val) = std::env::var("IRONSBE_LOOPBACK_IPV4")
         && let Ok(ip) = val.parse::<Ipv4Addr>()
         && !ip.is_loopback()
@@ -82,7 +83,6 @@ fn first_non_loopback_ipv4() -> Option<std::net::Ipv4Addr> {
         }
         libc::freeifaddrs(ifaddrs);
 
-        // Prefer physical NICs, then non-virtual, then anything.
         candidates
             .iter()
             .find(|(n, _)| is_preferred(n))
@@ -90,6 +90,55 @@ fn first_non_loopback_ipv4() -> Option<std::net::Ipv4Addr> {
             .or(candidates.first())
             .map(|(_, ip)| *ip)
     }
+}
+
+/// Spawns a server on a dedicated OS thread with its own tokio
+/// runtime.  The server binds to `0.0.0.0:0`, sends the bound port
+/// back via `port_tx`, then runs `server_body` inside a
+/// `timeout(TEST_TIMEOUT, ...)`.  If the timeout fires or the body
+/// panics, the thread exits cleanly — no indefinite hang.
+///
+/// Returns `(connect_addr, server_join_handle)`, or `None` if no
+/// RDMA device is available.
+fn spawn_server<F, Fut>(server_body: F) -> Option<(SocketAddr, std::thread::JoinHandle<()>)>
+where
+    F: FnOnce(RdmaListener) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let host_ip = first_non_loopback_ipv4()?;
+    let (port_tx, port_rx) = std::sync::mpsc::sync_channel::<Option<u16>>(1);
+
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("server rt");
+        rt.block_on(async {
+            let bind: SocketAddr = "0.0.0.0:0".parse().expect("parse");
+            let listener = match RdmaListener::bind(bind, DEFAULT_MAX_MSG) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("server bind: {e}");
+                    let _ = port_tx.send(None);
+                    return;
+                }
+            };
+            let _ = port_tx.send(Some(listener.local_addr().expect("la").port()));
+
+            // Bounded wait — the server thread cannot hang even if
+            // the client never connects.  See #50.
+            if timeout(TEST_TIMEOUT, server_body(listener)).await.is_err() {
+                eprintln!("server timed out (no client connected within {TEST_TIMEOUT:?})");
+            }
+        });
+    });
+
+    let port = port_rx
+        .recv_timeout(Duration::from_secs(5))
+        .ok()
+        .flatten()?;
+    let addr = SocketAddr::new(std::net::IpAddr::V4(host_ip), port);
+    Some((addr, handle))
 }
 
 // ── listener-only tests (from #39) ─────────────────────────────────
@@ -123,49 +172,21 @@ async fn test_accept_yields_to_runtime() {
     assert!(counter.load(Ordering::SeqCst) >= 10);
 }
 
-// ── loopback tests (from #48) ──────────────────────────────────────
+// ── loopback tests (from #48, server timeout from #50) ─────────────
 
 /// Full round-trip: client sends "hello", server echoes "world".
 #[tokio::test(flavor = "current_thread")]
 async fn test_loopback_round_trip() {
-    let host_ip = match first_non_loopback_ipv4() {
-        Some(ip) => ip,
-        None => {
-            eprintln!("no IPv4 — skip");
-            return;
-        }
-    };
-
-    let (port_tx, port_rx) = std::sync::mpsc::sync_channel::<Option<u16>>(1);
-    let server = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("server rt");
-        rt.block_on(async {
-            let bind: SocketAddr = "0.0.0.0:0".parse().expect("parse");
-            let mut listener = match RdmaListener::bind(bind, DEFAULT_MAX_MSG) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("server bind: {e}");
-                    let _ = port_tx.send(None);
-                    return;
-                }
-            };
-            let _ = port_tx.send(Some(listener.local_addr().expect("la").port()));
-            let mut conn = listener.accept().await.expect("accept");
-            let msg = conn.recv().await.expect("recv");
-            assert_eq!(&msg.expect("some")[..], b"hello");
-            conn.send(b"world").await.expect("send");
-        });
-    });
-
-    let Some(port) = port_rx.recv_timeout(Duration::from_secs(5)).ok().flatten() else {
+    let Some((addr, server)) = spawn_server(|mut listener| async move {
+        let mut conn = listener.accept().await.expect("accept");
+        let msg = conn.recv().await.expect("recv");
+        assert_eq!(&msg.expect("some")[..], b"hello");
+        conn.send(b"world").await.expect("send");
+    }) else {
         return;
     };
-    let addr = SocketAddr::new(std::net::IpAddr::V4(host_ip), port);
 
-    let outer = timeout(TEST_TIMEOUT, async {
+    let client_result = timeout(TEST_TIMEOUT, async {
         let mut client = RdmaConnection::connect(addr, DEFAULT_MAX_MSG)
             .await
             .expect("connect");
@@ -174,70 +195,35 @@ async fn test_loopback_round_trip() {
         assert_eq!(&reply.expect("some")[..], b"world");
     })
     .await;
-    assert!(outer.is_ok(), "test_loopback_round_trip timed out");
+
+    // Always join the server thread, even if the client timed out.
     server.join().expect("server panicked");
+    assert!(client_result.is_ok(), "test_loopback_round_trip timed out");
 }
 
 /// > CQ_CAPACITY back-to-back sends.
 ///
-/// Currently `#[ignore]`-gated because the single `send_buf` design
-/// from #38 reuses the same memory for every SEND WR.  Back-to-back
-/// sends overwrite the buffer before the NIC reads the previous
-/// WR's data, corrupting in-flight frames.  The drain mechanism
-/// itself is correct (unit tests prove it), but the underlying
-/// buffer-reuse requires a multi-buffer refactor to actually
-/// support bursts.  Tracked separately.
+/// `#[ignore]`-gated: single `send_buf` design from #38 reuses the
+/// same memory for every SEND WR — needs multi-buffer refactor.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "single send_buf design from #38 — needs multi-buffer refactor for burst"]
 async fn test_send_burst_past_cq_capacity() {
-    let host_ip = match first_non_loopback_ipv4() {
-        Some(ip) => ip,
-        None => {
-            eprintln!("no IPv4 — skip");
-            return;
-        }
-    };
-
-    // Must be > CQ_CAPACITY (32) to exercise the drain path.
-    // Keep it moderate (48) because the drain_until_low_water
-    // yield loop needs the server to consume in parallel, and a
-    // very large burst on a single-threaded client can stall if
-    // the drain fills before completions arrive.
     const BURST: usize = 48;
-    let (port_tx, port_rx) = std::sync::mpsc::sync_channel::<Option<u16>>(1);
-    let server = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("server rt");
-        rt.block_on(async {
-            let bind: SocketAddr = "0.0.0.0:0".parse().expect("parse");
-            let mut listener = match RdmaListener::bind(bind, DEFAULT_MAX_MSG) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("server bind: {e}");
-                    let _ = port_tx.send(None);
-                    return;
-                }
-            };
-            let _ = port_tx.send(Some(listener.local_addr().expect("la").port()));
-            let mut conn = listener.accept().await.expect("accept");
-            for i in 0..BURST {
-                let msg = conn
-                    .recv()
-                    .await
-                    .unwrap_or_else(|e| panic!("recv {i}: {e}"));
-                assert!(msg.is_some(), "None on recv {i}");
-            }
-        });
-    });
 
-    let Some(port) = port_rx.recv_timeout(Duration::from_secs(5)).ok().flatten() else {
+    let Some((addr, server)) = spawn_server(|mut listener| async move {
+        let mut conn = listener.accept().await.expect("accept");
+        for i in 0..BURST {
+            let msg = conn
+                .recv()
+                .await
+                .unwrap_or_else(|e| panic!("recv {i}: {e}"));
+            assert!(msg.is_some(), "None on recv {i}");
+        }
+    }) else {
         return;
     };
-    let addr = SocketAddr::new(std::net::IpAddr::V4(host_ip), port);
 
-    let outer = timeout(TEST_TIMEOUT, async {
+    let client_result = timeout(TEST_TIMEOUT, async {
         let mut client = RdmaConnection::connect(addr, DEFAULT_MAX_MSG)
             .await
             .expect("connect");
@@ -250,61 +236,38 @@ async fn test_send_burst_past_cq_capacity() {
         }
     })
     .await;
-    assert!(outer.is_ok(), "test_send_burst_past_cq_capacity timed out");
+
     server.join().expect("server panicked");
+    assert!(
+        client_result.is_ok(),
+        "test_send_burst_past_cq_capacity timed out"
+    );
 }
 
 /// `peer_addr()` on the server side must not be unspecified.
 #[tokio::test(flavor = "current_thread")]
 async fn test_accepted_connection_peer_addr() {
-    let host_ip = match first_non_loopback_ipv4() {
-        Some(ip) => ip,
-        None => {
-            eprintln!("no IPv4 — skip");
-            return;
-        }
-    };
-
-    let (port_tx, port_rx) = std::sync::mpsc::sync_channel::<Option<u16>>(1);
-    let server = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("server rt");
-        rt.block_on(async {
-            let bind: SocketAddr = "0.0.0.0:0".parse().expect("parse");
-            let mut listener = match RdmaListener::bind(bind, DEFAULT_MAX_MSG) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("server bind: {e}");
-                    let _ = port_tx.send(None);
-                    return;
-                }
-            };
-            let _ = port_tx.send(Some(listener.local_addr().expect("la").port()));
-            let conn = listener.accept().await.expect("accept");
-            let peer = conn.peer_addr().expect("peer_addr");
-            assert_ne!(peer.port(), 0);
-            assert!(!peer.ip().is_unspecified(), "peer IP unspecified: {peer}");
-            eprintln!("[peer_addr] {peer}");
-        });
-    });
-
-    let Some(port) = port_rx.recv_timeout(Duration::from_secs(5)).ok().flatten() else {
+    let Some((addr, server)) = spawn_server(|mut listener| async move {
+        let conn = listener.accept().await.expect("accept");
+        let peer = conn.peer_addr().expect("peer_addr");
+        assert_ne!(peer.port(), 0);
+        assert!(!peer.ip().is_unspecified(), "peer IP unspecified: {peer}");
+        eprintln!("[peer_addr] {peer}");
+    }) else {
         return;
     };
-    let addr = SocketAddr::new(std::net::IpAddr::V4(host_ip), port);
 
-    let outer = timeout(TEST_TIMEOUT, async {
+    let client_result = timeout(TEST_TIMEOUT, async {
         let _client = RdmaConnection::connect(addr, DEFAULT_MAX_MSG)
             .await
             .expect("connect");
         tokio::time::sleep(Duration::from_millis(200)).await;
     })
     .await;
+
+    server.join().expect("server panicked");
     assert!(
-        outer.is_ok(),
+        client_result.is_ok(),
         "test_accepted_connection_peer_addr timed out"
     );
-    server.join().expect("server panicked");
 }
