@@ -7,10 +7,16 @@ use std::io;
 use std::net::SocketAddr;
 
 /// RDMA transport configuration.
+///
+/// Used for both the listener (bind) and client (connect) sides of
+/// an RDMA CM connection.  The [`addr`](Self::addr) field is the bind
+/// address for [`LocalTransport::bind_with`] and the remote target
+/// for [`LocalTransport::connect_with`].
 #[derive(Debug, Clone)]
 pub struct RdmaConfig {
-    /// Address to bind the RDMA CM listener to.
-    pub bind_addr: SocketAddr,
+    /// Target address — the bind address for listeners, the remote
+    /// endpoint for client connections.
+    pub addr: SocketAddr,
     /// Maximum SBE message size in bytes (excluding the 4-byte length
     /// prefix).
     pub max_msg_size: usize,
@@ -19,18 +25,15 @@ pub struct RdmaConfig {
 impl RdmaConfig {
     /// Creates a new RDMA config.
     #[must_use]
-    pub fn new(bind_addr: SocketAddr, max_msg_size: usize) -> Self {
-        Self {
-            bind_addr,
-            max_msg_size,
-        }
+    pub fn new(addr: SocketAddr, max_msg_size: usize) -> Self {
+        Self { addr, max_msg_size }
     }
 }
 
 impl From<SocketAddr> for RdmaConfig {
     fn from(addr: SocketAddr) -> Self {
         Self {
-            bind_addr: addr,
+            addr,
             max_msg_size: 64 * 1024,
         }
     }
@@ -51,10 +54,10 @@ impl LocalTransport for RdmaTransport {
     type ConnectConfig = RdmaConfig;
 
     async fn bind_with(config: RdmaConfig) -> io::Result<RdmaListener> {
-        RdmaListener::bind(config.bind_addr, config.max_msg_size)
+        RdmaListener::bind(config.addr, config.max_msg_size)
     }
 
     async fn connect_with(config: RdmaConfig) -> io::Result<RdmaConnection> {
-        RdmaConnection::connect(config.bind_addr, config.max_msg_size).await
+        RdmaConnection::connect(config.addr, config.max_msg_size).await
     }
 }
