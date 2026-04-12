@@ -1,14 +1,44 @@
 //! RDMA CM listener wrapping `rdma_cm_id` in listening mode.
+//!
+//! The listener integrates with tokio's runtime via
+//! [`tokio::io::unix::AsyncFd`] on the `rdma_event_channel`'s file
+//! descriptor, so [`RdmaListener::accept`] never blocks a worker
+//! thread.  Both `local_addr()` and the accepted connection's
+//! `peer_addr()` report real endpoints extracted from the
+//! underlying `rdma_cm_id` route information — so a bind to
+//! `0.0.0.0:0` surfaces a concrete IP/port and the connection
+//! reports the remote side of the link, not the listener's bind
+//! address.  See #39.
 
+use crate::addr::sockaddr_to_socket_addr;
 use crate::connection::RdmaConnection;
 use crate::ffi;
 use ironsbe_transport::traits::LocalListener;
 use std::io;
 use std::net::SocketAddr;
+use std::os::fd::{AsRawFd, RawFd};
 use std::ptr;
+use tokio::io::unix::AsyncFd;
 
 /// Default backlog for `rdma_listen`.
 const LISTEN_BACKLOG: i32 = 16;
+
+/// Borrowed file descriptor wrapper with **no** `Drop` impl.
+///
+/// [`AsyncFd`] registers its `T` with the tokio reactor and
+/// deregisters on drop, but delegates ownership of the underlying
+/// fd to `T` — meaning if `T: Drop` closes the fd, tokio honours
+/// that.  The `rdma_event_channel`'s fd is owned by rdma-core and
+/// must only be closed by `rdma_destroy_event_channel`, so this
+/// wrapper deliberately holds only a [`RawFd`] and has no `Drop` to
+/// avoid accidentally closing it.
+struct BorrowedEventFd(RawFd);
+
+impl AsRawFd for BorrowedEventFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+    }
+}
 
 /// RDMA CM listener.
 ///
@@ -19,6 +49,16 @@ const LISTEN_BACKLOG: i32 = 16;
 pub struct RdmaListener {
     listen_id: *mut ffi::rdma_cm_id,
     event_channel: *mut ffi::rdma_event_channel,
+    /// Registered with the tokio reactor so `accept` awaits event
+    /// readiness instead of blocking on `rdma_get_cm_event`.
+    ///
+    /// Wrapped in `Option` so our `Drop` impl can deregister it from
+    /// epoll *before* `rdma_destroy_event_channel` closes the
+    /// underlying fd.  Without this explicit ordering, another
+    /// thread could theoretically reuse the same numeric fd between
+    /// the channel destruction and the `AsyncFd` drop, causing tokio
+    /// to deregister the wrong fd.  See #39.
+    async_fd: Option<AsyncFd<BorrowedEventFd>>,
     local_addr: SocketAddr,
     max_msg_size: usize,
 }
@@ -27,14 +67,40 @@ impl RdmaListener {
     /// Binds and listens on `addr`.
     ///
     /// On any error, releases partially-allocated resources before
-    /// returning.
+    /// returning.  After `rdma_listen` succeeds the effective bound
+    /// address is read back from the listen CM ID via
+    /// [`sockaddr_to_socket_addr`] and stored — so a bind to
+    /// `0.0.0.0:0` reports a concrete IP/port via [`Self::local_addr`].
     ///
     /// # Errors
-    /// Returns an `io::Error` if any RDMA CM call fails.
+    /// Returns an `io::Error` if any RDMA CM call fails or if the
+    /// event-channel fd cannot be registered with the tokio reactor.
     pub fn bind(addr: SocketAddr, max_msg_size: usize) -> io::Result<Self> {
         let ec = unsafe { ffi::rdma_create_event_channel() };
         if ec.is_null() {
             return Err(io::Error::other("rdma_create_event_channel failed"));
+        }
+
+        // Pull out the raw fd from the event channel so we can mark
+        // it non-blocking and hand it to the tokio reactor.  The
+        // struct's layout is `{ fd: c_int }` and bindgen exposes
+        // `fd` as a direct field.
+        let event_fd: RawFd = unsafe { (*ec).fd };
+
+        // Set O_NONBLOCK: without this, `rdma_get_cm_event` will
+        // still block inside the read() syscall even if the fd is
+        // epoll-ready.  With it, `rdma_get_cm_event` returns -1 /
+        // EAGAIN when the channel is empty, which is what the
+        // AsyncFd loop expects.
+        let flags = unsafe { libc::fcntl(event_fd, libc::F_GETFL) };
+        if flags < 0 {
+            unsafe { ffi::rdma_destroy_event_channel(ec) };
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(event_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            let err = io::Error::last_os_error();
+            unsafe { ffi::rdma_destroy_event_channel(ec) };
+            return Err(err);
         }
 
         let mut listen_id: *mut ffi::rdma_cm_id = ptr::null_mut();
@@ -96,15 +162,78 @@ impl RdmaListener {
             return Err(io::Error::other(format!("rdma_listen failed: {ret}")));
         }
 
-        tracing::info!(%addr, "RDMA listener bound");
+        // Extract the real bound address from the listen id after
+        // rdma_listen — for a bind to 0.0.0.0:0 this is where the
+        // OS-assigned port and concrete IP come from.  See #39.
+        let local_addr = match unsafe { extract_src_addr(listen_id) } {
+            Ok(real) => real,
+            Err(e) => {
+                // Fall back to the requested address with a warning:
+                // returning an error here would regress the existing
+                // behaviour for callers that bound to a concrete
+                // address.
+                tracing::warn!(
+                    error = %e,
+                    "could not extract bound address from listen id, falling back to requested bind_addr"
+                );
+                addr
+            }
+        };
+
+        // Register the event-channel fd with the tokio reactor.
+        // BorrowedEventFd has no Drop, so tokio will deregister from
+        // epoll but won't close the fd — rdma_destroy_event_channel
+        // is still responsible for that in our Drop impl.
+        let async_fd = match AsyncFd::new(BorrowedEventFd(event_fd)) {
+            Ok(fd) => fd,
+            Err(e) => {
+                unsafe {
+                    ffi::rdma_destroy_id(listen_id);
+                    ffi::rdma_destroy_event_channel(ec);
+                }
+                return Err(e);
+            }
+        };
+
+        tracing::info!(%local_addr, "RDMA listener bound");
 
         Ok(Self {
             listen_id,
             event_channel: ec,
-            local_addr: addr,
+            async_fd: Some(async_fd),
+            local_addr,
             max_msg_size,
         })
     }
+}
+
+/// Extracts the source address stored on a listening CM ID after
+/// `rdma_bind_addr`/`rdma_listen` have filled in the effective
+/// bound address.
+///
+/// # Safety
+/// `cm_id` must be a valid, bound `rdma_cm_id` pointer.
+unsafe fn extract_src_addr(cm_id: *mut ffi::rdma_cm_id) -> io::Result<SocketAddr> {
+    // SAFETY: caller guarantees validity.  The field path is
+    // `(*cm_id).route.addr.__bindgen_anon_1.src_addr`, where
+    // `__bindgen_anon_1` is the source-address union containing
+    // `sockaddr`/`sockaddr_in`/`sockaddr_in6`/`sockaddr_storage`.
+    // bindgen's union name was verified against the generated
+    // bindings on the target Linux build.
+    let sa_ptr = unsafe { &(*cm_id).route.addr.__bindgen_anon_1.src_addr } as *const ffi::sockaddr;
+    unsafe { sockaddr_to_socket_addr(sa_ptr.cast()) }
+}
+
+/// Extracts the destination address stored on a connected CM ID.
+///
+/// # Safety
+/// `cm_id` must be a valid, connected `rdma_cm_id` pointer.
+unsafe fn extract_dst_addr(cm_id: *mut ffi::rdma_cm_id) -> io::Result<SocketAddr> {
+    // SAFETY: caller guarantees validity.  See `extract_src_addr`
+    // for the union path rationale — `__bindgen_anon_2` is the
+    // destination-address union.
+    let sa_ptr = unsafe { &(*cm_id).route.addr.__bindgen_anon_2.dst_addr } as *const ffi::sockaddr;
+    unsafe { sockaddr_to_socket_addr(sa_ptr.cast()) }
 }
 
 /// Cleanup helper: tears down the CM ID + QP + CQ + PD chain for
@@ -138,11 +267,27 @@ impl LocalListener for RdmaListener {
 
     async fn accept(&mut self) -> io::Result<RdmaConnection> {
         loop {
+            // Wait for the event-channel fd to become readable via
+            // the tokio reactor — this yields to the runtime instead
+            // of blocking the worker thread (see #39).
+            let async_fd = self.async_fd.as_ref().ok_or_else(|| {
+                io::Error::other("RdmaListener was dropped or partially initialised")
+            })?;
+            let mut guard = async_fd.readable().await?;
+
             let mut event: *mut ffi::rdma_cm_event = ptr::null_mut();
             let ret = unsafe { ffi::rdma_get_cm_event(self.event_channel, &mut event) };
             if ret != 0 {
-                // Surface the real errno instead of spinning forever.
-                return Err(io::Error::last_os_error());
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EAGAIN)
+                    || err.kind() == io::ErrorKind::WouldBlock
+                {
+                    // No event yet — clear readiness and loop back
+                    // to re-arm the reactor for the next wakeup.
+                    guard.clear_ready();
+                    continue;
+                }
+                return Err(err);
             }
 
             let event_type = unsafe { (*event).event };
@@ -169,10 +314,9 @@ impl LocalListener for RdmaListener {
                 continue;
             }
 
-            let cq_size = 32i32;
-            let cq = unsafe {
-                ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0)
-            };
+            let cq_size = crate::connection::CQ_CAPACITY as i32;
+            let cq =
+                unsafe { ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0) };
             if cq.is_null() {
                 unsafe { cleanup_accept_resources(new_id, pd, ptr::null_mut(), false) };
                 tracing::warn!("ibv_create_cq failed for accepted connection");
@@ -206,21 +350,29 @@ impl LocalListener for RdmaListener {
                 continue;
             }
 
+            // Extract the real peer address from the connected CM
+            // ID.  Previously we plumbed `self.local_addr` as a
+            // placeholder — now the new connection reports the
+            // remote side of the link as its `peer_addr`.  See #39.
+            let peer_addr = match unsafe { extract_dst_addr(new_id) } {
+                Ok(real) => real,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "could not extract peer address from accepted CM ID, falling back to local_addr"
+                    );
+                    self.local_addr
+                }
+            };
+
             // Hand ownership of cm_id/pd/cq to the connection.  On
             // success the connection's Drop owns cleanup; on failure
             // we release all resources explicitly.
-            let peer_addr = self.local_addr; // TODO: extract real peer (tracked in follow-up)
             match unsafe {
-                RdmaConnection::from_accepted_cm_id(
-                    new_id,
-                    pd,
-                    cq,
-                    peer_addr,
-                    self.max_msg_size,
-                )
+                RdmaConnection::from_accepted_cm_id(new_id, pd, cq, peer_addr, self.max_msg_size)
             } {
                 Ok(conn) => {
-                    tracing::info!("RDMA connection accepted");
+                    tracing::info!(%peer_addr, "RDMA connection accepted");
                     return Ok(conn);
                 }
                 Err(e) => {
@@ -238,6 +390,11 @@ impl LocalListener for RdmaListener {
 
 impl Drop for RdmaListener {
     fn drop(&mut self) {
+        // Deregister from the tokio reactor BEFORE closing the
+        // underlying fd via rdma_destroy_event_channel.  This
+        // prevents a stale-fd race where another thread could
+        // reclaim the same numeric fd in between.
+        drop(self.async_fd.take());
         unsafe {
             if !self.listen_id.is_null() {
                 ffi::rdma_destroy_id(self.listen_id);

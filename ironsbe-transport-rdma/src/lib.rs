@@ -33,6 +33,7 @@ compile_error!(
      It requires libibverbs-dev + librdmacm-dev."
 );
 
+mod addr;
 pub mod connection;
 pub mod ffi;
 pub mod listener;
