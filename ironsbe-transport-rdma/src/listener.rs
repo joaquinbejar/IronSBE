@@ -117,8 +117,9 @@ impl RdmaListener {
             return Err(io::Error::other(format!("rdma_create_id failed: {ret}")));
         }
 
-        // Convert SocketAddr to sockaddr_in.  `sin_addr.s_addr` is
-        // in network byte order, so build it from BE bytes.
+        // Convert SocketAddr to sockaddr_in.  `sin_addr.s_addr` must
+        // be in network byte order; `from_ne_bytes` on the IP octets
+        // gives exactly that (octets are already big-endian).
         let sockaddr = match addr {
             SocketAddr::V4(v4) => {
                 let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
@@ -298,16 +299,36 @@ pub(crate) async fn wait_for_cm_event(
         }
 
         let event_type = unsafe { (*event).event };
+        let event_status = unsafe { (*event).status };
         let id = unsafe { (*event).id };
-        tracing::debug!(expected, event_type, "wait_for_cm_event: got event");
+        tracing::debug!(expected, event_type, event_status, "wait_for_cm_event: got event");
         unsafe { ffi::rdma_ack_cm_event(event) };
 
         if event_type == expected {
             tracing::debug!(expected, "wait_for_cm_event: matched, returning");
             return Ok(id);
         }
+
+        // Terminal failure events must surface as errors immediately
+        // rather than looping forever waiting for the expected event.
+        let is_terminal = matches!(
+            event_type,
+            ffi::rdma_cm_event_type_RDMA_CM_EVENT_ADDR_ERROR
+                | ffi::rdma_cm_event_type_RDMA_CM_EVENT_ROUTE_ERROR
+                | ffi::rdma_cm_event_type_RDMA_CM_EVENT_CONNECT_ERROR
+                | ffi::rdma_cm_event_type_RDMA_CM_EVENT_REJECTED
+                | ffi::rdma_cm_event_type_RDMA_CM_EVENT_UNREACHABLE
+                | ffi::rdma_cm_event_type_RDMA_CM_EVENT_DISCONNECTED
+        );
+        if is_terminal {
+            return Err(io::Error::other(format!(
+                "terminal CM event while waiting for {expected}: got {event_type} status {event_status}"
+            )));
+        }
+
         tracing::warn!(
             event_type,
+            event_status,
             expected,
             "unexpected CM event (expected {expected}, got {event_type}), skipping"
         );

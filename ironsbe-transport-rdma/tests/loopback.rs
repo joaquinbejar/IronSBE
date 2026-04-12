@@ -30,29 +30,65 @@ fn try_bind_listener(addr: SocketAddr, max_msg: usize) -> Option<RdmaListener> {
     }
 }
 
+/// Discovers a non-loopback IPv4 address suitable for SoftRoCE.
+///
+/// Respects `IRONSBE_LOOPBACK_IPV4` env var as an explicit override.
+/// Otherwise enumerates interfaces and prefers `eth*`/`en*`/`ib*`
+/// names over Docker/bridge/veth virtual interfaces, which would
+/// fail on multi-homed hosts even when SoftRoCE is correctly
+/// configured on the physical NIC.
 fn first_non_loopback_ipv4() -> Option<std::net::Ipv4Addr> {
+    use std::ffi::CStr;
     use std::net::Ipv4Addr;
+
+    // Explicit override wins.
+    if let Ok(val) = std::env::var("IRONSBE_LOOPBACK_IPV4")
+        && let Ok(ip) = val.parse::<Ipv4Addr>()
+        && !ip.is_loopback()
+        && !ip.is_unspecified()
+    {
+        return Some(ip);
+    }
+
+    fn is_preferred(name: &str) -> bool {
+        name.starts_with("eth") || name.starts_with("en") || name.starts_with("ib")
+    }
+    fn is_virtual(name: &str) -> bool {
+        name.starts_with("docker")
+            || name.starts_with("br-")
+            || name.starts_with("virbr")
+            || name.starts_with("veth")
+            || name.starts_with("cni")
+    }
+
     unsafe {
         let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut ifaddrs) != 0 {
             return None;
         }
+        let mut candidates: Vec<(String, Ipv4Addr)> = Vec::new();
         let mut cursor = ifaddrs;
-        let mut result = None;
         while !cursor.is_null() {
             let ifa = &*cursor;
             if !ifa.ifa_addr.is_null() && (*ifa.ifa_addr).sa_family == libc::AF_INET as u16 {
                 let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
                 let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
                 if !ip.is_loopback() && !ip.is_unspecified() {
-                    result = Some(ip);
-                    break;
+                    let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned();
+                    candidates.push((name, ip));
                 }
             }
             cursor = ifa.ifa_next;
         }
         libc::freeifaddrs(ifaddrs);
-        result
+
+        // Prefer physical NICs, then non-virtual, then anything.
+        candidates
+            .iter()
+            .find(|(n, _)| is_preferred(n))
+            .or_else(|| candidates.iter().find(|(n, _)| !is_virtual(n)))
+            .or(candidates.first())
+            .map(|(_, ip)| *ip)
     }
 }
 

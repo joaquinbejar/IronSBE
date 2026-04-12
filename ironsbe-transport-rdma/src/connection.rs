@@ -268,13 +268,16 @@ impl RdmaConnection {
             return Err(err);
         }
 
-        let async_fd = match AsyncFd::new(BorrowedEventFd(event_fd)) {
+        // Wrapped in Option so cleanup macros can drop it BEFORE
+        // destroying the event channel fd, avoiding the stale-fd
+        // deregistration race (same pattern as RdmaListener::Drop).
+        let mut async_fd = Some(match AsyncFd::new(BorrowedEventFd(event_fd)) {
             Ok(fd) => fd,
             Err(e) => {
                 unsafe { ffi::rdma_destroy_event_channel(ec) };
                 return Err(e);
             }
-        };
+        });
 
         let mut cm_id: *mut ffi::rdma_cm_id = ptr::null_mut();
         let ret = unsafe {
@@ -314,9 +317,11 @@ impl RdmaConnection {
         };
 
         // Cleanup helper for the pre-QP phase: only cm_id + ec exist.
-        // `async_fd` is on the stack and drops naturally on function exit.
+        // Drops async_fd BEFORE destroying the event channel to avoid
+        // the stale-fd deregistration race.
         macro_rules! cleanup_pre_qp {
             () => {
+                drop(async_fd.take());
                 unsafe {
                     ffi::rdma_destroy_id(cm_id);
                     ffi::rdma_destroy_event_channel(ec);
@@ -340,7 +345,7 @@ impl RdmaConnection {
         tracing::debug!("waiting for ADDR_RESOLVED");
 
         if let Err(e) = wait_for_cm_event(
-            &async_fd,
+            async_fd.as_ref().expect("async_fd taken during cleanup"),
             ec,
             ffi::rdma_cm_event_type_RDMA_CM_EVENT_ADDR_RESOLVED,
         )
@@ -362,7 +367,7 @@ impl RdmaConnection {
         tracing::debug!("waiting for ROUTE_RESOLVED");
 
         if let Err(e) = wait_for_cm_event(
-            &async_fd,
+            async_fd.as_ref().expect("async_fd taken during cleanup"),
             ec,
             ffi::rdma_cm_event_type_RDMA_CM_EVENT_ROUTE_RESOLVED,
         )
@@ -387,6 +392,7 @@ impl RdmaConnection {
         // via `cleanup_accept_resources` on failure.
         macro_rules! cleanup_post_qp {
             () => {
+                drop(async_fd.take());
                 unsafe { cleanup_accept_resources(cm_id, pd, cq, true) };
                 unsafe { ffi::rdma_destroy_event_channel(ec) };
             };
@@ -411,7 +417,7 @@ impl RdmaConnection {
         tokio::task::yield_now().await;
 
         if let Err(e) = wait_for_cm_event(
-            &async_fd,
+            async_fd.as_ref().expect("async_fd taken during cleanup"),
             ec,
             ffi::rdma_cm_event_type_RDMA_CM_EVENT_ESTABLISHED,
         )
