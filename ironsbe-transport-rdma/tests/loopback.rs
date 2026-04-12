@@ -5,8 +5,9 @@
 //! RDMA CM event channels on SoftRoCE.
 //!
 //! Every server thread wraps its work in `tokio::time::timeout` so
-//! it cannot hang if the client fails, and `server.join()` is called
-//! on every exit path (success, client timeout, panic).  See #50.
+//! it cannot hang indefinitely if the client fails.  A `JoinGuard`
+//! ensures the server thread is joined even if the client panics
+//! during unwind.  See #50.
 //!
 //! When no RDMA device is available the tests print a message and
 //! return early, so `cargo test` on a host without RDMA succeeds.
@@ -23,6 +24,31 @@ use tokio::time::timeout;
 
 const DEFAULT_MAX_MSG: usize = 64 * 1024;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// RAII guard that joins a thread on drop — even during unwind.
+/// Prevents detached server threads from leaking past the test scope.
+struct JoinGuard(Option<std::thread::JoinHandle<()>>);
+
+impl JoinGuard {
+    fn new(handle: std::thread::JoinHandle<()>) -> Self {
+        Self(Some(handle))
+    }
+
+    /// Consumes the guard, joins the thread, and propagates panics.
+    fn join(mut self) {
+        if let Some(h) = self.0.take() {
+            h.join().expect("server thread panicked");
+        }
+    }
+}
+
+impl Drop for JoinGuard {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            let _ = h.join();
+        }
+    }
+}
 
 fn try_bind_listener(addr: SocketAddr, max_msg: usize) -> Option<RdmaListener> {
     match RdmaListener::bind(addr, max_msg) {
@@ -93,14 +119,15 @@ fn first_non_loopback_ipv4() -> Option<std::net::Ipv4Addr> {
 }
 
 /// Spawns a server on a dedicated OS thread with its own tokio
-/// runtime.  The server binds to `0.0.0.0:0`, sends the bound port
-/// back via `port_tx`, then runs `server_body` inside a
-/// `timeout(TEST_TIMEOUT, ...)`.  If the timeout fires or the body
-/// panics, the thread exits cleanly — no indefinite hang.
+/// runtime.  The server binds, sends the port back, then runs
+/// `server_body` inside `timeout(TEST_TIMEOUT, ...)`.
 ///
-/// Returns `(connect_addr, server_join_handle)`, or `None` if no
-/// RDMA device is available.
-fn spawn_server<F, Fut>(server_body: F) -> Option<(SocketAddr, std::thread::JoinHandle<()>)>
+/// The returned [`JoinGuard`] joins the thread on drop (even during
+/// unwind) so the server thread is never left detached.
+///
+/// Returns `None` (joining the thread on failure) if no RDMA device
+/// or the port handshake fails.
+fn spawn_server<F, Fut>(server_body: F) -> Option<(SocketAddr, JoinGuard)>
 where
     F: FnOnce(RdmaListener) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()>,
@@ -125,20 +152,25 @@ where
             };
             let _ = port_tx.send(Some(listener.local_addr().expect("la").port()));
 
-            // Bounded wait — the server thread cannot hang even if
-            // the client never connects.  See #50.
             if timeout(TEST_TIMEOUT, server_body(listener)).await.is_err() {
-                eprintln!("server timed out (no client connected within {TEST_TIMEOUT:?})");
+                eprintln!("server timed out (no client within {TEST_TIMEOUT:?})");
             }
         });
     });
 
-    let port = port_rx
-        .recv_timeout(Duration::from_secs(5))
-        .ok()
-        .flatten()?;
+    let guard = JoinGuard::new(handle);
+
+    let port = match port_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Some(p)) => p,
+        _ => {
+            // Guard drops here → joins the thread before returning.
+            drop(guard);
+            return None;
+        }
+    };
+
     let addr = SocketAddr::new(std::net::IpAddr::V4(host_ip), port);
-    Some((addr, handle))
+    Some((addr, guard))
 }
 
 // ── listener-only tests (from #39) ─────────────────────────────────
@@ -196,8 +228,9 @@ async fn test_loopback_round_trip() {
     })
     .await;
 
-    // Always join the server thread, even if the client timed out.
-    server.join().expect("server panicked");
+    // JoinGuard ensures the thread is joined even if the assert
+    // below panics; explicit join() propagates server panics.
+    server.join();
     assert!(client_result.is_ok(), "test_loopback_round_trip timed out");
 }
 
@@ -237,7 +270,7 @@ async fn test_send_burst_past_cq_capacity() {
     })
     .await;
 
-    server.join().expect("server panicked");
+    server.join();
     assert!(
         client_result.is_ok(),
         "test_send_burst_past_cq_capacity timed out"
@@ -265,7 +298,7 @@ async fn test_accepted_connection_peer_addr() {
     })
     .await;
 
-    server.join().expect("server panicked");
+    server.join();
     assert!(
         client_result.is_ok(),
         "test_accepted_connection_peer_addr timed out"
