@@ -50,8 +50,15 @@ pub struct RdmaListener {
     listen_id: *mut ffi::rdma_cm_id,
     event_channel: *mut ffi::rdma_event_channel,
     /// Registered with the tokio reactor so `accept` awaits event
-    /// readiness instead of blocking on `rdma_get_cm_event`.  See #39.
-    async_fd: AsyncFd<BorrowedEventFd>,
+    /// readiness instead of blocking on `rdma_get_cm_event`.
+    ///
+    /// Wrapped in `Option` so our `Drop` impl can deregister it from
+    /// epoll *before* `rdma_destroy_event_channel` closes the
+    /// underlying fd.  Without this explicit ordering, another
+    /// thread could theoretically reuse the same numeric fd between
+    /// the channel destruction and the `AsyncFd` drop, causing tokio
+    /// to deregister the wrong fd.  See #39.
+    async_fd: Option<AsyncFd<BorrowedEventFd>>,
     local_addr: SocketAddr,
     max_msg_size: usize,
 }
@@ -193,7 +200,7 @@ impl RdmaListener {
         Ok(Self {
             listen_id,
             event_channel: ec,
-            async_fd,
+            async_fd: Some(async_fd),
             local_addr,
             max_msg_size,
         })
@@ -263,7 +270,10 @@ impl LocalListener for RdmaListener {
             // Wait for the event-channel fd to become readable via
             // the tokio reactor — this yields to the runtime instead
             // of blocking the worker thread (see #39).
-            let mut guard = self.async_fd.readable_mut().await?;
+            let async_fd = self.async_fd.as_ref().ok_or_else(|| {
+                io::Error::other("RdmaListener was dropped or partially initialised")
+            })?;
+            let mut guard = async_fd.readable().await?;
 
             let mut event: *mut ffi::rdma_cm_event = ptr::null_mut();
             let ret = unsafe { ffi::rdma_get_cm_event(self.event_channel, &mut event) };
@@ -304,7 +314,7 @@ impl LocalListener for RdmaListener {
                 continue;
             }
 
-            let cq_size = 32i32;
+            let cq_size = crate::connection::CQ_CAPACITY as i32;
             let cq =
                 unsafe { ffi::ibv_create_cq(verbs, cq_size, ptr::null_mut(), ptr::null_mut(), 0) };
             if cq.is_null() {
@@ -380,6 +390,11 @@ impl LocalListener for RdmaListener {
 
 impl Drop for RdmaListener {
     fn drop(&mut self) {
+        // Deregister from the tokio reactor BEFORE closing the
+        // underlying fd via rdma_destroy_event_channel.  This
+        // prevents a stale-fd race where another thread could
+        // reclaim the same numeric fd in between.
+        drop(self.async_fd.take());
         unsafe {
             if !self.listen_id.is_null() {
                 ffi::rdma_destroy_id(self.listen_id);

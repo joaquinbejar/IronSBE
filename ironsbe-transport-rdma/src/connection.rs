@@ -43,28 +43,32 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 const RECV_DEPTH: usize = 16;
 
 /// Completion queue capacity (set when creating the CQ in
-/// [`crate::listener`]).
-const CQ_CAPACITY: u32 = 32;
+/// [`crate::listener`]).  `pub(crate)` so the listener can share
+/// the same constant instead of hard-coding `32i32`.
+pub(crate) const CQ_CAPACITY: u32 = 32;
+
+/// Minimum CQ headroom reserved for RECV completions while
+/// throttling pending SEND completions.  Derived from `RECV_DEPTH`
+/// so the CQ always retains enough space for the maximum number of
+/// outstanding RECV work requests.
+const CQ_RECV_HEADROOM: u32 = RECV_DEPTH as u32;
 
 /// Drain SEND completions inside `send` once the pending count
-/// reaches this threshold — well below `CQ_CAPACITY` so a concurrent
-/// burst of RECV completions never catches the CQ full.
-const CQ_DRAIN_HIGH_WATER: u32 = 24;
+/// reaches this threshold.  Derived from `CQ_CAPACITY` and
+/// `RECV_DEPTH` so a concurrent burst of RECV completions can never
+/// overflow the CQ.
+const CQ_DRAIN_HIGH_WATER: u32 = CQ_CAPACITY - CQ_RECV_HEADROOM;
 
 /// Stop draining once the pending count falls below this threshold.
 /// The hysteresis avoids draining for a single slot when the CQ is
-/// right at the high-water mark.
-const CQ_DRAIN_LOW_WATER: u32 = 16;
+/// close to the high-water mark.
+const CQ_DRAIN_LOW_WATER: u32 = CQ_DRAIN_HIGH_WATER / 2;
 
-// Compile-time invariant for the CQ draining watermarks:
-//   LOW_WATER < HIGH_WATER < CQ_CAPACITY
-// The `drain_until_low_water` loop uses `pending_sends >= LOW_WATER`
-// as its exit predicate, so violating these orderings would either
-// spin forever or overflow the CQ.  This `const _` forces the check
-// at compile time — no runtime cost, no clippy noise about asserting
-// on constants.
+// Compile-time invariants for the CQ draining watermarks.
+const _: () = assert!(CQ_RECV_HEADROOM <= CQ_CAPACITY);
 const _: () = assert!(CQ_DRAIN_LOW_WATER < CQ_DRAIN_HIGH_WATER);
 const _: () = assert!(CQ_DRAIN_HIGH_WATER < CQ_CAPACITY);
+const _: () = assert!(CQ_CAPACITY - CQ_DRAIN_HIGH_WATER >= CQ_RECV_HEADROOM);
 
 /// A RECV completion that was observed while the `send` path was
 /// draining the CQ.  Stored in [`RdmaConnection::pending_recvs`] so
@@ -367,7 +371,7 @@ impl LocalConnection for RdmaConnection {
         // the caller bursts sends back-to-back with no interleaved
         // recvs.  See #39.
         if self.pending_sends >= CQ_DRAIN_HIGH_WATER {
-            self.drain_until_low_water()?;
+            self.drain_until_low_water().await?;
         }
 
         let frame_len = u32::try_from(msg.len()).map_err(|_| {
@@ -424,22 +428,18 @@ impl LocalConnection for RdmaConnection {
 
 impl RdmaConnection {
     /// Drains the CQ until `pending_sends` falls below the
-    /// low-water mark.  If the CQ is empty before we reach the
-    /// target, returns an error — a full-looking `pending_sends`
-    /// with an empty CQ implies the peer has gone silently away
-    /// and our counter is stale, which the caller should surface.
-    fn drain_until_low_water(&mut self) -> io::Result<()> {
+    /// low-water mark.  If the CQ is transiently empty (completions
+    /// haven't arrived from the NIC yet) we yield to the runtime
+    /// and retry, mirroring the `recv` loop's behaviour.  This
+    /// avoids a spurious `WouldBlock` error that would surface under
+    /// normal back-to-back send load.
+    async fn drain_until_low_water(&mut self) -> io::Result<()> {
         while self.pending_sends >= CQ_DRAIN_LOW_WATER {
             match self.drain_cq()? {
                 Drained::Empty => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!(
-                            "CQ empty but pending_sends={} >= low_water={}: \
-                             peer may have stalled or disconnected",
-                            self.pending_sends, CQ_DRAIN_LOW_WATER
-                        ),
-                    ));
+                    // Completions may not have arrived yet; yield
+                    // and retry instead of failing the send.
+                    tokio::task::yield_now().await;
                 }
                 // SEND, RECV, Other all count as progress — the
                 // loop predicate (`pending_sends >= low_water`) is
