@@ -407,6 +407,19 @@ where
                     .retain(|_, sender| sender.send(message.clone()).is_ok());
                 false
             }
+            ServerCommand::SendTo(session_id, message) => {
+                // Push the bytes to a single live session (server-initiated
+                // unicast). A missing entry (never-connected or already-gone
+                // session) is a benign no-op; a closed channel is dropped from
+                // the registry, mirroring `Broadcast`'s opportunistic cleanup.
+                let mut senders = self.session_senders.write();
+                if let Some(sender) = senders.get(&session_id)
+                    && sender.send(message).is_err()
+                {
+                    senders.remove(&session_id);
+                }
+                false
+            }
         }
     }
 }
@@ -456,6 +469,20 @@ impl ServerHandle {
         self.cmd_notify.notify_one();
     }
 
+    /// Sends a message to a single session by id (server-initiated push).
+    ///
+    /// Unlike [`Self::broadcast`], only the session identified by `session_id`
+    /// receives the bytes. A non-existent or already-closed session is a benign
+    /// no-op (the stale entry is reaped on the next attempt). Non-blocking: the
+    /// command is queued on the control channel and the run loop performs the
+    /// actual send.
+    pub fn send_to(&self, session_id: u64, message: Vec<u8>) {
+        let _ = self
+            .cmd_tx
+            .try_send(ServerCommand::SendTo(session_id, message));
+        self.cmd_notify.notify_one();
+    }
+
     /// Polls for server events.
     pub fn poll_events(&self) -> impl Iterator<Item = ServerEvent> + '_ {
         std::iter::from_fn(|| self.event_rx.try_recv())
@@ -471,6 +498,8 @@ pub enum ServerCommand {
     CloseSession(u64),
     /// Broadcast a message to all sessions.
     Broadcast(Vec<u8>),
+    /// Send a message to a single session by id (server-initiated push).
+    SendTo(u64, Vec<u8>),
 }
 
 /// Events emitted by the server.
@@ -891,6 +920,59 @@ mod tests {
         // Both entries must still be live — their channels are
         // healthy.
         assert_eq!(server.session_senders.read().len(), 2);
+    }
+
+    /// `SendTo` must push the payload to only the targeted session, leaving
+    /// every other session's channel untouched.
+    #[tokio::test]
+    async fn test_send_to_handler_reaches_only_target_session() {
+        let (mut server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        let (tx1, mut rx1) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx2, mut rx2) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        {
+            let mut senders = server.session_senders.write();
+            senders.insert(1, tx1);
+            senders.insert(2, tx2);
+        }
+
+        let payload = b"unicast-to-2".to_vec();
+        let exited = server
+            .handle_command(ServerCommand::SendTo(2, payload.clone()))
+            .await;
+
+        assert!(!exited);
+        match rx2.try_recv() {
+            Ok(bytes) => assert_eq!(bytes, payload),
+            other => panic!("target session 2 did not receive the unicast: {other:?}"),
+        }
+        assert!(
+            rx1.try_recv().is_err(),
+            "non-target session 1 must not receive the unicast"
+        );
+        // Both sessions remain live.
+        assert_eq!(server.session_senders.read().len(), 2);
+    }
+
+    /// `SendTo` for a missing session id is a benign no-op (no panic, no change
+    /// to the registry).
+    #[tokio::test]
+    async fn test_send_to_handler_missing_session_is_noop() {
+        let (mut server, _handle) = DefaultBuilder::<TestHandler>::new()
+            .handler(TestHandler)
+            .build();
+
+        let (tx1, _rx1) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        server.session_senders.write().insert(1, tx1);
+
+        let exited = server
+            .handle_command(ServerCommand::SendTo(99, b"nobody-home".to_vec()))
+            .await;
+
+        assert!(!exited);
+        assert_eq!(server.session_senders.read().len(), 1);
     }
 
     /// `Broadcast` must drop entries whose receiver has already been

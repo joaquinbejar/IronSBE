@@ -263,6 +263,10 @@ where
                 false
             }
             ServerCommand::Broadcast(_message) => false,
+            // The single-threaded LocalServer does not track a session-sender
+            // registry, so server-initiated push is a no-op here (as Broadcast
+            // is); the multi-threaded `Server` implements both. See builder.rs.
+            ServerCommand::SendTo(_session_id, _message) => false,
         }
     }
 }
