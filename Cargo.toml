@@ -61,17 +61,17 @@ ironsbe-bench = { path = "ironsbe-bench", version = "0.3.0" }
 thiserror = "2.0"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-bytes = { version = "1.11", features = ["serde"] }
+bytes = { version = "1.12", features = ["serde"] }
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
-tokio = { version = "1.51", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
-socket2 = "0.5"
+socket2 = "0.6"
 tokio-uring = "0.5"
-smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp"] }
-xsk-rs = "0.6"
-etherparse = "0.18"
+smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp"] }
+xsk-rs = "0.8"
+etherparse = "0.20"
 futures = "0.3"
 async-trait = "0.1"
 tracing = "0.1"
@@ -79,12 +79,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 num-traits = "0.2"
 num-derive = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-quick-xml = "0.39"
+quick-xml = "0.40"
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "parsing"] }
 rtrb = "0.3"
-lru = "0.16"
+lru = "0.18"
 memmap2 = "0.9"
 criterion = { version = "0.8", features = ["html_reports"] }
 hdrhistogram = "7"
