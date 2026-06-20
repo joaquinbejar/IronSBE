@@ -52,7 +52,7 @@ ironsbe-codegen = { path = "ironsbe-codegen", version = "0.3.0" }
 ironsbe-derive = { path = "ironsbe-derive", version = "0.3.0" }
 ironsbe-channel = { path = "ironsbe-channel", version = "0.3.0" }
 ironsbe-transport = { path = "ironsbe-transport", version = "0.3.0" }
-ironsbe-server = { path = "ironsbe-server", version = "0.3.0" }
+ironsbe-server = { path = "ironsbe-server", version = "0.4.0" }
 ironsbe-client = { path = "ironsbe-client", version = "0.3.0" }
 ironsbe-marketdata = { path = "ironsbe-marketdata", version = "0.3.0" }
 ironsbe-bench = { path = "ironsbe-bench", version = "0.3.0" }

@@ -1,6 +1,6 @@
 # Changelog — ironsbe-server
 
-## 0.3.1
+## 0.4.0
 
 ### Added
 - `ServerHandle::send_to(session_id, message)` — server-initiated **unicast**
@@ -11,3 +11,8 @@
 
   Enables consumers to drive subscription-gated server push (e.g. account-manager's
   live `MmEligibilityChanged` stream) without broadcasting to every session.
+
+### Changed (breaking)
+- `ServerCommand` is now `#[non_exhaustive]`. Downstream code matching on it
+  must add a wildcard arm. This makes future command additions non-breaking
+  (minor releases). Minor bump under 0.x semver reflects the break.

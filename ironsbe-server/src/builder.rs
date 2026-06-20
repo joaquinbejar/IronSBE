@@ -490,7 +490,11 @@ impl ServerHandle {
 }
 
 /// Commands that can be sent to the server.
+///
+/// Marked `#[non_exhaustive]`: new control commands may be added in minor
+/// releases, so downstream consumers must include a wildcard arm when matching.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ServerCommand {
     /// Shutdown the server.
     Shutdown,
