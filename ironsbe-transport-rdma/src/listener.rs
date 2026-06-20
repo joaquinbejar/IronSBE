@@ -301,7 +301,12 @@ pub(crate) async fn wait_for_cm_event(
         let event_type = unsafe { (*event).event };
         let event_status = unsafe { (*event).status };
         let id = unsafe { (*event).id };
-        tracing::debug!(expected, event_type, event_status, "wait_for_cm_event: got event");
+        tracing::debug!(
+            expected,
+            event_type,
+            event_status,
+            "wait_for_cm_event: got event"
+        );
         unsafe { ffi::rdma_ack_cm_event(event) };
 
         if event_type == expected {
