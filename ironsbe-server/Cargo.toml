@@ -33,7 +33,12 @@ futures = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-ironsbe-client = { workspace = true }
+# Path-only (no version) on purpose: `ironsbe-client` is published *after*
+# `ironsbe-server`, so a versioned edge would force the not-yet-published
+# client during `cargo publish`. Cargo strips version-less dev-dependencies
+# from the packaged manifest, breaking the publish-order cycle while keeping
+# the dep available for local `cargo test`.
+ironsbe-client = { path = "../ironsbe-client" }
 ironsbe-core = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
