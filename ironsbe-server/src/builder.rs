@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Notify, mpsc as tokio_mpsc};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// Shared per-session outbound-sender registry.  Populated in
 /// [`Server::handle_connection`], drained in
@@ -340,34 +341,41 @@ where
         handler.on_session_start(session_id);
         let _ = event_tx.try_send(ServerEvent::SessionCreated(session_id, addr));
 
-        // Spawn connection handler task.  The span gives every log
-        // line inside the session the `sbe_session{session_id=N}:`
-        // prefix so operators can correlate messages per peer.
+        // Spawn connection handler task. The `sbe_session` span is attached to
+        // the future via `Instrument::instrument` instead of a `Span::enter()`
+        // guard held across `.await`: on the multi-threaded runtime the future
+        // can resume on a different worker thread, and a held guard would drive
+        // tracing-subscriber's per-thread span ref-counting across threads,
+        // racing into a `clone_span` panic that silently kills the accept loop
+        // (issue #54). The span still gives every log line inside the session
+        // the `sbe_session{session_id=N}:` prefix for per-peer correlation.
         let span = tracing::info_span!("sbe_session", session_id, %addr);
-        tokio::spawn(async move {
-            let _guard = span.enter();
-            tracing::info!("connected");
+        tokio::spawn(
+            async move {
+                tracing::info!("connected");
 
-            if let Err(e) = handle_session(
-                session_id,
-                conn,
-                handler.as_ref(),
-                session_token,
-                out_tx,
-                out_rx,
-                senders,
-            )
-            .await
-            {
-                tracing::error!(error = %e, "session error");
+                if let Err(e) = handle_session(
+                    session_id,
+                    conn,
+                    handler.as_ref(),
+                    session_token,
+                    out_tx,
+                    out_rx,
+                    senders,
+                )
+                .await
+                {
+                    tracing::error!(error = %e, "session error");
+                }
+
+                tracing::info!("disconnected");
+                handler.on_session_end(session_id);
+                let _ = event_tx.try_send(ServerEvent::SessionClosed(session_id));
+                let _ = cmd_tx.try_send(ServerCommand::CloseSession(session_id));
+                cmd_notify.notify_one();
             }
-
-            tracing::info!("disconnected");
-            handler.on_session_end(session_id);
-            let _ = event_tx.try_send(ServerEvent::SessionClosed(session_id));
-            let _ = cmd_tx.try_send(ServerCommand::CloseSession(session_id));
-            cmd_notify.notify_one();
-        });
+            .instrument(span),
+        );
     }
 
     async fn handle_command(&mut self, cmd: ServerCommand) -> bool {
