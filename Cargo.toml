@@ -80,7 +80,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 num-traits = "0.2"
 num-derive = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-quick-xml = "0.40"
+quick-xml = "0.41"
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "parsing"] }
