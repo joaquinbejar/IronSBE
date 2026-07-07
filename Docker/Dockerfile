@@ -14,7 +14,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-FROM rust:1.92.0-alpine3.23 AS builder
+FROM rust:1.96.1-alpine3.23 AS builder
 
 # Install build dependencies for Alpine
 RUN apk add --no-cache \
