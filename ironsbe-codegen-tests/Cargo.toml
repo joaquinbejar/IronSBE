@@ -1,0 +1,16 @@
+[package]
+name = "ironsbe-codegen-tests"
+description = "Compile-level round-trip tests for code emitted by ironsbe-codegen (not published)"
+publish = false
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+ironsbe-core = { workspace = true }
+
+[build-dependencies]
+ironsbe-codegen = { workspace = true }

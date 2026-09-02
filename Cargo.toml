@@ -5,6 +5,8 @@ members = [
     "ironsbe-core",
     "ironsbe-schema",
     "ironsbe-codegen",
+    # Compile-level tests for generated code (publish = false).
+    "ironsbe-codegen-tests",
     "ironsbe-derive",
     "ironsbe-channel",
     "ironsbe-transport",
@@ -25,6 +27,7 @@ default-members = [
     "ironsbe-core",
     "ironsbe-schema",
     "ironsbe-codegen",
+    "ironsbe-codegen-tests",
     "ironsbe-derive",
     "ironsbe-channel",
     "ironsbe-transport",
