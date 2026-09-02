@@ -5,6 +5,8 @@ use ironsbe_schema::ir::{
 };
 use ironsbe_schema::types::PrimitiveType;
 
+use crate::error::CodegenError;
+
 /// Generator for message encoders and decoders.
 pub struct MessageGenerator<'a> {
     ir: &'a SchemaIr,
@@ -18,8 +20,13 @@ impl<'a> MessageGenerator<'a> {
     }
 
     /// Generates all message definitions.
-    #[must_use]
-    pub fn generate(&self) -> String {
+    ///
+    /// # Errors
+    /// Returns [`CodegenError::Unsupported`] for schema constructs the
+    /// generator cannot emit correct code for, and
+    /// [`CodegenError::UnknownType`] for `<data>` elements whose type is not
+    /// declared in the schema.
+    pub fn generate(&self) -> Result<String, CodegenError> {
         let mut output = String::new();
 
         for msg in &self.ir.messages {
@@ -40,7 +47,7 @@ impl<'a> MessageGenerator<'a> {
             }
         }
 
-        output
+        Ok(output)
     }
 
     /// Generates a message decoder.
@@ -923,7 +930,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         assert!(
             code.contains("pub mod create_rfq_response {"),
@@ -947,7 +954,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         assert!(
             code.contains("create_rfq_response::QuotesGroupDecoder"),
@@ -965,7 +972,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         // orderId at offset 0
         assert!(
@@ -990,7 +997,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         assert!(
             code.contains("self.offset + 8)"),
@@ -1008,7 +1015,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         assert!(
             code.contains("pub struct OrdersGroupEncoder"),
@@ -1026,7 +1033,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         assert!(
             code.contains("fn next_entry(&mut self)"),
@@ -1040,7 +1047,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         assert!(
             code.contains("fn set_order_id(&mut self, value: u64)"),
@@ -1062,7 +1069,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         assert!(
             code.contains("fn orders_count(&mut self, count: u16)"),
@@ -1095,7 +1102,7 @@ mod tests {
         let schema = parse_schema(xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         // --- Decoder side ---
         let decoder_pos = code
@@ -1148,7 +1155,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         // Find the EntryEncoder section and verify offsets in setters
         let entry_encoder_start = code
@@ -1198,7 +1205,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         assert!(
             code.contains("BLOCK_LENGTH: u16 = 20"),
@@ -1212,7 +1219,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         // uint64(8) + uint32(4) + uint64(8) = 20 bytes total
         assert!(
@@ -1227,7 +1234,7 @@ mod tests {
         let schema = parse_schema(&xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         let entry_pos = code
             .find("impl<'a> OrdersEntryEncoder<'a>")
@@ -1262,7 +1269,7 @@ mod tests {
         let schema = parse_schema(xml).expect("Failed to parse schema");
         let ir = SchemaIr::from_schema(&schema);
         let msg_gen = MessageGenerator::new(&ir);
-        let code = msg_gen.generate();
+        let code = msg_gen.generate().expect("codegen failed");
 
         // BLOCK_LENGTH should be auto-computed: uint64(8) + uint32(4) + uint64(8) = 20
         assert!(

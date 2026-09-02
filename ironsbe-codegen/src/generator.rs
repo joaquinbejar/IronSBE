@@ -2,6 +2,7 @@
 
 use ironsbe_schema::ir::SchemaIr;
 
+use crate::error::CodegenError;
 use crate::rust::{EnumGenerator, MessageGenerator, TypeGenerator};
 
 /// Main code generator for SBE schemas.
@@ -17,8 +18,13 @@ impl<'a> Generator<'a> {
     }
 
     /// Generates the complete Rust code for the schema.
-    #[must_use]
-    pub fn generate(&self) -> String {
+    ///
+    /// # Errors
+    /// Returns [`CodegenError::Unsupported`] when the schema uses a construct
+    /// the generator cannot emit correct code for (for example `<data>` inside
+    /// a repeating group), and [`CodegenError::UnknownType`] when a `<data>`
+    /// element references a type that is not declared in `<types>`.
+    pub fn generate(&self) -> Result<String, CodegenError> {
         let mut output = String::with_capacity(64 * 1024);
 
         // File header
@@ -37,9 +43,9 @@ impl<'a> Generator<'a> {
 
         // Messages
         let msg_gen = MessageGenerator::new(self.ir);
-        output.push_str(&msg_gen.generate());
+        output.push_str(&msg_gen.generate()?);
 
-        output
+        Ok(output)
     }
 
     /// Generates the file header with imports.
@@ -96,7 +102,7 @@ mod tests {
         let schema = parse_schema(xml).expect("Failed to parse");
         let ir = SchemaIr::from_schema(&schema);
         let generator = Generator::new(&ir);
-        let code = generator.generate();
+        let code = generator.generate().expect("codegen failed");
 
         assert!(code.contains("SCHEMA_ID: u16 = 1"));
         assert!(code.contains("SCHEMA_VERSION: u16 = 1"));
