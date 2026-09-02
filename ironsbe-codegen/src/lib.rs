@@ -24,12 +24,14 @@ pub use generator::Generator;
 /// Generated Rust code as a string.
 ///
 /// # Errors
-/// Returns `CodegenError` if parsing or generation fails.
+/// Returns `CodegenError` if parsing fails, if the schema references an
+/// unknown type from a `<data>` element, or if it uses a construct the
+/// generator does not support yet (see [`CodegenError::Unsupported`]).
 pub fn generate_from_xml(xml: &str) -> Result<String, CodegenError> {
     let schema = ironsbe_schema::parse_schema(xml)?;
     let ir = ironsbe_schema::SchemaIr::from_schema(&schema);
     let generator = Generator::new(&ir);
-    Ok(generator.generate())
+    generator.generate()
 }
 
 /// Generates Rust code from an SBE XML schema file.

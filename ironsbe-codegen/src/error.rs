@@ -32,10 +32,25 @@ pub enum CodegenError {
         /// Field name.
         field: String,
     },
+
+    /// Schema construct the generator cannot emit correct code for yet.
+    ///
+    /// Emitted instead of silently producing an incomplete module, so a
+    /// consumer never gets a codec that compiles but cannot round-trip its
+    /// own messages.
+    #[error("unsupported: {feature} ({context})")]
+    Unsupported {
+        /// Human-readable name of the unsupported construct,
+        /// e.g. `<data> inside repeating group`.
+        feature: String,
+        /// Where it was found, e.g. `message 'Quote', group 'legs'`.
+        context: String,
+    },
 }
 
 impl CodegenError {
     /// Creates a generation error with the given message.
+    #[cold]
     pub fn generation(message: impl Into<String>) -> Self {
         Self::Generation {
             message: message.into(),
@@ -43,10 +58,24 @@ impl CodegenError {
     }
 
     /// Creates an unknown type error.
+    #[cold]
     pub fn unknown_type(type_name: impl Into<String>, field: impl Into<String>) -> Self {
         Self::UnknownType {
             type_name: type_name.into(),
             field: field.into(),
+        }
+    }
+
+    /// Creates an unsupported-construct error.
+    ///
+    /// # Arguments
+    /// * `feature` - Name of the unsupported schema construct
+    /// * `context` - Message / group where it was found
+    #[cold]
+    pub fn unsupported(feature: impl Into<String>, context: impl Into<String>) -> Self {
+        Self::Unsupported {
+            feature: feature.into(),
+            context: context.into(),
         }
     }
 }
@@ -77,5 +106,18 @@ mod tests {
         let err = CodegenError::generation("test");
         let debug_str = format!("{:?}", err);
         assert!(debug_str.contains("Generation"));
+    }
+
+    #[test]
+    fn test_codegen_error_unsupported_display_contains_feature_and_context() {
+        let err = CodegenError::unsupported(
+            "<data> inside repeating group",
+            "message 'Quote', group 'legs'",
+        );
+        let msg = err.to_string();
+        assert!(msg.starts_with("unsupported: "), "got: {msg}");
+        assert!(msg.contains("<data> inside repeating group"));
+        assert!(msg.contains("message 'Quote', group 'legs'"));
+        assert!(matches!(err, CodegenError::Unsupported { .. }));
     }
 }
