@@ -7,6 +7,30 @@ use ironsbe_schema::types::PrimitiveType;
 
 use crate::error::CodegenError;
 
+/// Resolved wire layout of one `<data>` (variable-length) field.
+///
+/// Built from the composite the field references (`varStringEncoding`,
+/// `varDataEncoding`, ...): the `length` member decides how wide the length
+/// header is on the wire and which buffer accessors read and write it.
+struct VarDataInfo {
+    /// Original schema name, used in doc comments.
+    name: String,
+    /// snake_case base name for the generated accessors.
+    accessor: String,
+    /// Field ID from the schema.
+    id: u16,
+    /// SBE name of the length primitive (`uint16`), used in doc comments.
+    length_type: &'static str,
+    /// Rust type of the length primitive (`u16`).
+    length_rust_type: &'static str,
+    /// Encoded width of the length header in bytes (1, 2 or 4).
+    header_length: usize,
+    /// `ReadBuffer` method that reads the length header.
+    read_method: &'static str,
+    /// `WriteBuffer` method that writes the length header.
+    write_method: &'static str,
+}
+
 /// Generator for message encoders and decoders.
 pub struct MessageGenerator<'a> {
     ir: &'a SchemaIr,
@@ -30,8 +54,11 @@ impl<'a> MessageGenerator<'a> {
         let mut output = String::new();
 
         for msg in &self.ir.messages {
-            output.push_str(&self.generate_decoder(msg));
-            output.push_str(&self.generate_encoder(msg));
+            Self::validate_groups(msg)?;
+            let var_data = self.resolve_var_data(msg)?;
+
+            output.push_str(&self.generate_decoder(msg, &var_data));
+            output.push_str(&self.generate_encoder(msg, &var_data));
 
             // Generate group decoders and encoders in a message-scoped module
             if !msg.groups.is_empty() {
@@ -50,8 +77,103 @@ impl<'a> MessageGenerator<'a> {
         Ok(output)
     }
 
+    /// Rejects group layouts the generated codecs cannot place correctly.
+    ///
+    /// Group entries are emitted with a fixed `blockLength` stride, so any
+    /// `<data>` inside a group (at any depth) cannot be positioned. A message
+    /// that carries var data after a group with nested groups has the same
+    /// problem: the var data offset walk assumes flat entries.
+    fn validate_groups(msg: &ResolvedMessage) -> Result<(), CodegenError> {
+        if let Some(group) = Self::find_group_with_var_data(&msg.groups) {
+            return Err(CodegenError::unsupported(
+                "<data> inside repeating group",
+                format!("message '{}', group '{}'", msg.name, group.name),
+            ));
+        }
+
+        if !msg.var_data.is_empty()
+            && let Some(group) = msg.groups.iter().find(|g| !g.nested_groups.is_empty())
+        {
+            return Err(CodegenError::unsupported(
+                "<data> after a repeating group with nested groups",
+                format!("message '{}', group '{}'", msg.name, group.name),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Depth-first search for a group that declares `<data>` fields.
+    fn find_group_with_var_data(groups: &[ResolvedGroup]) -> Option<&ResolvedGroup> {
+        groups.iter().find_map(|g| {
+            if g.var_data.is_empty() {
+                Self::find_group_with_var_data(&g.nested_groups)
+            } else {
+                Some(g)
+            }
+        })
+    }
+
+    /// Resolves the length-header layout of every `<data>` field in `msg`.
+    fn resolve_var_data(&self, msg: &ResolvedMessage) -> Result<Vec<VarDataInfo>, CodegenError> {
+        msg.var_data
+            .iter()
+            .map(|vd| {
+                let context = format!("message '{}', data '{}'", msg.name, vd.name);
+                let field_path = format!("{}.{}", msg.name, vd.name);
+
+                let resolved = self
+                    .ir
+                    .get_type(&vd.type_name)
+                    .ok_or_else(|| CodegenError::unknown_type(&vd.type_name, &field_path))?;
+
+                let TypeKind::Composite { fields } = &resolved.kind else {
+                    return Err(CodegenError::unsupported(
+                        format!("var data type '{}' is not a composite", vd.type_name),
+                        context,
+                    ));
+                };
+
+                let length_field = fields
+                    .iter()
+                    .find(|f| f.name.eq_ignore_ascii_case("length"))
+                    .or_else(|| fields.first())
+                    .ok_or_else(|| {
+                        CodegenError::unsupported(
+                            format!("var data type '{}' has no length member", vd.type_name),
+                            context.clone(),
+                        )
+                    })?;
+
+                let (header_length, read_method, write_method, length_rust_type, length_type) =
+                    match length_field.primitive_type {
+                        PrimitiveType::Uint8 => (1, "get_u8", "put_u8", "u8", "uint8"),
+                        PrimitiveType::Uint16 => (2, "get_u16_le", "put_u16_le", "u16", "uint16"),
+                        PrimitiveType::Uint32 => (4, "get_u32_le", "put_u32_le", "u32", "uint32"),
+                        other => {
+                            return Err(CodegenError::unsupported(
+                                format!("var data length encoding '{}'", other.sbe_name()),
+                                context,
+                            ));
+                        }
+                    };
+
+                Ok(VarDataInfo {
+                    name: vd.name.clone(),
+                    accessor: to_snake_case(&vd.name),
+                    id: vd.id,
+                    length_type,
+                    length_rust_type,
+                    header_length,
+                    read_method,
+                    write_method,
+                })
+            })
+            .collect()
+    }
+
     /// Generates a message decoder.
-    fn generate_decoder(&self, msg: &ResolvedMessage) -> String {
+    fn generate_decoder(&self, msg: &ResolvedMessage, var_data: &[VarDataInfo]) -> String {
         let mut output = String::new();
         let decoder_name = msg.decoder_name();
 
@@ -99,11 +221,23 @@ impl<'a> MessageGenerator<'a> {
             output.push_str(&self.generate_field_getter(field));
         }
 
-        // Group accessors
-        let mut group_offset = msg.block_length as usize;
-        for group in &msg.groups {
-            output.push_str(&self.generate_group_accessor(group, group_offset, &msg.name));
-            group_offset += 4; // Group header size
+        // Group accessors. Groups follow the fixed block back to back, so the
+        // offset of group `i` depends on the entry counts of groups `0..i`
+        // and has to be walked on the wire.
+        if !msg.groups.is_empty() {
+            output.push_str(&Self::generate_group_offset_helper());
+        }
+        for (index, group) in msg.groups.iter().enumerate() {
+            output.push_str(&Self::generate_group_accessor(group, index, &msg.name));
+        }
+
+        // Var data accessors (after all groups, in schema order)
+        for index in 0..var_data.len() {
+            output.push_str(&Self::generate_var_data_getter(
+                index,
+                var_data,
+                msg.groups.len(),
+            ));
         }
 
         output.push_str("}\n\n");
@@ -130,10 +264,175 @@ impl<'a> MessageGenerator<'a> {
         output.push_str("        Self::wrap(buffer, offset, acting_version)\n");
         output.push_str("    }\n\n");
 
-        output.push_str("    fn encoded_length(&self) -> usize {\n");
-        output.push_str("        MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize\n");
-        output.push_str("    }\n");
+        output.push_str(&Self::generate_decoder_encoded_length(
+            var_data,
+            msg.groups.len(),
+        ));
         output.push_str("}\n\n");
+
+        output
+    }
+
+    /// Generates the private `group_offset(index)` walker on a message decoder.
+    ///
+    /// Shared by the group accessors, the var data accessors and
+    /// `encoded_length`.
+    fn generate_group_offset_helper() -> String {
+        let mut output = String::new();
+
+        output.push_str(
+            "    /// Byte offset of the header of the `index`-th repeating group (0-based).\n",
+        );
+        output.push_str("    ///\n");
+        output.push_str("    /// Walks the preceding group headers on the wire, so the cost is\n");
+        output.push_str(
+            "    /// O(`index`) header reads. Entries are exactly `blockLength` bytes.\n",
+        );
+        output.push_str("    #[inline]\n");
+        output.push_str("    fn group_offset(&self, index: usize) -> usize {\n");
+        output.push_str("        let mut pos = self.offset + Self::BLOCK_LENGTH as usize;\n");
+        output.push_str("        for _ in 0..index {\n");
+        output.push_str("            pos += GroupHeader::wrap(self.buffer, pos).group_size();\n");
+        output.push_str("        }\n");
+        output.push_str("        pos\n");
+        output.push_str("    }\n\n");
+
+        output
+    }
+
+    /// Generates the private `<name>_offset()` helper plus the public slice
+    /// and string accessors for the `index`-th var data field of a message.
+    fn generate_var_data_getter(
+        index: usize,
+        var_data: &[VarDataInfo],
+        group_count: usize,
+    ) -> String {
+        let mut output = String::new();
+        let Some(info) = var_data.get(index) else {
+            return output;
+        };
+
+        // Offset helper: first var data field starts after the last group
+        // (or after the fixed block); each later field starts after the
+        // previous field's header + payload.
+        output.push_str(&format!(
+            "    /// Byte offset of the length header of var data field `{}`.\n",
+            info.name
+        ));
+        output.push_str("    #[inline]\n");
+        output.push_str(&format!(
+            "    fn {}_offset(&self) -> usize {{\n",
+            info.accessor
+        ));
+        match index.checked_sub(1).and_then(|i| var_data.get(i)) {
+            Some(prev) => {
+                output.push_str(&format!(
+                    "        let pos = self.{}_offset();\n",
+                    prev.accessor
+                ));
+                output.push_str(&format!(
+                    "        pos + {} + self.buffer.{}(pos) as usize\n",
+                    prev.header_length, prev.read_method
+                ));
+            }
+            None if group_count > 0 => {
+                output.push_str(&format!("        self.group_offset({})\n", group_count));
+            }
+            None => {
+                output.push_str("        self.offset + Self::BLOCK_LENGTH as usize\n");
+            }
+        }
+        output.push_str("    }\n\n");
+
+        // Slice accessor
+        output.push_str(&format!(
+            "    /// Var data field: {} (id={}, length header: {}).\n",
+            info.name, info.id, info.length_type
+        ));
+        output.push_str("    ///\n");
+        output.push_str(
+            "    /// Returns the raw bytes. Var data fields follow all repeating groups\n",
+        );
+        output.push_str("    /// in schema order.\n");
+        output.push_str("    ///\n");
+        output.push_str("    /// # Panics\n");
+        output.push_str(
+            "    /// Panics if the buffer is shorter than the encoded length header claims.\n",
+        );
+        output.push_str("    #[inline]\n");
+        output.push_str("    #[must_use]\n");
+        output.push_str(&format!(
+            "    pub fn {}(&self) -> &'a [u8] {{\n",
+            info.accessor
+        ));
+        output.push_str(&format!(
+            "        let pos = self.{}_offset();\n",
+            info.accessor
+        ));
+        output.push_str(&format!(
+            "        let len = self.buffer.{}(pos) as usize;\n",
+            info.read_method
+        ));
+        output.push_str(&format!(
+            "        let start = pos + {};\n",
+            info.header_length
+        ));
+        output.push_str("        &self.buffer[start..start + len]\n");
+        output.push_str("    }\n\n");
+
+        // String accessor
+        output.push_str(&format!(
+            "    /// Var data field `{}` as UTF-8 (empty string if not valid UTF-8).\n",
+            info.name
+        ));
+        output.push_str("    #[inline]\n");
+        output.push_str("    #[must_use]\n");
+        output.push_str(&format!(
+            "    pub fn {}_as_str(&self) -> &'a str {{\n",
+            info.accessor
+        ));
+        output.push_str(&format!(
+            "        std::str::from_utf8(self.{}()).unwrap_or(\"\")\n",
+            info.accessor
+        ));
+        output.push_str("    }\n\n");
+
+        output
+    }
+
+    /// Generates `SbeDecoder::encoded_length` for a message decoder.
+    ///
+    /// Covers header + fixed block + every repeating group + every var data
+    /// field, reading the variable parts from the wire.
+    fn generate_decoder_encoded_length(var_data: &[VarDataInfo], group_count: usize) -> String {
+        let mut output = String::new();
+
+        output.push_str("    fn encoded_length(&self) -> usize {\n");
+        match var_data.last() {
+            Some(last) => {
+                output.push_str(&format!(
+                    "        let pos = self.{}_offset();\n",
+                    last.accessor
+                ));
+                output.push_str(&format!(
+                    "        let end = pos + {} + self.buffer.{}(pos) as usize;\n",
+                    last.header_length, last.read_method
+                ));
+                output.push_str("        MessageHeader::ENCODED_LENGTH + (end - self.offset)\n");
+            }
+            None if group_count > 0 => {
+                output.push_str(&format!(
+                    "        MessageHeader::ENCODED_LENGTH + (self.group_offset({}) - self.offset)\n",
+                    group_count
+                ));
+            }
+            None => {
+                output.push_str(
+                    "        MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize\n",
+                );
+            }
+        }
+        output.push_str("    }\n");
 
         output
     }
@@ -263,12 +562,10 @@ impl<'a> MessageGenerator<'a> {
     }
 
     /// Generates a group accessor method.
-    fn generate_group_accessor(
-        &self,
-        group: &ResolvedGroup,
-        offset: usize,
-        msg_name: &str,
-    ) -> String {
+    ///
+    /// `index` is the 0-based position of the group in the message; the
+    /// accessor resolves its byte offset through `group_offset(index)`.
+    fn generate_group_accessor(group: &ResolvedGroup, index: usize, msg_name: &str) -> String {
         let mut output = String::new();
         let qualified = format!("{}::{}", to_snake_case(msg_name), group.decoder_name());
 
@@ -281,8 +578,8 @@ impl<'a> MessageGenerator<'a> {
             qualified
         ));
         output.push_str(&format!(
-            "        {}::wrap(self.buffer, self.offset + {})\n",
-            qualified, offset
+            "        {}::wrap(self.buffer, self.group_offset({}))\n",
+            qualified, index
         ));
         output.push_str("    }\n\n");
 
@@ -290,15 +587,20 @@ impl<'a> MessageGenerator<'a> {
     }
 
     /// Generates a message encoder.
-    fn generate_encoder(&self, msg: &ResolvedMessage) -> String {
+    fn generate_encoder(&self, msg: &ResolvedMessage, var_data: &[VarDataInfo]) -> String {
         let mut output = String::new();
         let encoder_name = msg.encoder_name();
 
         // Struct definition
         output.push_str(&format!("/// {} Encoder.\n", msg.name));
+        output.push_str("///\n");
+        output.push_str("/// Fixed fields are written at their schema offsets. Repeating groups\n");
+        output.push_str("/// and var data fields are appended at a write cursor (`limit`) and\n");
+        output.push_str("/// must be written in schema order.\n");
         output.push_str(&format!("pub struct {}<'a> {{\n", encoder_name));
         output.push_str("    buffer: &'a mut [u8],\n");
         output.push_str("    offset: usize,\n");
+        output.push_str("    limit: usize,\n");
         output.push_str("}\n\n");
 
         // Implementation
@@ -316,9 +618,14 @@ impl<'a> MessageGenerator<'a> {
 
         // Constructor
         output.push_str("    /// Wraps a buffer for encoding, writing the header.\n");
+        output.push_str("    ///\n");
+        output.push_str("    /// The write cursor starts right after the fixed block.\n");
         output.push_str("    #[inline]\n");
         output.push_str("    pub fn wrap(buffer: &'a mut [u8], offset: usize) -> Self {\n");
-        output.push_str("        let mut encoder = Self { buffer, offset };\n");
+        output.push_str(
+            "        let limit = offset + MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize;\n",
+        );
+        output.push_str("        let mut encoder = Self { buffer, offset, limit };\n");
         output.push_str("        encoder.write_header();\n");
         output.push_str("        encoder\n");
         output.push_str("    }\n\n");
@@ -335,10 +642,13 @@ impl<'a> MessageGenerator<'a> {
         output.push_str("    }\n\n");
 
         // Encoded length
-        output.push_str("    /// Returns the encoded length of the message.\n");
+        output.push_str("    /// Returns the encoded length of the message so far: header,\n");
+        output.push_str("    /// fixed block, and every repeating group and var data field\n");
+        output.push_str("    /// written through this encoder.\n");
+        output.push_str("    #[inline]\n");
         output.push_str("    #[must_use]\n");
         output.push_str("    pub const fn encoded_length(&self) -> usize {\n");
-        output.push_str("        MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize\n");
+        output.push_str("        self.limit - self.offset\n");
         output.push_str("    }\n\n");
 
         // Field setters
@@ -346,14 +656,66 @@ impl<'a> MessageGenerator<'a> {
             output.push_str(&self.generate_field_setter(field));
         }
 
-        // Group encoder accessors
-        let mut group_offset = msg.block_length as usize;
+        // Group encoder accessors (advance the write cursor)
         for group in &msg.groups {
-            output.push_str(&self.generate_group_encoder_accessor(group, group_offset, &msg.name));
-            group_offset += 4; // Group header size
+            output.push_str(&Self::generate_group_encoder_accessor(group, &msg.name));
+        }
+
+        // Var data setters (append at the write cursor)
+        for info in var_data {
+            output.push_str(&Self::generate_var_data_setter(info));
         }
 
         output.push_str("}\n\n");
+
+        output
+    }
+
+    /// Generates `set_<name>` for one var data field on a message encoder.
+    fn generate_var_data_setter(info: &VarDataInfo) -> String {
+        let mut output = String::new();
+
+        output.push_str(&format!(
+            "    /// Set var data field: {} (id={}, length header: {}).\n",
+            info.name, info.id, info.length_type
+        ));
+        output.push_str("    ///\n");
+        output.push_str(
+            "    /// Appends the length header followed by `value` at the write cursor.\n",
+        );
+        output.push_str("    /// Var data fields must be written in schema order, after all\n");
+        output.push_str("    /// repeating groups.\n");
+        output.push_str("    ///\n");
+        output.push_str("    /// # Panics\n");
+        output
+            .push_str("    /// Panics if `value.len()` does not fit in the length header, or if\n");
+        output.push_str("    /// the buffer is too short.\n");
+        output.push_str("    #[inline]\n");
+        output.push_str(&format!(
+            "    pub fn set_{}(&mut self, value: &[u8]) -> &mut Self {{\n",
+            info.accessor
+        ));
+        output.push_str(&format!(
+            "        let Ok(len) = {}::try_from(value.len()) else {{\n",
+            info.length_rust_type
+        ));
+        output.push_str(&format!(
+            "            panic!(\"var data field '{}': length {{}} exceeds {}::MAX\", value.len());\n",
+            info.name, info.length_rust_type
+        ));
+        output.push_str("        };\n");
+        output.push_str(&format!(
+            "        self.buffer.{}(self.limit, len);\n",
+            info.write_method
+        ));
+        output.push_str(&format!(
+            "        let start = self.limit + {};\n",
+            info.header_length
+        ));
+        output.push_str("        self.buffer.put_bytes(start, value);\n");
+        output.push_str("        self.limit = start + value.len();\n");
+        output.push_str("        self\n");
+        output.push_str("    }\n\n");
 
         output
     }
@@ -796,12 +1158,11 @@ impl<'a> MessageGenerator<'a> {
     }
 
     /// Generates a group encoder accessor on the parent message encoder.
-    fn generate_group_encoder_accessor(
-        &self,
-        group: &ResolvedGroup,
-        offset: usize,
-        msg_name: &str,
-    ) -> String {
+    ///
+    /// The group is placed at the current write cursor, and the cursor is
+    /// advanced past the header and `count` entries so the next group or var
+    /// data field lands right after it.
+    fn generate_group_encoder_accessor(group: &ResolvedGroup, msg_name: &str) -> String {
         let mut output = String::new();
         let qualified = format!("{}::{}", to_snake_case(msg_name), group.encoder_name());
 
@@ -809,14 +1170,23 @@ impl<'a> MessageGenerator<'a> {
             "    /// Begin encoding the {} repeating group.\n",
             group.name
         ));
+        output.push_str("    ///\n");
+        output.push_str(
+            "    /// Advances the write cursor past the group header and `count` entries.\n",
+        );
         output.push_str(&format!(
             "    pub fn {}_count(&mut self, count: u16) -> {}<'_> {{\n",
             to_snake_case(&group.name),
             qualified
         ));
+        output.push_str("        let offset = self.limit;\n");
         output.push_str(&format!(
-            "        {}::wrap(&mut *self.buffer, self.offset + MessageHeader::ENCODED_LENGTH + {}, count)\n",
-            qualified, offset
+            "        self.limit += GroupHeader::ENCODED_LENGTH + {}::BLOCK_LENGTH as usize * count as usize;\n",
+            qualified
+        ));
+        output.push_str(&format!(
+            "        {}::wrap(&mut *self.buffer, offset, count)\n",
+            qualified
         ));
         output.push_str("    }\n\n");
 
@@ -1312,5 +1682,399 @@ mod tests {
             entry_section.contains("pub fn wrap("),
             "EntryEncoder::wrap should be pub for external consumers"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Var data (<data>) generation, issue #59
+    // ---------------------------------------------------------------------
+
+    const VAR_DATA_TYPES: &str = r#"
+        <type name="uint8" primitiveType="uint8"/>
+        <type name="uint16" primitiveType="uint16"/>
+        <type name="uint32" primitiveType="uint32"/>
+        <type name="uint64" primitiveType="uint64"/>
+        <type name="int64" primitiveType="int64"/>
+        <composite name="varStringEncoding">
+            <type name="length" primitiveType="uint16"/>
+            <type name="varData" primitiveType="uint8" length="0" characterEncoding="UTF-8"/>
+        </composite>
+        <composite name="varDataEncoding8">
+            <type name="length" primitiveType="uint8"/>
+            <type name="varData" primitiveType="uint8" length="0"/>
+        </composite>
+        <composite name="varDataEncoding32">
+            <type name="length" primitiveType="uint32"/>
+            <type name="varData" primitiveType="uint8" length="0"/>
+        </composite>
+        <composite name="varDataEncoding64">
+            <type name="length" primitiveType="int64"/>
+            <type name="varData" primitiveType="uint8" length="0"/>
+        </composite>"#;
+
+    fn schema_with(messages: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="test" id="1" version="1" byteOrder="littleEndian">
+    <types>{VAR_DATA_TYPES}</types>
+    {messages}
+</sbe:messageSchema>"#
+        )
+    }
+
+    fn generate(messages: &str) -> Result<String, CodegenError> {
+        let xml = schema_with(messages);
+        let schema = parse_schema(&xml).expect("Failed to parse schema");
+        let ir = SchemaIr::from_schema(&schema);
+        MessageGenerator::new(&ir).generate()
+    }
+
+    fn generate_ok(messages: &str) -> String {
+        generate(messages).expect("codegen failed")
+    }
+
+    /// One fixed field, one flat group, then a uint16 and a uint8 var data field.
+    const MSG_GROUP_AND_VAR_DATA: &str = r#"
+    <sbe:message name="Quote" id="1" blockLength="8">
+        <field name="qty" id="1" type="uint64" offset="0"/>
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="legId" id="11" type="uint64" offset="0"/>
+        </group>
+        <data name="label" id="2" type="varStringEncoding"/>
+        <data name="payload" id="3" type="varDataEncoding8"/>
+    </sbe:message>"#;
+
+    /// No groups, one uint32-length var data field.
+    const MSG_ONLY_VAR_DATA: &str = r#"
+    <sbe:message name="Blob" id="2" blockLength="0">
+        <data name="rawData" id="1" type="varDataEncoding32"/>
+    </sbe:message>"#;
+
+    /// Two flat groups, no var data.
+    const MSG_TWO_GROUPS: &str = r#"
+    <sbe:message name="ListOrders" id="3" blockLength="8">
+        <field name="requestId" id="1" type="uint64" offset="0"/>
+        <group name="orders" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="orderId" id="11" type="uint64" offset="0"/>
+        </group>
+        <group name="fills" id="20" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="fillId" id="21" type="uint64" offset="0"/>
+        </group>
+    </sbe:message>"#;
+
+    /// Fixed fields only.
+    const MSG_FIXED_ONLY: &str = r#"
+    <sbe:message name="Ping" id="4" blockLength="8">
+        <field name="ts" id="1" type="uint64" offset="0"/>
+    </sbe:message>"#;
+
+    fn section<'a>(code: &'a str, start: &str, end: &str) -> &'a str {
+        let from = code
+            .find(start)
+            .unwrap_or_else(|| panic!("missing '{start}'"));
+        let rest = &code[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("missing '{end}' after '{start}'"));
+        &rest[..to]
+    }
+
+    #[test]
+    fn test_var_data_decoder_emits_slice_and_str_accessors() {
+        let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
+        let decoder = section(&code, "impl<'a> QuoteDecoder<'a>", "impl<'a> SbeDecoder");
+
+        assert!(decoder.contains("fn label_offset(&self) -> usize"));
+        assert!(decoder.contains("pub fn label(&self) -> &'a [u8]"));
+        assert!(decoder.contains("pub fn label_as_str(&self) -> &'a str"));
+        assert!(decoder.contains("std::str::from_utf8(self.label()).unwrap_or(\"\")"));
+        assert!(decoder.contains("pub fn payload(&self) -> &'a [u8]"));
+        assert!(decoder.contains("pub fn payload_as_str(&self) -> &'a str"));
+        assert!(decoder.contains("/// Var data field: label (id=2, length header: uint16)."));
+    }
+
+    #[test]
+    fn test_var_data_encoder_emits_setter_and_limit_cursor() {
+        let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
+        let encoder = section(&code, "pub struct QuoteEncoder<'a>", "/// Types for Quote");
+
+        assert!(encoder.contains("    limit: usize,\n"));
+        assert!(encoder.contains(
+            "let limit = offset + MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize;"
+        ));
+        assert!(encoder.contains(
+            "pub const fn encoded_length(&self) -> usize {\n        self.limit - self.offset"
+        ));
+        assert!(encoder.contains("pub fn set_label(&mut self, value: &[u8]) -> &mut Self"));
+        assert!(encoder.contains("let Ok(len) = u16::try_from(value.len()) else {"));
+        assert!(encoder.contains("exceeds u16::MAX"));
+        assert!(encoder.contains("self.buffer.put_u16_le(self.limit, len);"));
+        assert!(encoder.contains("let start = self.limit + 2;"));
+        assert!(encoder.contains("self.buffer.put_bytes(start, value);"));
+        assert!(encoder.contains("self.limit = start + value.len();"));
+        assert!(encoder.contains("pub fn set_payload(&mut self, value: &[u8]) -> &mut Self"));
+        assert!(encoder.contains("self.buffer.put_u8(self.limit, len);"));
+        assert!(encoder.contains("let start = self.limit + 1;"));
+    }
+
+    #[test]
+    fn test_var_data_header_width_uint8_uses_get_u8() {
+        let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
+        let getter = section(&code, "pub fn payload(&self)", "pub fn payload_as_str");
+
+        assert!(getter.contains("let len = self.buffer.get_u8(pos) as usize;"));
+        assert!(getter.contains("let start = pos + 1;"));
+    }
+
+    #[test]
+    fn test_var_data_header_width_uint16_uses_get_u16_le() {
+        let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
+        let getter = section(&code, "pub fn label(&self)", "pub fn label_as_str");
+
+        assert!(getter.contains("let len = self.buffer.get_u16_le(pos) as usize;"));
+        assert!(getter.contains("let start = pos + 2;"));
+    }
+
+    #[test]
+    fn test_var_data_header_width_uint32_uses_get_u32_le() {
+        let code = generate_ok(MSG_ONLY_VAR_DATA);
+
+        assert!(code.contains("pub fn raw_data(&self) -> &'a [u8]"));
+        assert!(code.contains("let len = self.buffer.get_u32_le(pos) as usize;"));
+        assert!(code.contains("let start = pos + 4;"));
+        assert!(code.contains("let Ok(len) = u32::try_from(value.len()) else {"));
+        assert!(code.contains("self.buffer.put_u32_le(self.limit, len);"));
+    }
+
+    #[test]
+    fn test_var_data_offset_chain_follows_last_group() {
+        let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
+
+        let label = section(&code, "fn label_offset(&self)", "/// Var data field: label");
+        assert!(
+            label.contains("self.group_offset(1)"),
+            "first var data field must start after the last (1) group: {label}"
+        );
+
+        let payload = section(
+            &code,
+            "fn payload_offset(&self)",
+            "/// Var data field: payload",
+        );
+        assert!(payload.contains("let pos = self.label_offset();"));
+        assert!(payload.contains("pos + 2 + self.buffer.get_u16_le(pos) as usize"));
+    }
+
+    #[test]
+    fn test_var_data_without_groups_starts_after_block() {
+        let code = generate_ok(MSG_ONLY_VAR_DATA);
+        let offset = section(
+            &code,
+            "fn raw_data_offset(&self)",
+            "/// Var data field: rawData",
+        );
+
+        assert!(offset.contains("self.offset + Self::BLOCK_LENGTH as usize"));
+        assert!(!code.contains("fn group_offset("), "no groups, no walker");
+    }
+
+    #[test]
+    fn test_multiple_groups_use_group_offset_walk() {
+        let code = generate_ok(MSG_TWO_GROUPS);
+
+        assert!(code.contains("fn group_offset(&self, index: usize) -> usize"));
+        assert!(code.contains("pos += GroupHeader::wrap(self.buffer, pos).group_size();"));
+        assert!(
+            code.contains(
+                "list_orders::OrdersGroupDecoder::wrap(self.buffer, self.group_offset(0))"
+            )
+        );
+        assert!(
+            code.contains(
+                "list_orders::FillsGroupDecoder::wrap(self.buffer, self.group_offset(1))"
+            )
+        );
+
+        // Encoder places each group at the cursor and advances it.
+        assert!(code.contains("let offset = self.limit;"));
+        assert!(code.contains(
+            "self.limit += GroupHeader::ENCODED_LENGTH + list_orders::OrdersGroupEncoder::BLOCK_LENGTH as usize * count as usize;"
+        ));
+        assert!(code.contains(
+            "self.limit += GroupHeader::ENCODED_LENGTH + list_orders::FillsGroupEncoder::BLOCK_LENGTH as usize * count as usize;"
+        ));
+        assert!(
+            code.contains("list_orders::FillsGroupEncoder::wrap(&mut *self.buffer, offset, count)")
+        );
+    }
+
+    #[test]
+    fn test_encoded_length_includes_groups_and_var_data() {
+        let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
+        let decoder_impl = section(
+            &code,
+            "impl<'a> SbeDecoder<'a> for QuoteDecoder",
+            "/// Quote Encoder",
+        );
+        assert!(decoder_impl.contains("let pos = self.payload_offset();"));
+        assert!(decoder_impl.contains("let end = pos + 1 + self.buffer.get_u8(pos) as usize;"));
+        assert!(decoder_impl.contains("MessageHeader::ENCODED_LENGTH + (end - self.offset)"));
+    }
+
+    #[test]
+    fn test_encoded_length_groups_only_walks_all_groups() {
+        let code = generate_ok(MSG_TWO_GROUPS);
+        let decoder_impl = section(
+            &code,
+            "impl<'a> SbeDecoder<'a> for ListOrdersDecoder",
+            "/// ListOrders Encoder",
+        );
+        assert!(
+            decoder_impl
+                .contains("MessageHeader::ENCODED_LENGTH + (self.group_offset(2) - self.offset)")
+        );
+    }
+
+    #[test]
+    fn test_encoded_length_fixed_only_stays_constant() {
+        let code = generate_ok(MSG_FIXED_ONLY);
+        let decoder_impl = section(
+            &code,
+            "impl<'a> SbeDecoder<'a> for PingDecoder",
+            "/// Ping Encoder",
+        );
+        assert!(
+            decoder_impl.contains("MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize")
+        );
+        assert!(
+            !code.contains("_offset(&self)"),
+            "no var data helpers expected"
+        );
+    }
+
+    #[test]
+    fn test_var_data_in_group_returns_unsupported_err() {
+        let err = generate(
+            r#"
+    <sbe:message name="Quote" id="1" blockLength="0">
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="legId" id="11" type="uint64" offset="0"/>
+            <data name="note" id="12" type="varStringEncoding"/>
+        </group>
+    </sbe:message>"#,
+        )
+        .expect_err("var data inside a group must be rejected");
+
+        assert!(matches!(err, CodegenError::Unsupported { .. }), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("<data> inside repeating group"), "{msg}");
+        assert!(msg.contains("message 'Quote', group 'legs'"), "{msg}");
+    }
+
+    #[test]
+    fn test_var_data_in_nested_group_returns_unsupported_err() {
+        let err = generate(
+            r#"
+    <sbe:message name="Quote" id="1" blockLength="0">
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="legId" id="11" type="uint64" offset="0"/>
+            <group name="fills" id="20" dimensionType="groupSizeEncoding" blockLength="8">
+                <field name="fillId" id="21" type="uint64" offset="0"/>
+                <data name="note" id="22" type="varStringEncoding"/>
+            </group>
+        </group>
+    </sbe:message>"#,
+        )
+        .expect_err("var data inside a nested group must be rejected");
+
+        assert!(matches!(err, CodegenError::Unsupported { .. }), "{err:?}");
+        assert!(err.to_string().contains("group 'fills'"), "{err}");
+    }
+
+    #[test]
+    fn test_var_data_after_nested_group_returns_unsupported_err() {
+        let err = generate(
+            r#"
+    <sbe:message name="Quote" id="1" blockLength="0">
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="legId" id="11" type="uint64" offset="0"/>
+            <group name="fills" id="20" dimensionType="groupSizeEncoding" blockLength="8">
+                <field name="fillId" id="21" type="uint64" offset="0"/>
+            </group>
+        </group>
+        <data name="label" id="2" type="varStringEncoding"/>
+    </sbe:message>"#,
+        )
+        .expect_err("var data after a group with nested groups must be rejected");
+
+        assert!(matches!(err, CodegenError::Unsupported { .. }), "{err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("<data> after a repeating group with nested groups"),
+            "{msg}"
+        );
+        assert!(msg.contains("group 'legs'"), "{msg}");
+    }
+
+    #[test]
+    fn test_nested_group_without_var_data_still_generates() {
+        let code = generate_ok(
+            r#"
+    <sbe:message name="Quote" id="1" blockLength="0">
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="legId" id="11" type="uint64" offset="0"/>
+            <group name="fills" id="20" dimensionType="groupSizeEncoding" blockLength="8">
+                <field name="fillId" id="21" type="uint64" offset="0"/>
+            </group>
+        </group>
+    </sbe:message>"#,
+        );
+        assert!(code.contains("pub struct QuoteDecoder"));
+    }
+
+    #[test]
+    fn test_var_data_unknown_type_returns_unknown_type_err() {
+        let err = generate(
+            r#"
+    <sbe:message name="Quote" id="1" blockLength="0">
+        <data name="label" id="2" type="noSuchEncoding"/>
+    </sbe:message>"#,
+        )
+        .expect_err("unknown var data type must be rejected");
+
+        assert!(matches!(err, CodegenError::UnknownType { .. }), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("noSuchEncoding"), "{msg}");
+        assert!(msg.contains("Quote.label"), "{msg}");
+    }
+
+    #[test]
+    fn test_var_data_non_composite_type_returns_unsupported_err() {
+        let err = generate(
+            r#"
+    <sbe:message name="Quote" id="1" blockLength="0">
+        <data name="label" id="2" type="uint64"/>
+    </sbe:message>"#,
+        )
+        .expect_err("primitive var data type must be rejected");
+
+        assert!(matches!(err, CodegenError::Unsupported { .. }), "{err:?}");
+        assert!(err.to_string().contains("is not a composite"), "{err}");
+    }
+
+    #[test]
+    fn test_var_data_length_int64_returns_unsupported_err() {
+        let err = generate(
+            r#"
+    <sbe:message name="Quote" id="1" blockLength="0">
+        <data name="label" id="2" type="varDataEncoding64"/>
+    </sbe:message>"#,
+        )
+        .expect_err("int64 length header must be rejected");
+
+        assert!(matches!(err, CodegenError::Unsupported { .. }), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("var data length encoding 'int64'"), "{msg}");
+        assert!(msg.contains("message 'Quote', data 'label'"), "{msg}");
     }
 }
