@@ -525,7 +525,7 @@ fn main() {
 | Composite types | ✅ |
 | Repeating groups | ✅ |
 | Nested repeating groups | ✅ |
-| Variable-length data | ✅ |
+| Variable-length data (`<data>`) | ✅ message level; `<data>` inside a repeating group is rejected at codegen time with `CodegenError::Unsupported` |
 | Optional fields (null values) | ✅ |
 | Schema versioning | ✅ |
 | Little-endian byte order | ✅ |
