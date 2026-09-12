@@ -524,8 +524,8 @@ fn main() {
 | Bitsets (sets) | ✅ |
 | Composite types | ✅ |
 | Repeating groups | ✅ |
-| Nested repeating groups | ✅ |
-| Variable-length data (`<data>`) | ✅ message level; `<data>` inside a repeating group is rejected at codegen time with `CodegenError::Unsupported` |
+| Nested repeating groups | ✅ accessors on entry codecs (`entry.<group>()` / `entry.<group>_count(n)`) |
+| Variable-length data (`<data>`) | ✅ at message level and inside repeating group entries; length headers `uint8` / `uint16` / `uint32` |
 | Optional fields (null values) | ✅ |
 | Schema versioning | ✅ |
 | Little-endian byte order | ✅ |
