@@ -92,7 +92,7 @@ impl<'g> GroupLayout<'g> {
     }
 }
 
-/// Generates the private `group_offset(index)` walker on a decoder.
+/// Generates the private `sbe_group_offset(index)` walker on a decoder.
 ///
 /// Emitted on message decoders (base = end of the root block, decoders
 /// qualified with the message module) and on entry decoders (base = end of
@@ -114,7 +114,7 @@ pub(crate) fn generate_group_offset_walker(base_expr: &str, decoders: &[String])
     output
         .push_str("    /// O(entries) per group whose entries carry nested groups or var data.\n");
     output.push_str("    #[inline]\n");
-    output.push_str("    fn group_offset(&self, index: usize) -> usize {\n");
+    output.push_str("    fn sbe_group_offset(&self, index: usize) -> usize {\n");
     output.push_str(&format!("        let mut pos = {base_expr};\n"));
     for (i, decoder) in decoders.iter().enumerate() {
         output.push_str(&format!("        if index == {i} {{\n"));
@@ -144,6 +144,14 @@ pub(crate) fn generate_group_accessor(
     let mut output = String::new();
 
     output.push_str(&format!("    /// Access {group_name} repeating group.\n"));
+    output.push_str("    ///\n");
+    output.push_str(
+        "    /// Positioning walks the preceding groups on the wire (O(1) per fixed-stride\n",
+    );
+    output.push_str(
+        "    /// group, O(entries) per variable-stride group), so on hot paths call this\n",
+    );
+    output.push_str("    /// once per message and iterate the returned decoder.\n");
     output.push_str("    #[inline]\n");
     output.push_str("    #[must_use]\n");
     output.push_str(&format!(
@@ -151,7 +159,7 @@ pub(crate) fn generate_group_accessor(
         to_snake_case(group_name)
     ));
     output.push_str(&format!(
-        "        {decoder_type}::wrap(self.buffer, self.group_offset({index}))\n"
+        "        {decoder_type}::wrap(self.buffer, self.sbe_group_offset({index}))\n"
     ));
     output.push_str("    }\n\n");
 
@@ -208,6 +216,9 @@ pub(crate) fn generate_group_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     output.push_str("    ///\n");
     if layout.is_fixed_stride() {
         output.push_str("    /// Entries are exactly `blockLength` bytes, so this is O(1).\n");
+        output.push_str("    ///\n");
+        output.push_str("    /// # Panics\n");
+        output.push_str("    /// Panics if the buffer is shorter than the group header claims.\n");
         output.push_str("    #[inline]\n");
         output.push_str("    #[must_use]\n");
         output.push_str("    pub fn end_offset(self) -> usize {\n");
@@ -219,6 +230,9 @@ pub(crate) fn generate_group_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
             "    /// Entries carry nested groups or var data, so the remaining entries\n",
         );
         output.push_str("    /// are walked on the wire.\n");
+        output.push_str("    ///\n");
+        output.push_str("    /// # Panics\n");
+        output.push_str("    /// Panics if the buffer is shorter than the wire lengths claim.\n");
         output.push_str("    #[must_use]\n");
         output.push_str("    pub fn end_offset(mut self) -> usize {\n");
         output.push_str("        for _ in self.by_ref() {}\n");
@@ -324,6 +338,9 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     output.push_str(
         "    /// Byte offset just past this entry: fixed block, nested groups and var data.\n",
     );
+    output.push_str("    ///\n");
+    output.push_str("    /// # Panics\n");
+    output.push_str("    /// Panics if the buffer is shorter than the wire lengths claim.\n");
     output.push_str("    #[inline]\n");
     output.push_str("    #[must_use]\n");
     output.push_str("    pub fn end_offset(&self) -> usize {\n");
@@ -608,6 +625,6 @@ mod tests {
     fn test_group_accessor_uses_walker_index() {
         let code = generate_group_accessor("fills", "FillsGroupDecoder", 1);
         assert!(code.contains("pub fn fills(&self) -> FillsGroupDecoder<'a> {"));
-        assert!(code.contains("FillsGroupDecoder::wrap(self.buffer, self.group_offset(1))"));
+        assert!(code.contains("FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1))"));
     }
 }

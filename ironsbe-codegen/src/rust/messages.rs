@@ -863,7 +863,7 @@ mod tests {
         let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
         let decoder = section(&code, "impl<'a> QuoteDecoder<'a>", "impl<'a> SbeDecoder");
 
-        assert!(decoder.contains("fn label_offset(&self) -> usize"));
+        assert!(decoder.contains("fn sbe_label_offset(&self) -> usize"));
         assert!(decoder.contains("pub fn label(&self) -> &'a [u8]"));
         assert!(decoder.contains("pub fn label_as_str(&self) -> &'a str"));
         assert!(decoder.contains("std::str::from_utf8(self.label()).unwrap_or(\"\")"));
@@ -929,18 +929,22 @@ mod tests {
     fn test_var_data_offset_chain_follows_last_group() {
         let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
 
-        let label = section(&code, "fn label_offset(&self)", "/// Var data field: label");
+        let label = section(
+            &code,
+            "fn sbe_label_offset(&self)",
+            "/// Var data field: label",
+        );
         assert!(
-            label.contains("self.group_offset(1)"),
+            label.contains("self.sbe_group_offset(1)"),
             "first var data field must start after the last (1) group: {label}"
         );
 
         let payload = section(
             &code,
-            "fn payload_offset(&self)",
+            "fn sbe_payload_offset(&self)",
             "/// Var data field: payload",
         );
-        assert!(payload.contains("let pos = self.label_offset();"));
+        assert!(payload.contains("let pos = self.sbe_label_offset();"));
         assert!(payload.contains("pos + 2 + self.buffer.get_u16_le(pos) as usize"));
     }
 
@@ -949,19 +953,22 @@ mod tests {
         let code = generate_ok(MSG_ONLY_VAR_DATA);
         let offset = section(
             &code,
-            "fn raw_data_offset(&self)",
+            "fn sbe_raw_data_offset(&self)",
             "/// Var data field: rawData",
         );
 
         assert!(offset.contains("self.offset + Self::BLOCK_LENGTH as usize"));
-        assert!(!code.contains("fn group_offset("), "no groups, no walker");
+        assert!(
+            !code.contains("fn sbe_group_offset("),
+            "no groups, no walker"
+        );
     }
 
     #[test]
     fn test_multiple_groups_use_group_offset_walk() {
         let code = generate_ok(MSG_TWO_GROUPS);
 
-        assert!(code.contains("fn group_offset(&self, index: usize) -> usize"));
+        assert!(code.contains("fn sbe_group_offset(&self, index: usize) -> usize"));
         assert!(
             !code.contains("group_size()"),
             "walker must go through per-group end_offset, not GroupHeader::group_size"
@@ -972,16 +979,12 @@ mod tests {
         assert!(code.contains(
             "pos = list_orders::FillsGroupDecoder::wrap(self.buffer, pos).end_offset();"
         ));
-        assert!(
-            code.contains(
-                "list_orders::OrdersGroupDecoder::wrap(self.buffer, self.group_offset(0))"
-            )
-        );
-        assert!(
-            code.contains(
-                "list_orders::FillsGroupDecoder::wrap(self.buffer, self.group_offset(1))"
-            )
-        );
+        assert!(code.contains(
+            "list_orders::OrdersGroupDecoder::wrap(self.buffer, self.sbe_group_offset(0))"
+        ));
+        assert!(code.contains(
+            "list_orders::FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1))"
+        ));
 
         // Encoder lends its cursor to each group encoder instead of pre-advancing it.
         assert!(
@@ -1035,7 +1038,7 @@ mod tests {
             "impl<'a> SbeDecoder<'a> for QuoteDecoder",
             "/// Quote Encoder",
         );
-        assert!(decoder_impl.contains("let pos = self.payload_offset();"));
+        assert!(decoder_impl.contains("let pos = self.sbe_payload_offset();"));
         assert!(decoder_impl.contains(
             "MessageHeader::ENCODED_LENGTH + (pos + 1 + self.buffer.get_u8(pos) as usize - self.offset)"
         ));
@@ -1050,8 +1053,9 @@ mod tests {
             "/// ListOrders Encoder",
         );
         assert!(
-            decoder_impl
-                .contains("MessageHeader::ENCODED_LENGTH + (self.group_offset(2) - self.offset)")
+            decoder_impl.contains(
+                "MessageHeader::ENCODED_LENGTH + (self.sbe_group_offset(2) - self.offset)"
+            )
         );
     }
 
@@ -1134,7 +1138,7 @@ mod tests {
             "pub fn end_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"
         ));
         assert!(
-            !entry.contains("fn group_offset("),
+            !entry.contains("fn sbe_group_offset("),
             "flat entry has no nested walker"
         );
     }
@@ -1156,17 +1160,17 @@ mod tests {
 
         assert!(entry.contains("pub fn leg_qty(&self) -> u32"));
         assert!(entry.contains(
-            "fn leg_tag_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"
+            "fn sbe_leg_tag_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"
         ));
         assert!(entry.contains("pub fn leg_tag(&self) -> &'a [u8]"));
         assert!(entry.contains("pub fn leg_tag_as_str(&self) -> &'a str"));
         assert!(entry.contains(
-            "fn leg_note_offset(&self) -> usize {\n        let pos = self.leg_tag_offset();\n        pos + 2 + self.buffer.get_u16_le(pos) as usize\n"
+            "fn sbe_leg_note_offset(&self) -> usize {\n        let pos = self.sbe_leg_tag_offset();\n        pos + 2 + self.buffer.get_u16_le(pos) as usize\n"
         ));
         assert!(entry.contains("pub fn leg_note(&self) -> &'a [u8]"));
         assert!(entry.contains("let len = self.buffer.get_u8(pos) as usize;"));
         assert!(entry.contains(
-            "pub fn end_offset(&self) -> usize {\n        let pos = self.leg_note_offset();\n        pos + 1 + self.buffer.get_u8(pos) as usize\n"
+            "pub fn end_offset(&self) -> usize {\n        let pos = self.sbe_leg_note_offset();\n        pos + 1 + self.buffer.get_u8(pos) as usize\n"
         ));
     }
 
@@ -1200,9 +1204,9 @@ mod tests {
         assert!(
             decoder.contains("pos = quote::LegsGroupDecoder::wrap(self.buffer, pos).end_offset();")
         );
-        assert!(
-            decoder.contains("fn comment_offset(&self) -> usize {\n        self.group_offset(1)\n")
-        );
+        assert!(decoder.contains(
+            "fn sbe_comment_offset(&self) -> usize {\n        self.sbe_group_offset(1)\n"
+        ));
         assert!(decoder.contains("pub fn comment(&self) -> &'a [u8]"));
     }
 
@@ -1216,14 +1220,18 @@ mod tests {
         );
 
         // walker over the nested groups, based on the entry's wire block length
-        assert!(entry.contains("fn group_offset(&self, index: usize) -> usize"));
+        assert!(entry.contains("fn sbe_group_offset(&self, index: usize) -> usize"));
         assert!(entry.contains("let mut pos = self.offset + self.block_length as usize;"));
         assert!(entry.contains("pos = FillsGroupDecoder::wrap(self.buffer, pos).end_offset();"));
         // nested accessor, unqualified (same module)
         assert!(entry.contains("pub fn fills(&self) -> FillsGroupDecoder<'a> {"));
-        assert!(entry.contains("FillsGroupDecoder::wrap(self.buffer, self.group_offset(0))"));
+        assert!(entry.contains("FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(0))"));
         // var data after the nested group
-        assert!(entry.contains("fn memo_offset(&self) -> usize {\n        self.group_offset(1)\n"));
+        assert!(
+            entry.contains(
+                "fn sbe_memo_offset(&self) -> usize {\n        self.sbe_group_offset(1)\n"
+            )
+        );
         assert!(entry.contains("pub fn memo(&self) -> &'a [u8]"));
 
         // inner entry: var data straight after its fixed block
@@ -1233,7 +1241,7 @@ mod tests {
             "/// orders Group Encoder",
         );
         assert!(inner.contains(
-            "fn note_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"
+            "fn sbe_note_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"
         ));
         assert!(inner.contains("pub fn note(&self) -> &'a [u8]"));
 
@@ -1244,11 +1252,12 @@ mod tests {
                 .contains("pos = nested::OrdersGroupDecoder::wrap(self.buffer, pos).end_offset();")
         );
         assert!(
-            decoder.contains("nested::FlagsGroupDecoder::wrap(self.buffer, self.group_offset(1))")
+            decoder
+                .contains("nested::FlagsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1))")
         );
-        assert!(
-            decoder.contains("fn trailer_offset(&self) -> usize {\n        self.group_offset(2)\n")
-        );
+        assert!(decoder.contains(
+            "fn sbe_trailer_offset(&self) -> usize {\n        self.sbe_group_offset(2)\n"
+        ));
     }
 
     #[test]

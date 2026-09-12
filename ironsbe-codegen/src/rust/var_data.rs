@@ -112,7 +112,7 @@ pub(crate) fn resolve_var_data(
         .collect()
 }
 
-/// Generates the private `<name>_offset()` helper plus the public slice
+/// Generates the private `sbe_<name>_offset()` helper plus the public slice
 /// and string accessors for the `index`-th var data field of an owner.
 ///
 /// # Arguments
@@ -140,13 +140,13 @@ pub(crate) fn generate_var_data_getter(
     ));
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
-        "    fn {}_offset(&self) -> usize {{\n",
+        "    fn sbe_{}_offset(&self) -> usize {{\n",
         info.accessor
     ));
     match index.checked_sub(1).and_then(|i| var_data.get(i)) {
         Some(prev) => {
             output.push_str(&format!(
-                "        let pos = self.{}_offset();\n",
+                "        let pos = self.sbe_{}_offset();\n",
                 prev.accessor
             ));
             output.push_str(&format!(
@@ -155,7 +155,7 @@ pub(crate) fn generate_var_data_getter(
             ));
         }
         None if group_count > 0 => {
-            output.push_str(&format!("        self.group_offset({})\n", group_count));
+            output.push_str(&format!("        self.sbe_group_offset({})\n", group_count));
         }
         None => {
             output.push_str(&format!("        {block_end_expr}\n"));
@@ -172,6 +172,11 @@ pub(crate) fn generate_var_data_getter(
     output.push_str("    /// Returns the raw bytes. Var data fields follow all repeating groups\n");
     output.push_str("    /// in schema order.\n");
     output.push_str("    ///\n");
+    output.push_str(
+        "    /// Positioning walks any preceding variable-stride group on each call, so\n",
+    );
+    output.push_str("    /// on hot paths read the field once and cache the slice.\n");
+    output.push_str("    ///\n");
     output.push_str("    /// # Panics\n");
     output.push_str(
         "    /// Panics if the buffer is shorter than the encoded length header claims.\n",
@@ -183,7 +188,7 @@ pub(crate) fn generate_var_data_getter(
         info.accessor
     ));
     output.push_str(&format!(
-        "        let pos = self.{}_offset();\n",
+        "        let pos = self.sbe_{}_offset();\n",
         info.accessor
     ));
     output.push_str(&format!(
@@ -230,13 +235,16 @@ pub(crate) fn end_offset_parts(
 ) -> (String, String) {
     match var_data.last() {
         Some(last) => (
-            format!("        let pos = self.{}_offset();\n", last.accessor),
+            format!("        let pos = self.sbe_{}_offset();\n", last.accessor),
             format!(
                 "pos + {} + self.buffer.{}(pos) as usize",
                 last.header_length, last.read_method
             ),
         ),
-        None if group_count > 0 => (String::new(), format!("self.group_offset({group_count})")),
+        None if group_count > 0 => (
+            String::new(),
+            format!("self.sbe_group_offset({group_count})"),
+        ),
         None => (String::new(), block_end_expr.to_string()),
     }
 }
@@ -318,7 +326,7 @@ mod tests {
     fn test_end_offset_parts_prefers_last_var_data() {
         let fields = [info("label", 2), info("payload", 1)];
         let (prelude, expr) = end_offset_parts(&fields, 3, "BLOCK_END");
-        assert_eq!(prelude, "        let pos = self.payload_offset();\n");
+        assert_eq!(prelude, "        let pos = self.sbe_payload_offset();\n");
         assert_eq!(expr, "pos + 1 + self.buffer.get_u8(pos) as usize");
     }
 
@@ -326,7 +334,7 @@ mod tests {
     fn test_end_offset_parts_falls_back_to_last_group() {
         let (prelude, expr) = end_offset_parts(&[], 2, "BLOCK_END");
         assert!(prelude.is_empty());
-        assert_eq!(expr, "self.group_offset(2)");
+        assert_eq!(expr, "self.sbe_group_offset(2)");
     }
 
     #[test]
@@ -341,7 +349,7 @@ mod tests {
         let fields = [info("rawData", 4)];
         let code =
             generate_var_data_getter(0, &fields, 0, "self.offset + self.block_length as usize");
-        assert!(code.contains("fn raw_data_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"));
+        assert!(code.contains("fn sbe_raw_data_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"));
         assert!(code.contains("pub fn raw_data(&self) -> &'a [u8]"));
         assert!(code.contains("let len = self.buffer.get_u32_le(pos) as usize;"));
     }
