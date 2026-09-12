@@ -4,15 +4,21 @@
 //! message-scoped module holding the codecs of its repeating groups. Field,
 //! var data and group emission live in sibling modules.
 
-use ironsbe_schema::ir::{ResolvedGroup, ResolvedMessage, SchemaIr, to_snake_case};
+use ironsbe_schema::ir::{ResolvedMessage, SchemaIr, to_snake_case};
 
 use crate::error::CodegenError;
 use crate::rust::fields::{generate_field_getter, generate_field_setter};
-use crate::rust::groups::{generate_group_decoder, generate_group_encoder};
-use crate::rust::var_data::{
-    VarDataInfo, generate_decoder_encoded_length, generate_var_data_getter,
-    generate_var_data_setter, resolve_var_data,
+use crate::rust::groups::{
+    GroupLayout, generate_group_accessor, generate_group_decoder, generate_group_encoder,
+    generate_group_offset_walker,
 };
+use crate::rust::var_data::{
+    VarDataInfo, end_offset_parts, generate_var_data_getter, generate_var_data_setter,
+    resolve_var_data,
+};
+
+/// Byte offset just past the root block, as seen from a message decoder.
+const MESSAGE_BLOCK_END: &str = "self.offset + Self::BLOCK_LENGTH as usize";
 
 /// Generator for message encoders and decoders.
 pub struct MessageGenerator<'a> {
@@ -30,28 +36,34 @@ impl<'a> MessageGenerator<'a> {
     ///
     /// # Errors
     /// Returns [`CodegenError::Unsupported`] for schema constructs the
-    /// generator cannot emit correct code for, and
+    /// generator cannot emit correct code for (currently var data length
+    /// headers other than `uint8` / `uint16` / `uint32`), and
     /// [`CodegenError::UnknownType`] for `<data>` elements whose type is not
     /// declared in the schema.
     pub fn generate(&self) -> Result<String, CodegenError> {
         let mut output = String::new();
 
         for msg in &self.ir.messages {
-            Self::validate_groups(msg)?;
-            let var_data = resolve_var_data(self.ir, msg)?;
+            let context = format!("message '{}'", msg.name);
+            let var_data = resolve_var_data(self.ir, &context, &msg.name, &msg.var_data)?;
+            let groups = msg
+                .groups
+                .iter()
+                .map(|g| GroupLayout::resolve(self.ir, &context, &msg.name, g))
+                .collect::<Result<Vec<_>, _>>()?;
 
-            output.push_str(&self.generate_decoder(msg, &var_data));
-            output.push_str(&self.generate_encoder(msg, &var_data));
+            output.push_str(&self.generate_decoder(msg, &groups, &var_data));
+            output.push_str(&self.generate_encoder(msg, &groups, &var_data));
 
             // Generate group decoders and encoders in a message-scoped module
-            if !msg.groups.is_empty() {
+            if !groups.is_empty() {
                 let mod_name = to_snake_case(&msg.name);
                 output.push_str(&format!("/// Types for {} repeating groups.\n", msg.name));
                 output.push_str(&format!("pub mod {} {{\n", mod_name));
                 output.push_str("    use super::*;\n\n");
-                for group in &msg.groups {
-                    output.push_str(&generate_group_decoder(self.ir, group));
-                    output.push_str(&generate_group_encoder(self.ir, group));
+                for layout in &groups {
+                    output.push_str(&generate_group_decoder(self.ir, layout));
+                    output.push_str(&generate_group_encoder(self.ir, layout));
                 }
                 output.push_str("}\n\n");
             }
@@ -60,47 +72,16 @@ impl<'a> MessageGenerator<'a> {
         Ok(output)
     }
 
-    /// Rejects group layouts the generated codecs cannot place correctly.
-    ///
-    /// Group entries are emitted with a fixed `blockLength` stride, so any
-    /// `<data>` inside a group (at any depth) cannot be positioned. A message
-    /// that carries var data after a group with nested groups has the same
-    /// problem: the var data offset walk assumes flat entries.
-    fn validate_groups(msg: &ResolvedMessage) -> Result<(), CodegenError> {
-        if let Some(group) = Self::find_group_with_var_data(&msg.groups) {
-            return Err(CodegenError::unsupported(
-                "<data> inside repeating group",
-                format!("message '{}', group '{}'", msg.name, group.name),
-            ));
-        }
-
-        if !msg.var_data.is_empty()
-            && let Some(group) = msg.groups.iter().find(|g| !g.nested_groups.is_empty())
-        {
-            return Err(CodegenError::unsupported(
-                "<data> after a repeating group with nested groups",
-                format!("message '{}', group '{}'", msg.name, group.name),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Depth-first search for a group that declares `<data>` fields.
-    fn find_group_with_var_data(groups: &[ResolvedGroup]) -> Option<&ResolvedGroup> {
-        groups.iter().find_map(|g| {
-            if g.var_data.is_empty() {
-                Self::find_group_with_var_data(&g.nested_groups)
-            } else {
-                Some(g)
-            }
-        })
-    }
-
     /// Generates a message decoder.
-    fn generate_decoder(&self, msg: &ResolvedMessage, var_data: &[VarDataInfo]) -> String {
+    fn generate_decoder(
+        &self,
+        msg: &ResolvedMessage,
+        groups: &[GroupLayout<'_>],
+        var_data: &[VarDataInfo],
+    ) -> String {
         let mut output = String::new();
         let decoder_name = msg.decoder_name();
+        let mod_name = to_snake_case(&msg.name);
 
         // Struct definition
         output.push_str(&format!("/// {} Decoder (zero-copy).\n", msg.name));
@@ -147,18 +128,31 @@ impl<'a> MessageGenerator<'a> {
         }
 
         // Group accessors. Groups follow the fixed block back to back, so the
-        // offset of group `i` depends on the entry counts of groups `0..i`
-        // and has to be walked on the wire.
-        if !msg.groups.is_empty() {
-            output.push_str(&Self::generate_group_offset_helper());
+        // offset of group `i` depends on the extent of groups `0..i` and has
+        // to be walked on the wire.
+        let qualified: Vec<String> = groups
+            .iter()
+            .map(|g| format!("{mod_name}::{}", g.group.decoder_name()))
+            .collect();
+        if !groups.is_empty() {
+            output.push_str(&generate_group_offset_walker(MESSAGE_BLOCK_END, &qualified));
         }
-        for (index, group) in msg.groups.iter().enumerate() {
-            output.push_str(&Self::generate_group_accessor(group, index, &msg.name));
+        for (index, (layout, decoder_type)) in groups.iter().zip(&qualified).enumerate() {
+            output.push_str(&generate_group_accessor(
+                &layout.group.name,
+                decoder_type,
+                index,
+            ));
         }
 
         // Var data accessors (after all groups, in schema order)
         for index in 0..var_data.len() {
-            output.push_str(&generate_var_data_getter(index, var_data, msg.groups.len()));
+            output.push_str(&generate_var_data_getter(
+                index,
+                var_data,
+                groups.len(),
+                MESSAGE_BLOCK_END,
+            ));
         }
 
         output.push_str("}\n\n");
@@ -185,66 +179,45 @@ impl<'a> MessageGenerator<'a> {
         output.push_str("        Self::wrap(buffer, offset, acting_version)\n");
         output.push_str("    }\n\n");
 
-        output.push_str(&generate_decoder_encoded_length(var_data, msg.groups.len()));
+        output.push_str(&Self::generate_decoder_encoded_length(
+            var_data,
+            groups.len(),
+        ));
         output.push_str("}\n\n");
 
         output
     }
 
-    /// Generates the private `group_offset(index)` walker on a message decoder.
+    /// Generates `SbeDecoder::encoded_length` for a message decoder.
     ///
-    /// Shared by the group accessors, the var data accessors and
-    /// `encoded_length`.
-    fn generate_group_offset_helper() -> String {
+    /// Covers header + fixed block + every repeating group + every var data
+    /// field, reading the variable parts from the wire.
+    fn generate_decoder_encoded_length(var_data: &[VarDataInfo], group_count: usize) -> String {
         let mut output = String::new();
 
-        output.push_str(
-            "    /// Byte offset of the header of the `index`-th repeating group (0-based).\n",
-        );
-        output.push_str("    ///\n");
-        output.push_str("    /// Walks the preceding group headers on the wire, so the cost is\n");
-        output.push_str(
-            "    /// O(`index`) header reads. Entries are exactly `blockLength` bytes.\n",
-        );
-        output.push_str("    #[inline]\n");
-        output.push_str("    fn group_offset(&self, index: usize) -> usize {\n");
-        output.push_str("        let mut pos = self.offset + Self::BLOCK_LENGTH as usize;\n");
-        output.push_str("        for _ in 0..index {\n");
-        output.push_str("            pos += GroupHeader::wrap(self.buffer, pos).group_size();\n");
-        output.push_str("        }\n");
-        output.push_str("        pos\n");
-        output.push_str("    }\n\n");
-
-        output
-    }
-
-    /// Generates a group accessor method.
-    ///
-    /// `index` is the 0-based position of the group in the message; the
-    /// accessor resolves its byte offset through `group_offset(index)`.
-    fn generate_group_accessor(group: &ResolvedGroup, index: usize, msg_name: &str) -> String {
-        let mut output = String::new();
-        let qualified = format!("{}::{}", to_snake_case(msg_name), group.decoder_name());
-
-        output.push_str(&format!("    /// Access {} repeating group.\n", group.name));
-        output.push_str("    #[inline]\n");
-        output.push_str("    #[must_use]\n");
-        output.push_str(&format!(
-            "    pub fn {}(&self) -> {}<'a> {{\n",
-            to_snake_case(&group.name),
-            qualified
-        ));
-        output.push_str(&format!(
-            "        {}::wrap(self.buffer, self.group_offset({}))\n",
-            qualified, index
-        ));
-        output.push_str("    }\n\n");
+        output.push_str("    fn encoded_length(&self) -> usize {\n");
+        if var_data.is_empty() && group_count == 0 {
+            output
+                .push_str("        MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize\n");
+        } else {
+            let (prelude, end_expr) = end_offset_parts(var_data, group_count, MESSAGE_BLOCK_END);
+            output.push_str(&prelude);
+            output.push_str(&format!(
+                "        MessageHeader::ENCODED_LENGTH + ({end_expr} - self.offset)\n"
+            ));
+        }
+        output.push_str("    }\n");
 
         output
     }
 
     /// Generates a message encoder.
-    fn generate_encoder(&self, msg: &ResolvedMessage, var_data: &[VarDataInfo]) -> String {
+    fn generate_encoder(
+        &self,
+        msg: &ResolvedMessage,
+        groups: &[GroupLayout<'_>],
+        var_data: &[VarDataInfo],
+    ) -> String {
         let mut output = String::new();
         let encoder_name = msg.encoder_name();
 
@@ -314,13 +287,13 @@ impl<'a> MessageGenerator<'a> {
         }
 
         // Group encoder accessors (advance the write cursor)
-        for group in &msg.groups {
-            output.push_str(&Self::generate_group_encoder_accessor(group, &msg.name));
+        for layout in groups {
+            output.push_str(&Self::generate_group_encoder_accessor(layout, &msg.name));
         }
 
         // Var data setters (append at the write cursor)
         for info in var_data {
-            output.push_str(&generate_var_data_setter(info));
+            output.push_str(&generate_var_data_setter(info, "self.limit"));
         }
 
         output.push_str("}\n\n");
@@ -333,8 +306,9 @@ impl<'a> MessageGenerator<'a> {
     /// The group is placed at the current write cursor, and the cursor is
     /// advanced past the header and `count` entries so the next group or var
     /// data field lands right after it.
-    fn generate_group_encoder_accessor(group: &ResolvedGroup, msg_name: &str) -> String {
+    fn generate_group_encoder_accessor(layout: &GroupLayout<'_>, msg_name: &str) -> String {
         let mut output = String::new();
+        let group = layout.group;
         let qualified = format!("{}::{}", to_snake_case(msg_name), group.encoder_name());
 
         output.push_str(&format!(
@@ -1020,7 +994,16 @@ mod tests {
         let code = generate_ok(MSG_TWO_GROUPS);
 
         assert!(code.contains("fn group_offset(&self, index: usize) -> usize"));
-        assert!(code.contains("pos += GroupHeader::wrap(self.buffer, pos).group_size();"));
+        assert!(
+            !code.contains("group_size()"),
+            "walker must go through per-group end_offset, not GroupHeader::group_size"
+        );
+        assert!(code.contains(
+            "pos = list_orders::OrdersGroupDecoder::wrap(self.buffer, pos).end_offset();"
+        ));
+        assert!(code.contains(
+            "pos = list_orders::FillsGroupDecoder::wrap(self.buffer, pos).end_offset();"
+        ));
         assert!(
             code.contains(
                 "list_orders::OrdersGroupDecoder::wrap(self.buffer, self.group_offset(0))"
@@ -1054,8 +1037,9 @@ mod tests {
             "/// Quote Encoder",
         );
         assert!(decoder_impl.contains("let pos = self.payload_offset();"));
-        assert!(decoder_impl.contains("let end = pos + 1 + self.buffer.get_u8(pos) as usize;"));
-        assert!(decoder_impl.contains("MessageHeader::ENCODED_LENGTH + (end - self.offset)"));
+        assert!(decoder_impl.contains(
+            "MessageHeader::ENCODED_LENGTH + (pos + 1 + self.buffer.get_u8(pos) as usize - self.offset)"
+        ));
     }
 
     #[test]
@@ -1089,48 +1073,188 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_var_data_in_group_returns_unsupported_err() {
-        let err = generate(
-            r#"
-    <sbe:message name="Quote" id="1" blockLength="0">
-        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
-            <field name="legId" id="11" type="uint64" offset="0"/>
-            <data name="note" id="12" type="varStringEncoding"/>
+    // ---------------------------------------------------------------------
+    // <data> and nested groups inside repeating groups, issue #61
+    // ---------------------------------------------------------------------
+
+    /// Issue #61 shape: a group whose entries carry a fixed field and a
+    /// uint16-length var data field, plus message-level var data after it.
+    const MSG_VAR_DATA_IN_GROUP: &str = r#"
+    <sbe:message name="Quote" id="1" blockLength="4">
+        <field name="requestId" id="1" type="uint32" offset="0"/>
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="4">
+            <field name="legQty" id="11" type="uint32" offset="0"/>
+            <data name="legTag" id="12" type="varStringEncoding"/>
+            <data name="legNote" id="13" type="varDataEncoding8"/>
         </group>
-    </sbe:message>"#,
-        )
-        .expect_err("var data inside a group must be rejected");
+        <data name="comment" id="2" type="varStringEncoding"/>
+    </sbe:message>"#;
 
-        assert!(matches!(err, CodegenError::Unsupported { .. }), "{err:?}");
-        let msg = err.to_string();
-        assert!(msg.contains("<data> inside repeating group"), "{msg}");
-        assert!(msg.contains("message 'Quote', group 'legs'"), "{msg}");
-    }
-
-    #[test]
-    fn test_var_data_in_nested_group_returns_unsupported_err() {
-        let err = generate(
-            r#"
-    <sbe:message name="Quote" id="1" blockLength="0">
-        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
-            <field name="legId" id="11" type="uint64" offset="0"/>
+    /// Nested group whose inner entries carry var data, followed by var data
+    /// on the outer entry, a second flat group and message-level var data.
+    const MSG_NESTED_WITH_VAR_DATA: &str = r#"
+    <sbe:message name="Nested" id="5" blockLength="0">
+        <group name="orders" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="orderId" id="11" type="uint64" offset="0"/>
             <group name="fills" id="20" dimensionType="groupSizeEncoding" blockLength="8">
                 <field name="fillId" id="21" type="uint64" offset="0"/>
-                <data name="note" id="22" type="varStringEncoding"/>
+                <data name="note" id="22" type="varDataEncoding8"/>
             </group>
+            <data name="memo" id="12" type="varStringEncoding"/>
         </group>
-    </sbe:message>"#,
-        )
-        .expect_err("var data inside a nested group must be rejected");
+        <group name="flags" id="30" dimensionType="groupSizeEncoding" blockLength="1">
+            <field name="flag" id="31" type="uint8" offset="0"/>
+        </group>
+        <data name="trailer" id="2" type="varDataEncoding32"/>
+    </sbe:message>"#;
 
-        assert!(matches!(err, CodegenError::Unsupported { .. }), "{err:?}");
-        assert!(err.to_string().contains("group 'fills'"), "{err}");
+    #[test]
+    fn test_flat_group_keeps_fixed_stride_and_entry_api() {
+        let code = generate_ok(MSG_TWO_GROUPS);
+        let group = section(
+            &code,
+            "impl<'a> OrdersGroupDecoder<'a>",
+            "/// orders Entry Decoder",
+        );
+        assert!(
+            group.contains(
+                "pub fn end_offset(self) -> usize {\n        self.offset + self.block_length as usize * (self.count - self.index) as usize"
+            ),
+            "fixed-stride group must compute its end in O(1): {group}"
+        );
+        assert!(group.contains("self.offset += self.block_length as usize;"));
+        assert!(!group.contains("entry.end_offset()"));
+
+        let entry = section(
+            &code,
+            "impl<'a> OrdersEntryDecoder<'a>",
+            "/// fills Group Decoder",
+        );
+        assert!(entry.contains("fn wrap(buffer: &'a [u8], offset: usize, block_length: u16)"));
+        assert!(entry.contains(
+            "pub fn end_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"
+        ));
+        assert!(
+            !entry.contains("fn group_offset("),
+            "flat entry has no nested walker"
+        );
     }
 
     #[test]
-    fn test_var_data_after_nested_group_returns_unsupported_err() {
-        let err = generate(
+    fn test_var_data_in_group_no_longer_returns_unsupported() {
+        let result = generate(MSG_VAR_DATA_IN_GROUP);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn test_var_data_in_group_emits_entry_accessors_and_end_offset() {
+        let code = generate_ok(MSG_VAR_DATA_IN_GROUP);
+        let entry = section(
+            &code,
+            "impl<'a> LegsEntryDecoder<'a>",
+            "/// legs Group Encoder",
+        );
+
+        assert!(entry.contains("pub fn leg_qty(&self) -> u32"));
+        assert!(entry.contains(
+            "fn leg_tag_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"
+        ));
+        assert!(entry.contains("pub fn leg_tag(&self) -> &'a [u8]"));
+        assert!(entry.contains("pub fn leg_tag_as_str(&self) -> &'a str"));
+        assert!(entry.contains(
+            "fn leg_note_offset(&self) -> usize {\n        let pos = self.leg_tag_offset();\n        pos + 2 + self.buffer.get_u16_le(pos) as usize\n"
+        ));
+        assert!(entry.contains("pub fn leg_note(&self) -> &'a [u8]"));
+        assert!(entry.contains("let len = self.buffer.get_u8(pos) as usize;"));
+        assert!(entry.contains(
+            "pub fn end_offset(&self) -> usize {\n        let pos = self.leg_note_offset();\n        pos + 1 + self.buffer.get_u8(pos) as usize\n"
+        ));
+    }
+
+    #[test]
+    fn test_var_data_in_group_iterator_advances_by_entry_end() {
+        let code = generate_ok(MSG_VAR_DATA_IN_GROUP);
+        let group = section(
+            &code,
+            "impl<'a> LegsGroupDecoder<'a>",
+            "/// legs Entry Decoder",
+        );
+
+        assert!(group.contains(
+            "let entry = LegsEntryDecoder::wrap(self.buffer, self.offset, self.block_length);"
+        ));
+        assert!(group.contains("self.offset = entry.end_offset();"));
+        assert!(!group.contains("self.offset += self.block_length as usize;"));
+        assert!(
+            group.contains(
+                "pub fn end_offset(mut self) -> usize {\n        for _ in self.by_ref() {}\n        self.offset\n"
+            ),
+            "variable-stride group must walk its entries: {group}"
+        );
+    }
+
+    #[test]
+    fn test_message_var_data_after_variable_group_uses_group_offset() {
+        let code = generate_ok(MSG_VAR_DATA_IN_GROUP);
+        let decoder = section(&code, "impl<'a> QuoteDecoder<'a>", "impl<'a> SbeDecoder");
+
+        assert!(
+            decoder.contains("pos = quote::LegsGroupDecoder::wrap(self.buffer, pos).end_offset();")
+        );
+        assert!(
+            decoder.contains("fn comment_offset(&self) -> usize {\n        self.group_offset(1)\n")
+        );
+        assert!(decoder.contains("pub fn comment(&self) -> &'a [u8]"));
+    }
+
+    #[test]
+    fn test_nested_group_accessors_on_entry_decoder() {
+        let code = generate_ok(MSG_NESTED_WITH_VAR_DATA);
+        let entry = section(
+            &code,
+            "impl<'a> OrdersEntryDecoder<'a>",
+            "/// fills Group Decoder",
+        );
+
+        // walker over the nested groups, based on the entry's wire block length
+        assert!(entry.contains("fn group_offset(&self, index: usize) -> usize"));
+        assert!(entry.contains("let mut pos = self.offset + self.block_length as usize;"));
+        assert!(entry.contains("pos = FillsGroupDecoder::wrap(self.buffer, pos).end_offset();"));
+        // nested accessor, unqualified (same module)
+        assert!(entry.contains("pub fn fills(&self) -> FillsGroupDecoder<'a> {"));
+        assert!(entry.contains("FillsGroupDecoder::wrap(self.buffer, self.group_offset(0))"));
+        // var data after the nested group
+        assert!(entry.contains("fn memo_offset(&self) -> usize {\n        self.group_offset(1)\n"));
+        assert!(entry.contains("pub fn memo(&self) -> &'a [u8]"));
+
+        // inner entry: var data straight after its fixed block
+        let inner = section(
+            &code,
+            "impl<'a> FillsEntryDecoder<'a>",
+            "/// orders Group Encoder",
+        );
+        assert!(inner.contains(
+            "fn note_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"
+        ));
+        assert!(inner.contains("pub fn note(&self) -> &'a [u8]"));
+
+        // message level: second group and trailer sit after the variable group
+        let decoder = section(&code, "impl<'a> NestedDecoder<'a>", "impl<'a> SbeDecoder");
+        assert!(
+            decoder
+                .contains("pos = nested::OrdersGroupDecoder::wrap(self.buffer, pos).end_offset();")
+        );
+        assert!(
+            decoder.contains("nested::FlagsGroupDecoder::wrap(self.buffer, self.group_offset(1))")
+        );
+        assert!(
+            decoder.contains("fn trailer_offset(&self) -> usize {\n        self.group_offset(2)\n")
+        );
+    }
+
+    #[test]
+    fn test_var_data_after_nested_group_no_longer_returns_unsupported() {
+        let result = generate(
             r#"
     <sbe:message name="Quote" id="1" blockLength="0">
         <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
@@ -1141,16 +1265,52 @@ mod tests {
         </group>
         <data name="label" id="2" type="varStringEncoding"/>
     </sbe:message>"#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn test_var_data_in_group_unknown_type_returns_unknown_type_err() {
+        let err = generate(
+            r#"
+    <sbe:message name="Quote" id="1" blockLength="0">
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="legId" id="11" type="uint64" offset="0"/>
+            <data name="tag" id="12" type="noSuchEncoding"/>
+        </group>
+    </sbe:message>"#,
         )
-        .expect_err("var data after a group with nested groups must be rejected");
+        .expect_err("unknown var data type inside a group must be rejected");
+
+        assert!(matches!(err, CodegenError::UnknownType { .. }), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("noSuchEncoding"), "{msg}");
+        assert!(msg.contains("Quote.legs.tag"), "{msg}");
+    }
+
+    #[test]
+    fn test_var_data_in_group_length_int64_returns_unsupported_err() {
+        let err = generate(
+            r#"
+    <sbe:message name="Quote" id="1" blockLength="0">
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="legId" id="11" type="uint64" offset="0"/>
+            <group name="fills" id="20" dimensionType="groupSizeEncoding" blockLength="8">
+                <field name="fillId" id="21" type="uint64" offset="0"/>
+                <data name="note" id="22" type="varDataEncoding64"/>
+            </group>
+        </group>
+    </sbe:message>"#,
+        )
+        .expect_err("int64 length header inside a nested group must be rejected");
 
         assert!(matches!(err, CodegenError::Unsupported { .. }), "{err:?}");
         let msg = err.to_string();
+        assert!(msg.contains("var data length encoding 'int64'"), "{msg}");
         assert!(
-            msg.contains("<data> after a repeating group with nested groups"),
+            msg.contains("message 'Quote', group 'legs', group 'fills', data 'note'"),
             "{msg}"
         );
-        assert!(msg.contains("group 'legs'"), "{msg}");
     }
 
     #[test]

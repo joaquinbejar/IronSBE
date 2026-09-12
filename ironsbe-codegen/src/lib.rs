@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_generate_from_xml_var_data_in_group_returns_unsupported() {
+    fn test_generate_from_xml_var_data_in_group_succeeds() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="test" id="1" version="1" byteOrder="littleEndian">
@@ -73,9 +73,8 @@ mod tests {
     </sbe:message>
 </sbe:messageSchema>"#;
 
-        let err = generate_from_xml(xml).expect_err("var data in group must fail codegen");
-        assert!(matches!(err, CodegenError::Unsupported { .. }), "{err:?}");
-        assert!(err.to_string().contains("<data> inside repeating group"));
+        let code = generate_from_xml(xml).expect("var data inside a group is supported");
+        assert!(code.contains("pub fn note(&self) -> &'a [u8]"));
     }
 
     #[test]
