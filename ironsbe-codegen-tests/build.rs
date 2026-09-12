@@ -10,7 +10,9 @@ use std::path::PathBuf;
 
 /// Schema exercising every var data layout the generator supports:
 /// `uint16`, `uint8` and `uint32` length headers, var data after two flat
-/// repeating groups, var data with no groups, and groups with no var data.
+/// repeating groups, var data with no groups, groups with no var data,
+/// var data inside group entries (issue #61), and nested groups whose
+/// entries carry var data.
 const VAR_DATA_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="vardata" id="42" version="1" byteOrder="littleEndian">
@@ -65,6 +67,33 @@ const VAR_DATA_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
         <group name="items" id="10" dimensionType="groupSizeEncoding" blockLength="8">
             <field name="itemId" id="11" type="uint64" offset="0"/>
         </group>
+    </sbe:message>
+
+    <!-- Issue #61: var data inside a repeating group, then message-level var data -->
+    <sbe:message name="Quote" id="4" blockLength="4">
+        <field name="requestId" id="1" type="uint32" offset="0"/>
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="4">
+            <field name="legQty" id="11" type="uint32" offset="0"/>
+            <data name="legTag" id="12" type="varStringEncoding"/>
+        </group>
+        <data name="comment" id="2" type="varStringEncoding"/>
+    </sbe:message>
+
+    <!-- Nested group whose inner entries carry var data, var data on the outer
+         entry, a flat group after the variable one, and message-level var data -->
+    <sbe:message name="Nested" id="5" blockLength="0">
+        <group name="orders" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="orderId" id="11" type="uint64" offset="0"/>
+            <group name="fills" id="20" dimensionType="groupSizeEncoding" blockLength="8">
+                <field name="fillId" id="21" type="uint64" offset="0"/>
+                <data name="note" id="22" type="varDataEncoding8"/>
+            </group>
+            <data name="memo" id="12" type="varStringEncoding"/>
+        </group>
+        <group name="flags" id="30" dimensionType="groupSizeEncoding" blockLength="1">
+            <field name="flag" id="31" type="uint8" offset="0"/>
+        </group>
+        <data name="trailer" id="2" type="varDataEncoding32"/>
     </sbe:message>
 </sbe:messageSchema>"#;
 
