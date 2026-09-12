@@ -1,35 +1,18 @@
 //! Message encoder/decoder code generation.
+//!
+//! Emits, per message, a zero-copy decoder and a cursor-based encoder, and a
+//! message-scoped module holding the codecs of its repeating groups. Field,
+//! var data and group emission live in sibling modules.
 
-use ironsbe_schema::ir::{
-    ResolvedField, ResolvedGroup, ResolvedMessage, SchemaIr, TypeKind, to_snake_case,
-};
-use ironsbe_schema::types::PrimitiveType;
+use ironsbe_schema::ir::{ResolvedGroup, ResolvedMessage, SchemaIr, to_snake_case};
 
 use crate::error::CodegenError;
-
-/// Resolved wire layout of one `<data>` (variable-length) field.
-///
-/// Built from the composite the field references (`varStringEncoding`,
-/// `varDataEncoding`, ...): the `length` member decides how wide the length
-/// header is on the wire and which buffer accessors read and write it.
-struct VarDataInfo {
-    /// Original schema name, used in doc comments.
-    name: String,
-    /// snake_case base name for the generated accessors.
-    accessor: String,
-    /// Field ID from the schema.
-    id: u16,
-    /// SBE name of the length primitive (`uint16`), used in doc comments.
-    length_type: &'static str,
-    /// Rust type of the length primitive (`u16`).
-    length_rust_type: &'static str,
-    /// Encoded width of the length header in bytes (1, 2 or 4).
-    header_length: usize,
-    /// `ReadBuffer` method that reads the length header.
-    read_method: &'static str,
-    /// `WriteBuffer` method that writes the length header.
-    write_method: &'static str,
-}
+use crate::rust::fields::{generate_field_getter, generate_field_setter};
+use crate::rust::groups::{generate_group_decoder, generate_group_encoder};
+use crate::rust::var_data::{
+    VarDataInfo, generate_decoder_encoded_length, generate_var_data_getter,
+    generate_var_data_setter, resolve_var_data,
+};
 
 /// Generator for message encoders and decoders.
 pub struct MessageGenerator<'a> {
@@ -55,7 +38,7 @@ impl<'a> MessageGenerator<'a> {
 
         for msg in &self.ir.messages {
             Self::validate_groups(msg)?;
-            let var_data = self.resolve_var_data(msg)?;
+            let var_data = resolve_var_data(self.ir, msg)?;
 
             output.push_str(&self.generate_decoder(msg, &var_data));
             output.push_str(&self.generate_encoder(msg, &var_data));
@@ -67,8 +50,8 @@ impl<'a> MessageGenerator<'a> {
                 output.push_str(&format!("pub mod {} {{\n", mod_name));
                 output.push_str("    use super::*;\n\n");
                 for group in &msg.groups {
-                    output.push_str(&self.generate_group_decoder(group));
-                    output.push_str(&self.generate_group_encoder(group));
+                    output.push_str(&generate_group_decoder(self.ir, group));
+                    output.push_str(&generate_group_encoder(self.ir, group));
                 }
                 output.push_str("}\n\n");
             }
@@ -112,64 +95,6 @@ impl<'a> MessageGenerator<'a> {
                 Some(g)
             }
         })
-    }
-
-    /// Resolves the length-header layout of every `<data>` field in `msg`.
-    fn resolve_var_data(&self, msg: &ResolvedMessage) -> Result<Vec<VarDataInfo>, CodegenError> {
-        msg.var_data
-            .iter()
-            .map(|vd| {
-                let context = format!("message '{}', data '{}'", msg.name, vd.name);
-                let field_path = format!("{}.{}", msg.name, vd.name);
-
-                let resolved = self
-                    .ir
-                    .get_type(&vd.type_name)
-                    .ok_or_else(|| CodegenError::unknown_type(&vd.type_name, &field_path))?;
-
-                let TypeKind::Composite { fields } = &resolved.kind else {
-                    return Err(CodegenError::unsupported(
-                        format!("var data type '{}' is not a composite", vd.type_name),
-                        context,
-                    ));
-                };
-
-                let length_field = fields
-                    .iter()
-                    .find(|f| f.name.eq_ignore_ascii_case("length"))
-                    .or_else(|| fields.first())
-                    .ok_or_else(|| {
-                        CodegenError::unsupported(
-                            format!("var data type '{}' has no length member", vd.type_name),
-                            context.clone(),
-                        )
-                    })?;
-
-                let (header_length, read_method, write_method, length_rust_type, length_type) =
-                    match length_field.primitive_type {
-                        PrimitiveType::Uint8 => (1, "get_u8", "put_u8", "u8", "uint8"),
-                        PrimitiveType::Uint16 => (2, "get_u16_le", "put_u16_le", "u16", "uint16"),
-                        PrimitiveType::Uint32 => (4, "get_u32_le", "put_u32_le", "u32", "uint32"),
-                        other => {
-                            return Err(CodegenError::unsupported(
-                                format!("var data length encoding '{}'", other.sbe_name()),
-                                context,
-                            ));
-                        }
-                    };
-
-                Ok(VarDataInfo {
-                    name: vd.name.clone(),
-                    accessor: to_snake_case(&vd.name),
-                    id: vd.id,
-                    length_type,
-                    length_rust_type,
-                    header_length,
-                    read_method,
-                    write_method,
-                })
-            })
-            .collect()
     }
 
     /// Generates a message decoder.
@@ -218,7 +143,7 @@ impl<'a> MessageGenerator<'a> {
 
         // Field getters
         for field in &msg.fields {
-            output.push_str(&self.generate_field_getter(field));
+            output.push_str(&generate_field_getter(self.ir, field));
         }
 
         // Group accessors. Groups follow the fixed block back to back, so the
@@ -233,11 +158,7 @@ impl<'a> MessageGenerator<'a> {
 
         // Var data accessors (after all groups, in schema order)
         for index in 0..var_data.len() {
-            output.push_str(&Self::generate_var_data_getter(
-                index,
-                var_data,
-                msg.groups.len(),
-            ));
+            output.push_str(&generate_var_data_getter(index, var_data, msg.groups.len()));
         }
 
         output.push_str("}\n\n");
@@ -264,10 +185,7 @@ impl<'a> MessageGenerator<'a> {
         output.push_str("        Self::wrap(buffer, offset, acting_version)\n");
         output.push_str("    }\n\n");
 
-        output.push_str(&Self::generate_decoder_encoded_length(
-            var_data,
-            msg.groups.len(),
-        ));
+        output.push_str(&generate_decoder_encoded_length(var_data, msg.groups.len()));
         output.push_str("}\n\n");
 
         output
@@ -296,267 +214,6 @@ impl<'a> MessageGenerator<'a> {
         output.push_str("        }\n");
         output.push_str("        pos\n");
         output.push_str("    }\n\n");
-
-        output
-    }
-
-    /// Generates the private `<name>_offset()` helper plus the public slice
-    /// and string accessors for the `index`-th var data field of a message.
-    fn generate_var_data_getter(
-        index: usize,
-        var_data: &[VarDataInfo],
-        group_count: usize,
-    ) -> String {
-        let mut output = String::new();
-        let Some(info) = var_data.get(index) else {
-            return output;
-        };
-
-        // Offset helper: first var data field starts after the last group
-        // (or after the fixed block); each later field starts after the
-        // previous field's header + payload.
-        output.push_str(&format!(
-            "    /// Byte offset of the length header of var data field `{}`.\n",
-            info.name
-        ));
-        output.push_str("    #[inline]\n");
-        output.push_str(&format!(
-            "    fn {}_offset(&self) -> usize {{\n",
-            info.accessor
-        ));
-        match index.checked_sub(1).and_then(|i| var_data.get(i)) {
-            Some(prev) => {
-                output.push_str(&format!(
-                    "        let pos = self.{}_offset();\n",
-                    prev.accessor
-                ));
-                output.push_str(&format!(
-                    "        pos + {} + self.buffer.{}(pos) as usize\n",
-                    prev.header_length, prev.read_method
-                ));
-            }
-            None if group_count > 0 => {
-                output.push_str(&format!("        self.group_offset({})\n", group_count));
-            }
-            None => {
-                output.push_str("        self.offset + Self::BLOCK_LENGTH as usize\n");
-            }
-        }
-        output.push_str("    }\n\n");
-
-        // Slice accessor
-        output.push_str(&format!(
-            "    /// Var data field: {} (id={}, length header: {}).\n",
-            info.name, info.id, info.length_type
-        ));
-        output.push_str("    ///\n");
-        output.push_str(
-            "    /// Returns the raw bytes. Var data fields follow all repeating groups\n",
-        );
-        output.push_str("    /// in schema order.\n");
-        output.push_str("    ///\n");
-        output.push_str("    /// # Panics\n");
-        output.push_str(
-            "    /// Panics if the buffer is shorter than the encoded length header claims.\n",
-        );
-        output.push_str("    #[inline]\n");
-        output.push_str("    #[must_use]\n");
-        output.push_str(&format!(
-            "    pub fn {}(&self) -> &'a [u8] {{\n",
-            info.accessor
-        ));
-        output.push_str(&format!(
-            "        let pos = self.{}_offset();\n",
-            info.accessor
-        ));
-        output.push_str(&format!(
-            "        let len = self.buffer.{}(pos) as usize;\n",
-            info.read_method
-        ));
-        output.push_str(&format!(
-            "        let start = pos + {};\n",
-            info.header_length
-        ));
-        output.push_str("        &self.buffer[start..start + len]\n");
-        output.push_str("    }\n\n");
-
-        // String accessor
-        output.push_str(&format!(
-            "    /// Var data field `{}` as UTF-8 (empty string if not valid UTF-8).\n",
-            info.name
-        ));
-        output.push_str("    #[inline]\n");
-        output.push_str("    #[must_use]\n");
-        output.push_str(&format!(
-            "    pub fn {}_as_str(&self) -> &'a str {{\n",
-            info.accessor
-        ));
-        output.push_str(&format!(
-            "        std::str::from_utf8(self.{}()).unwrap_or(\"\")\n",
-            info.accessor
-        ));
-        output.push_str("    }\n\n");
-
-        output
-    }
-
-    /// Generates `SbeDecoder::encoded_length` for a message decoder.
-    ///
-    /// Covers header + fixed block + every repeating group + every var data
-    /// field, reading the variable parts from the wire.
-    fn generate_decoder_encoded_length(var_data: &[VarDataInfo], group_count: usize) -> String {
-        let mut output = String::new();
-
-        output.push_str("    fn encoded_length(&self) -> usize {\n");
-        match var_data.last() {
-            Some(last) => {
-                output.push_str(&format!(
-                    "        let pos = self.{}_offset();\n",
-                    last.accessor
-                ));
-                output.push_str(&format!(
-                    "        let end = pos + {} + self.buffer.{}(pos) as usize;\n",
-                    last.header_length, last.read_method
-                ));
-                output.push_str("        MessageHeader::ENCODED_LENGTH + (end - self.offset)\n");
-            }
-            None if group_count > 0 => {
-                output.push_str(&format!(
-                    "        MessageHeader::ENCODED_LENGTH + (self.group_offset({}) - self.offset)\n",
-                    group_count
-                ));
-            }
-            None => {
-                output.push_str(
-                    "        MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize\n",
-                );
-            }
-        }
-        output.push_str("    }\n");
-
-        output
-    }
-
-    /// Generates a field getter method.
-    fn generate_field_getter(&self, field: &ResolvedField) -> String {
-        let mut output = String::new();
-
-        output.push_str(&format!(
-            "    /// Field: {} (id={}, offset={}).\n",
-            field.name, field.id, field.offset
-        ));
-        output.push_str("    #[inline(always)]\n");
-        output.push_str("    #[must_use]\n");
-
-        if field.is_array {
-            // Array field - return slice
-            let elem_type = field.primitive_type.map(|p| p.rust_type()).unwrap_or("u8");
-            let len = field.array_length.unwrap_or(1);
-
-            if elem_type == "u8" {
-                // Byte array - return &[u8]
-                output.push_str(&format!(
-                    "    pub fn {}(&self) -> &'a [u8] {{\n",
-                    field.getter_name
-                ));
-                output.push_str(&format!(
-                    "        &self.buffer[self.offset + {}..self.offset + {} + {}]\n",
-                    field.offset, field.offset, len
-                ));
-                output.push_str("    }\n\n");
-
-                // Also generate a string accessor for char arrays
-                output.push_str(&format!(
-                    "    /// Field {} as string (trimmed).\n",
-                    field.name
-                ));
-                output.push_str("    #[inline]\n");
-                output.push_str("    #[must_use]\n");
-                output.push_str(&format!(
-                    "    pub fn {}_as_str(&self) -> &'a str {{\n",
-                    field.getter_name
-                ));
-                output.push_str(&format!(
-                    "        let bytes = &self.buffer[self.offset + {}..self.offset + {} + {}];\n",
-                    field.offset, field.offset, len
-                ));
-                output.push_str(
-                    "        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());\n",
-                );
-                output.push_str("        std::str::from_utf8(&bytes[..end]).unwrap_or(\"\")\n");
-                output.push_str("    }\n\n");
-            } else {
-                // Other array types
-                output.push_str(&format!(
-                    "    pub fn {}(&self) -> &'a [u8] {{\n",
-                    field.getter_name
-                ));
-                output.push_str(&format!(
-                    "        &self.buffer[self.offset + {}..self.offset + {}]\n",
-                    field.offset,
-                    field.offset + field.encoded_length
-                ));
-                output.push_str("    }\n\n");
-            }
-        } else {
-            // Scalar field - check if it's an enum/set type
-            let rust_type = &field.rust_type;
-            let resolved_type = self.ir.get_type(&field.type_name);
-
-            match resolved_type.map(|t| &t.kind) {
-                Some(TypeKind::Enum { encoding, .. }) => {
-                    // Enum field - use encoding primitive and wrap with From
-                    let read_method = get_read_method(Some(*encoding));
-                    output.push_str(&format!(
-                        "    pub fn {}(&self) -> {} {{\n",
-                        field.getter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        {}::from(self.buffer.{}(self.offset + {}))\n",
-                        rust_type, read_method, field.offset
-                    ));
-                    output.push_str("    }\n\n");
-                }
-                Some(TypeKind::Set { encoding, .. }) => {
-                    // Set field - use encoding primitive and wrap with from_raw
-                    let read_method = get_read_method(Some(*encoding));
-                    output.push_str(&format!(
-                        "    pub fn {}(&self) -> {} {{\n",
-                        field.getter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        {}::from_raw(self.buffer.{}(self.offset + {}))\n",
-                        rust_type, read_method, field.offset
-                    ));
-                    output.push_str("    }\n\n");
-                }
-                Some(TypeKind::Composite { .. }) => {
-                    // Composite field - return wrapper struct
-                    output.push_str(&format!(
-                        "    pub fn {}(&self) -> {}<'a> {{\n",
-                        field.getter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        {}::wrap(self.buffer, self.offset + {})\n",
-                        rust_type, field.offset
-                    ));
-                    output.push_str("    }\n\n");
-                }
-                _ => {
-                    // Primitive field
-                    let read_method = get_read_method(field.primitive_type);
-                    output.push_str(&format!(
-                        "    pub fn {}(&self) -> {} {{\n",
-                        field.getter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        self.buffer.{}(self.offset + {})\n",
-                        read_method, field.offset
-                    ));
-                    output.push_str("    }\n\n");
-                }
-            }
-        }
 
         output
     }
@@ -653,7 +310,7 @@ impl<'a> MessageGenerator<'a> {
 
         // Field setters
         for field in &msg.fields {
-            output.push_str(&self.generate_field_setter(field));
+            output.push_str(&generate_field_setter(self.ir, field));
         }
 
         // Group encoder accessors (advance the write cursor)
@@ -663,496 +320,10 @@ impl<'a> MessageGenerator<'a> {
 
         // Var data setters (append at the write cursor)
         for info in var_data {
-            output.push_str(&Self::generate_var_data_setter(info));
+            output.push_str(&generate_var_data_setter(info));
         }
 
         output.push_str("}\n\n");
-
-        output
-    }
-
-    /// Generates `set_<name>` for one var data field on a message encoder.
-    fn generate_var_data_setter(info: &VarDataInfo) -> String {
-        let mut output = String::new();
-
-        output.push_str(&format!(
-            "    /// Set var data field: {} (id={}, length header: {}).\n",
-            info.name, info.id, info.length_type
-        ));
-        output.push_str("    ///\n");
-        output.push_str(
-            "    /// Appends the length header followed by `value` at the write cursor.\n",
-        );
-        output.push_str("    /// Var data fields must be written in schema order, after all\n");
-        output.push_str("    /// repeating groups.\n");
-        output.push_str("    ///\n");
-        output.push_str("    /// # Panics\n");
-        output
-            .push_str("    /// Panics if `value.len()` does not fit in the length header, or if\n");
-        output.push_str("    /// the buffer is too short.\n");
-        output.push_str("    #[inline]\n");
-        output.push_str(&format!(
-            "    pub fn set_{}(&mut self, value: &[u8]) -> &mut Self {{\n",
-            info.accessor
-        ));
-        output.push_str(&format!(
-            "        let Ok(len) = {}::try_from(value.len()) else {{\n",
-            info.length_rust_type
-        ));
-        output.push_str(&format!(
-            "            panic!(\"var data field '{}': length {{}} exceeds {}::MAX\", value.len());\n",
-            info.name, info.length_rust_type
-        ));
-        output.push_str("        };\n");
-        output.push_str(&format!(
-            "        self.buffer.{}(self.limit, len);\n",
-            info.write_method
-        ));
-        output.push_str(&format!(
-            "        let start = self.limit + {};\n",
-            info.header_length
-        ));
-        output.push_str("        self.buffer.put_bytes(start, value);\n");
-        output.push_str("        self.limit = start + value.len();\n");
-        output.push_str("        self\n");
-        output.push_str("    }\n\n");
-
-        output
-    }
-
-    /// Generates a field setter method.
-    fn generate_field_setter(&self, field: &ResolvedField) -> String {
-        let mut output = String::new();
-        let field_offset = format!("MessageHeader::ENCODED_LENGTH + {}", field.offset);
-
-        output.push_str(&format!(
-            "    /// Set field: {} (id={}, offset={}).\n",
-            field.name, field.id, field.offset
-        ));
-        output.push_str("    #[inline(always)]\n");
-
-        if field.is_array {
-            // Array field - accept slice
-            let len = field.array_length.unwrap_or(field.encoded_length);
-
-            output.push_str(&format!(
-                "    pub fn {}(&mut self, value: &[u8]) -> &mut Self {{\n",
-                field.setter_name
-            ));
-            output.push_str(&format!(
-                "        let copy_len = value.len().min({});\n",
-                len
-            ));
-            output.push_str(&format!(
-                "        self.buffer[self.offset + {}..self.offset + {} + copy_len]\n",
-                field_offset, field_offset
-            ));
-            output.push_str("            .copy_from_slice(&value[..copy_len]);\n");
-            output.push_str(&format!("        if copy_len < {} {{\n", len));
-            output.push_str(&format!(
-                "            self.buffer[self.offset + {} + copy_len..self.offset + {} + {}].fill(0);\n",
-                field_offset, field_offset, len
-            ));
-            output.push_str("        }\n");
-            output.push_str("        self\n");
-            output.push_str("    }\n\n");
-        } else {
-            // Scalar field - check if it's an enum/set type
-            let rust_type = &field.rust_type;
-            let resolved_type = self.ir.get_type(&field.type_name);
-
-            match resolved_type.map(|t| &t.kind) {
-                Some(TypeKind::Enum { encoding, .. }) => {
-                    // Enum field - convert enum to primitive before writing
-                    let write_method = get_write_method(Some(*encoding));
-                    let prim_type = encoding.rust_type();
-                    output.push_str(&format!(
-                        "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
-                        field.setter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        self.buffer.{}(self.offset + {}, {}::from(value));\n",
-                        write_method, field_offset, prim_type
-                    ));
-                    output.push_str("        self\n");
-                    output.push_str("    }\n\n");
-                }
-                Some(TypeKind::Set { encoding, .. }) => {
-                    // Set field - use raw() to get the primitive value
-                    let write_method = get_write_method(Some(*encoding));
-                    output.push_str(&format!(
-                        "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
-                        field.setter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        self.buffer.{}(self.offset + {}, value.raw());\n",
-                        write_method, field_offset
-                    ));
-                    output.push_str("        self\n");
-                    output.push_str("    }\n\n");
-                }
-                Some(TypeKind::Composite { .. }) => {
-                    // Composite field - return encoder for nested writes
-                    output.push_str(&format!(
-                        "    pub fn {}(&mut self) -> {}Encoder<'_> {{\n",
-                        field.setter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        {}Encoder::wrap(self.buffer, self.offset + {})\n",
-                        rust_type, field_offset
-                    ));
-                    output.push_str("    }\n\n");
-                }
-                _ => {
-                    // Primitive field
-                    let write_method = get_write_method(field.primitive_type);
-                    output.push_str(&format!(
-                        "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
-                        field.setter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        self.buffer.{}(self.offset + {}, value);\n",
-                        write_method, field_offset
-                    ));
-                    output.push_str("        self\n");
-                    output.push_str("    }\n\n");
-                }
-            }
-        }
-
-        output
-    }
-
-    /// Generates a group decoder.
-    fn generate_group_decoder(&self, group: &ResolvedGroup) -> String {
-        let mut output = String::new();
-        let decoder_name = group.decoder_name();
-        let entry_name = group.entry_decoder_name();
-
-        // Group decoder struct
-        output.push_str(&format!("/// {} Group Decoder.\n", group.name));
-        output.push_str("#[derive(Debug, Clone, Copy)]\n");
-        output.push_str(&format!("pub struct {}<'a> {{\n", decoder_name));
-        output.push_str("    buffer: &'a [u8],\n");
-        output.push_str("    block_length: u16,\n");
-        output.push_str("    count: u16,\n");
-        output.push_str("    index: u16,\n");
-        output.push_str("    offset: usize,\n");
-        output.push_str("}\n\n");
-
-        // Group decoder implementation
-        output.push_str(&format!("impl<'a> {}<'a> {{\n", decoder_name));
-        output.push_str("    /// Wraps a buffer at the group header position.\n");
-        output.push_str("    #[must_use]\n");
-        output.push_str("    pub fn wrap(buffer: &'a [u8], offset: usize) -> Self {\n");
-        output.push_str("        let header = GroupHeader::wrap(buffer, offset);\n");
-        output.push_str("        Self {\n");
-        output.push_str("            buffer,\n");
-        output.push_str("            block_length: header.block_length,\n");
-        output.push_str("            count: header.num_in_group,\n");
-        output.push_str("            index: 0,\n");
-        output.push_str("            offset: offset + GroupHeader::ENCODED_LENGTH,\n");
-        output.push_str("        }\n");
-        output.push_str("    }\n\n");
-
-        output.push_str("    /// Returns the number of entries in the group.\n");
-        output.push_str("    #[must_use]\n");
-        output.push_str("    pub const fn count(&self) -> u16 {\n");
-        output.push_str("        self.count\n");
-        output.push_str("    }\n\n");
-
-        output.push_str("    /// Returns true if the group is empty.\n");
-        output.push_str("    #[must_use]\n");
-        output.push_str("    pub const fn is_empty(&self) -> bool {\n");
-        output.push_str("        self.count == 0\n");
-        output.push_str("    }\n");
-        output.push_str("}\n\n");
-
-        // Iterator implementation
-        output.push_str(&format!("impl<'a> Iterator for {}<'a> {{\n", decoder_name));
-        output.push_str(&format!("    type Item = {}<'a>;\n\n", entry_name));
-        output.push_str("    fn next(&mut self) -> Option<Self::Item> {\n");
-        output.push_str("        if self.index >= self.count {\n");
-        output.push_str("            return None;\n");
-        output.push_str("        }\n");
-        output.push_str(&format!(
-            "        let entry = {}::wrap(self.buffer, self.offset);\n",
-            entry_name
-        ));
-        output.push_str("        self.offset += self.block_length as usize;\n");
-        output.push_str("        self.index += 1;\n");
-        output.push_str("        Some(entry)\n");
-        output.push_str("    }\n\n");
-
-        output.push_str("    fn size_hint(&self) -> (usize, Option<usize>) {\n");
-        output.push_str("        let remaining = (self.count - self.index) as usize;\n");
-        output.push_str("        (remaining, Some(remaining))\n");
-        output.push_str("    }\n");
-        output.push_str("}\n\n");
-
-        output.push_str(&format!(
-            "impl<'a> ExactSizeIterator for {}<'a> {{}}\n\n",
-            decoder_name
-        ));
-
-        // Entry decoder
-        output.push_str(&self.generate_entry_decoder(group));
-
-        // Nested groups
-        for nested in &group.nested_groups {
-            output.push_str(&self.generate_group_decoder(nested));
-        }
-
-        output
-    }
-
-    /// Generates a group entry decoder.
-    fn generate_entry_decoder(&self, group: &ResolvedGroup) -> String {
-        let mut output = String::new();
-        let entry_name = group.entry_decoder_name();
-
-        output.push_str(&format!("/// {} Entry Decoder.\n", group.name));
-        output.push_str("#[derive(Debug, Clone, Copy)]\n");
-        output.push_str(&format!("pub struct {}<'a> {{\n", entry_name));
-        output.push_str("    buffer: &'a [u8],\n");
-        output.push_str("    offset: usize,\n");
-        output.push_str("}\n\n");
-
-        output.push_str(&format!("impl<'a> {}<'a> {{\n", entry_name));
-        output.push_str("    fn wrap(buffer: &'a [u8], offset: usize) -> Self {\n");
-        output.push_str("        Self { buffer, offset }\n");
-        output.push_str("    }\n\n");
-
-        // Field getters
-        for field in &group.fields {
-            output.push_str(&self.generate_field_getter(field));
-        }
-
-        output.push_str("}\n\n");
-
-        output
-    }
-
-    /// Generates a group encoder.
-    fn generate_group_encoder(&self, group: &ResolvedGroup) -> String {
-        let mut output = String::new();
-        let encoder_name = group.encoder_name();
-        let entry_name = group.entry_encoder_name();
-
-        // Compute effective block length: use XML value if nonzero, else derive from fields
-        let effective_block_length = if group.block_length > 0 {
-            group.block_length
-        } else {
-            group
-                .fields
-                .iter()
-                .map(|f| f.offset + f.encoded_length)
-                .max()
-                .unwrap_or(0) as u16
-        };
-
-        // Group encoder struct
-        output.push_str(&format!("/// {} Group Encoder.\n", group.name));
-        output.push_str(&format!("pub struct {}<'a> {{\n", encoder_name));
-        output.push_str("    buffer: &'a mut [u8],\n");
-        output.push_str("    count: u16,\n");
-        output.push_str("    index: u16,\n");
-        output.push_str("    offset: usize,\n");
-        output.push_str("}\n\n");
-
-        // Group encoder implementation
-        output.push_str(&format!("impl<'a> {}<'a> {{\n", encoder_name));
-        output.push_str(&format!(
-            "    /// Block length of each entry.\n\
-             pub const BLOCK_LENGTH: u16 = {};\n\n",
-            effective_block_length
-        ));
-
-        // wrap constructor
-        output
-            .push_str("    /// Wraps a buffer at the group header position, writing the header.\n");
-        output.push_str("    ///\n");
-        output.push_str("    /// # Arguments\n");
-        output.push_str("    /// * `buffer` - Mutable buffer to write to\n");
-        output.push_str("    /// * `offset` - Offset of the group header\n");
-        output.push_str("    /// * `count` - Number of entries to encode\n");
-        output.push_str(
-            "    pub fn wrap(buffer: &'a mut [u8], offset: usize, count: u16) -> Self {\n",
-        );
-        output.push_str("        let header = GroupHeader::new(Self::BLOCK_LENGTH, count);\n");
-        output.push_str("        header.encode(buffer, offset);\n");
-        output.push_str("        Self {\n");
-        output.push_str("            buffer,\n");
-        output.push_str("            count,\n");
-        output.push_str("            index: 0,\n");
-        output.push_str("            offset: offset + GroupHeader::ENCODED_LENGTH,\n");
-        output.push_str("        }\n");
-        output.push_str("    }\n\n");
-
-        // next_entry
-        output.push_str(
-            "    /// Returns the next entry encoder, or `None` if all entries are written.\n",
-        );
-        output.push_str(&format!(
-            "    pub fn next_entry(&mut self) -> Option<{}<'_>> {{\n",
-            entry_name
-        ));
-        output.push_str("        if self.index >= self.count {\n");
-        output.push_str("            return None;\n");
-        output.push_str("        }\n");
-        output.push_str("        let offset = self.offset;\n");
-        output.push_str("        self.offset += Self::BLOCK_LENGTH as usize;\n");
-        output.push_str("        self.index += 1;\n");
-        output.push_str(&format!(
-            "        Some({}::wrap(&mut *self.buffer, offset))\n",
-            entry_name
-        ));
-        output.push_str("    }\n\n");
-
-        // encoded_length
-        output.push_str(
-            "    /// Returns the total encoded length of this group (header + all entries).\n",
-        );
-        output.push_str("    #[must_use]\n");
-        output.push_str("    pub const fn encoded_length(&self) -> usize {\n");
-        output.push_str("        GroupHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize * self.count as usize\n");
-        output.push_str("    }\n");
-        output.push_str("}\n\n");
-
-        // Entry encoder
-        output.push_str(&self.generate_entry_encoder(group));
-
-        // Nested group encoders
-        for nested in &group.nested_groups {
-            output.push_str(&self.generate_group_encoder(nested));
-        }
-
-        output
-    }
-
-    /// Generates a group entry encoder.
-    fn generate_entry_encoder(&self, group: &ResolvedGroup) -> String {
-        let mut output = String::new();
-        let entry_name = group.entry_encoder_name();
-
-        output.push_str(&format!("/// {} Entry Encoder.\n", group.name));
-        output.push_str(&format!("pub struct {}<'a> {{\n", entry_name));
-        output.push_str("    buffer: &'a mut [u8],\n");
-        output.push_str("    offset: usize,\n");
-        output.push_str("}\n\n");
-
-        output.push_str(&format!("impl<'a> {}<'a> {{\n", entry_name));
-        output.push_str("    pub fn wrap(buffer: &'a mut [u8], offset: usize) -> Self {\n");
-        output.push_str("        Self { buffer, offset }\n");
-        output.push_str("    }\n\n");
-
-        // Field setters
-        for field in &group.fields {
-            output.push_str(&self.generate_entry_field_setter(field));
-        }
-
-        output.push_str("}\n\n");
-
-        output
-    }
-
-    /// Generates a field setter for a group entry encoder.
-    ///
-    /// Unlike the message-level `generate_field_setter`, this uses the raw field
-    /// offset (relative to the entry start) without a `MessageHeader::ENCODED_LENGTH`
-    /// prefix.
-    fn generate_entry_field_setter(&self, field: &ResolvedField) -> String {
-        let mut output = String::new();
-        let field_offset = field.offset;
-
-        output.push_str(&format!(
-            "    /// Set field: {} (id={}, offset={}).\n",
-            field.name, field.id, field.offset
-        ));
-        output.push_str("    #[inline(always)]\n");
-
-        if field.is_array {
-            let len = field.array_length.unwrap_or(field.encoded_length);
-
-            output.push_str(&format!(
-                "    pub fn {}(&mut self, value: &[u8]) -> &mut Self {{\n",
-                field.setter_name
-            ));
-            output.push_str(&format!(
-                "        let copy_len = value.len().min({});\n",
-                len
-            ));
-            output.push_str(&format!(
-                "        self.buffer[self.offset + {}..self.offset + {} + copy_len]\n",
-                field_offset, field_offset
-            ));
-            output.push_str("            .copy_from_slice(&value[..copy_len]);\n");
-            output.push_str(&format!("        if copy_len < {} {{\n", len));
-            output.push_str(&format!(
-                "            self.buffer[self.offset + {} + copy_len..self.offset + {} + {}].fill(0);\n",
-                field_offset, field_offset, len
-            ));
-            output.push_str("        }\n");
-            output.push_str("        self\n");
-            output.push_str("    }\n\n");
-        } else {
-            let rust_type = &field.rust_type;
-            let resolved_type = self.ir.get_type(&field.type_name);
-
-            match resolved_type.map(|t| &t.kind) {
-                Some(TypeKind::Enum { encoding, .. }) => {
-                    let write_method = get_write_method(Some(*encoding));
-                    let prim_type = encoding.rust_type();
-                    output.push_str(&format!(
-                        "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
-                        field.setter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        self.buffer.{}(self.offset + {}, {}::from(value));\n",
-                        write_method, field_offset, prim_type
-                    ));
-                    output.push_str("        self\n");
-                    output.push_str("    }\n\n");
-                }
-                Some(TypeKind::Set { encoding, .. }) => {
-                    let write_method = get_write_method(Some(*encoding));
-                    output.push_str(&format!(
-                        "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
-                        field.setter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        self.buffer.{}(self.offset + {}, value.raw());\n",
-                        write_method, field_offset
-                    ));
-                    output.push_str("        self\n");
-                    output.push_str("    }\n\n");
-                }
-                Some(TypeKind::Composite { .. }) => {
-                    output.push_str(&format!(
-                        "    pub fn {}(&mut self) -> {}Encoder<'_> {{\n",
-                        field.setter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        {}Encoder::wrap(self.buffer, self.offset + {})\n",
-                        rust_type, field_offset
-                    ));
-                    output.push_str("    }\n\n");
-                }
-                _ => {
-                    let write_method = get_write_method(field.primitive_type);
-                    output.push_str(&format!(
-                        "    pub fn {}(&mut self, value: {}) -> &mut Self {{\n",
-                        field.setter_name, rust_type
-                    ));
-                    output.push_str(&format!(
-                        "        self.buffer.{}(self.offset + {}, value);\n",
-                        write_method, field_offset
-                    ));
-                    output.push_str("        self\n");
-                    output.push_str("    }\n\n");
-                }
-            }
-        }
 
         output
     }
@@ -1191,40 +362,6 @@ impl<'a> MessageGenerator<'a> {
         output.push_str("    }\n\n");
 
         output
-    }
-}
-
-/// Gets the read method name for a primitive type.
-fn get_read_method(prim: Option<PrimitiveType>) -> &'static str {
-    match prim {
-        Some(PrimitiveType::Char) | Some(PrimitiveType::Uint8) => "get_u8",
-        Some(PrimitiveType::Int8) => "get_i8",
-        Some(PrimitiveType::Uint16) => "get_u16_le",
-        Some(PrimitiveType::Int16) => "get_i16_le",
-        Some(PrimitiveType::Uint32) => "get_u32_le",
-        Some(PrimitiveType::Int32) => "get_i32_le",
-        Some(PrimitiveType::Uint64) => "get_u64_le",
-        Some(PrimitiveType::Int64) => "get_i64_le",
-        Some(PrimitiveType::Float) => "get_f32_le",
-        Some(PrimitiveType::Double) => "get_f64_le",
-        None => "get_u64_le",
-    }
-}
-
-/// Gets the write method name for a primitive type.
-fn get_write_method(prim: Option<PrimitiveType>) -> &'static str {
-    match prim {
-        Some(PrimitiveType::Char) | Some(PrimitiveType::Uint8) => "put_u8",
-        Some(PrimitiveType::Int8) => "put_i8",
-        Some(PrimitiveType::Uint16) => "put_u16_le",
-        Some(PrimitiveType::Int16) => "put_i16_le",
-        Some(PrimitiveType::Uint32) => "put_u32_le",
-        Some(PrimitiveType::Int32) => "put_i32_le",
-        Some(PrimitiveType::Uint64) => "put_u64_le",
-        Some(PrimitiveType::Int64) => "put_i64_le",
-        Some(PrimitiveType::Float) => "put_f32_le",
-        Some(PrimitiveType::Double) => "put_f64_le",
-        None => "put_u64_le",
     }
 }
 
