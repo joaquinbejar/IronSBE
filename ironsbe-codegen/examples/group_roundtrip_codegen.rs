@@ -101,8 +101,8 @@ fn main() {
         "group encoder should have BLOCK_LENGTH = 29"
     );
     assert!(
-        code.contains("fn wrap(buffer: &'a mut [u8], offset: usize, count: u16)"),
-        "group encoder should have wrap(buffer, offset, count)"
+        code.contains("fn wrap(buffer: &'a mut [u8], limit: &'a mut usize, count: u16)"),
+        "group encoder should have wrap(buffer, limit, count) and borrow the parent's cursor"
     );
     println!("=== [PASS] Group encoder API is correct ===\n");
 

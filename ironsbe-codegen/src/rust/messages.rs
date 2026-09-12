@@ -10,7 +10,7 @@ use crate::error::CodegenError;
 use crate::rust::fields::{generate_field_getter, generate_field_setter};
 use crate::rust::groups::{
     GroupLayout, generate_group_accessor, generate_group_decoder, generate_group_encoder,
-    generate_group_offset_walker,
+    generate_group_encoder_accessor, generate_group_offset_walker,
 };
 use crate::rust::var_data::{
     VarDataInfo, end_offset_parts, generate_var_data_getter, generate_var_data_setter,
@@ -286,9 +286,14 @@ impl<'a> MessageGenerator<'a> {
             output.push_str(&generate_field_setter(self.ir, field));
         }
 
-        // Group encoder accessors (advance the write cursor)
+        // Group encoder accessors (lend the write cursor to the group encoder)
+        let mod_name = to_snake_case(&msg.name);
         for layout in groups {
-            output.push_str(&Self::generate_group_encoder_accessor(layout, &msg.name));
+            output.push_str(&generate_group_encoder_accessor(
+                &layout.group.name,
+                &format!("{mod_name}::{}", layout.group.encoder_name()),
+                "&mut self.limit",
+            ));
         }
 
         // Var data setters (append at the write cursor)
@@ -297,43 +302,6 @@ impl<'a> MessageGenerator<'a> {
         }
 
         output.push_str("}\n\n");
-
-        output
-    }
-
-    /// Generates a group encoder accessor on the parent message encoder.
-    ///
-    /// The group is placed at the current write cursor, and the cursor is
-    /// advanced past the header and `count` entries so the next group or var
-    /// data field lands right after it.
-    fn generate_group_encoder_accessor(layout: &GroupLayout<'_>, msg_name: &str) -> String {
-        let mut output = String::new();
-        let group = layout.group;
-        let qualified = format!("{}::{}", to_snake_case(msg_name), group.encoder_name());
-
-        output.push_str(&format!(
-            "    /// Begin encoding the {} repeating group.\n",
-            group.name
-        ));
-        output.push_str("    ///\n");
-        output.push_str(
-            "    /// Advances the write cursor past the group header and `count` entries.\n",
-        );
-        output.push_str(&format!(
-            "    pub fn {}_count(&mut self, count: u16) -> {}<'_> {{\n",
-            to_snake_case(&group.name),
-            qualified
-        ));
-        output.push_str("        let offset = self.limit;\n");
-        output.push_str(&format!(
-            "        self.limit += GroupHeader::ENCODED_LENGTH + {}::BLOCK_LENGTH as usize * count as usize;\n",
-            qualified
-        ));
-        output.push_str(&format!(
-            "        {}::wrap(&mut *self.buffer, offset, count)\n",
-            qualified
-        ));
-        output.push_str("    }\n\n");
 
         output
     }
@@ -758,18 +726,18 @@ mod tests {
             "group encoder BLOCK_LENGTH should be 20, not 0"
         );
 
-        // next_entry advances by BLOCK_LENGTH (not 0)
+        // next_entry advances the shared cursor by BLOCK_LENGTH (not 0)
         assert!(
-            code.contains("self.offset += Self::BLOCK_LENGTH as usize"),
-            "next_entry should advance offset by BLOCK_LENGTH"
+            code.contains("*self.limit = offset + Self::BLOCK_LENGTH as usize;"),
+            "next_entry should advance the cursor by BLOCK_LENGTH"
         );
 
-        // encoded_length uses BLOCK_LENGTH * count
+        // encoded_length measures what was written through the cursor
         assert!(
             code.contains(
-                "GroupHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize * self.count as usize"
+                "pub fn encoded_length(&self) -> usize {\n        *self.limit - self.start"
             ),
-            "encoded_length should use BLOCK_LENGTH * count"
+            "group encoded_length should be cursor - start"
         );
 
         // GroupHeader written with BLOCK_LENGTH
@@ -1015,17 +983,48 @@ mod tests {
             )
         );
 
-        // Encoder places each group at the cursor and advances it.
-        assert!(code.contains("let offset = self.limit;"));
-        assert!(code.contains(
-            "self.limit += GroupHeader::ENCODED_LENGTH + list_orders::OrdersGroupEncoder::BLOCK_LENGTH as usize * count as usize;"
-        ));
-        assert!(code.contains(
-            "self.limit += GroupHeader::ENCODED_LENGTH + list_orders::FillsGroupEncoder::BLOCK_LENGTH as usize * count as usize;"
-        ));
+        // Encoder lends its cursor to each group encoder instead of pre-advancing it.
         assert!(
-            code.contains("list_orders::FillsGroupEncoder::wrap(&mut *self.buffer, offset, count)")
+            !code.contains("self.limit += GroupHeader::ENCODED_LENGTH"),
+            "message encoder must not precompute the group extent"
         );
+        assert!(code.contains(
+            "list_orders::OrdersGroupEncoder::wrap(&mut *self.buffer, &mut self.limit, count)"
+        ));
+        assert!(code.contains(
+            "list_orders::FillsGroupEncoder::wrap(&mut *self.buffer, &mut self.limit, count)"
+        ));
+    }
+
+    #[test]
+    fn test_flat_group_encoder_borrows_cursor_and_keeps_entry_api() {
+        let code = generate_ok(MSG_TWO_GROUPS);
+        let group = section(
+            &code,
+            "pub struct OrdersGroupEncoder<'a>",
+            "/// orders Entry Encoder",
+        );
+
+        assert!(group.contains("    limit: &'a mut usize,\n    start: usize,\n"));
+        assert!(group.contains(
+            "pub fn wrap(buffer: &'a mut [u8], limit: &'a mut usize, count: u16) -> Self"
+        ));
+        assert!(group.contains("let start = *limit;"));
+        assert!(group.contains("*limit = start + GroupHeader::ENCODED_LENGTH;"));
+        assert!(group.contains("GroupHeader::new(Self::BLOCK_LENGTH, count)"));
+        assert!(group.contains("pub const fn count(&self) -> u16"));
+        assert!(group.contains("Some(OrdersEntryEncoder::wrap(&mut *self.buffer, offset))"));
+
+        let entry = section(
+            &code,
+            "pub struct OrdersEntryEncoder<'a>",
+            "/// fills Group Encoder",
+        );
+        assert!(
+            !entry.contains("limit"),
+            "flat entry encoder keeps the 0.5 shape: {entry}"
+        );
+        assert!(entry.contains("pub fn wrap(buffer: &'a mut [u8], offset: usize) -> Self"));
     }
 
     #[test]
@@ -1311,6 +1310,70 @@ mod tests {
             msg.contains("message 'Quote', group 'legs', group 'fills', data 'note'"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn test_var_data_in_group_entry_encoder_threads_cursor() {
+        let code = generate_ok(MSG_VAR_DATA_IN_GROUP);
+
+        let group = section(
+            &code,
+            "pub struct LegsGroupEncoder<'a>",
+            "/// legs Entry Encoder",
+        );
+        assert!(
+            group.contains(
+                "Some(LegsEntryEncoder::wrap(&mut *self.buffer, offset, &mut *self.limit))"
+            )
+        );
+
+        let entry = section(&code, "pub struct LegsEntryEncoder<'a>", "}\n\n}\n");
+        assert!(entry.contains("    limit: &'a mut usize,\n"));
+        assert!(entry.contains(
+            "pub fn wrap(buffer: &'a mut [u8], offset: usize, limit: &'a mut usize) -> Self"
+        ));
+        assert!(entry.contains("pub fn set_leg_qty(&mut self, value: u32) -> &mut Self"));
+        assert!(entry.contains("pub fn set_leg_tag(&mut self, value: &[u8]) -> &mut Self"));
+        assert!(entry.contains("self.buffer.put_u16_le(*self.limit, len);"));
+        assert!(entry.contains("let start = *self.limit + 2;"));
+        assert!(entry.contains("*self.limit = start + value.len();"));
+        assert!(entry.contains("pub fn set_leg_note(&mut self, value: &[u8]) -> &mut Self"));
+        assert!(entry.contains("self.buffer.put_u8(*self.limit, len);"));
+
+        // message-level var data after the group still uses the message cursor
+        let encoder = section(&code, "pub struct QuoteEncoder<'a>", "/// Types for Quote");
+        assert!(
+            encoder.contains(
+                "quote::LegsGroupEncoder::wrap(&mut *self.buffer, &mut self.limit, count)"
+            )
+        );
+        assert!(encoder.contains("self.buffer.put_u16_le(self.limit, len);"));
+    }
+
+    #[test]
+    fn test_nested_group_accessors_on_entry_encoder() {
+        let code = generate_ok(MSG_NESTED_WITH_VAR_DATA);
+        let entry = section(
+            &code,
+            "pub struct OrdersEntryEncoder<'a>",
+            "/// fills Group Encoder",
+        );
+
+        assert!(
+            entry.contains("pub fn fills_count(&mut self, count: u16) -> FillsGroupEncoder<'_>")
+        );
+        assert!(
+            entry.contains("FillsGroupEncoder::wrap(&mut *self.buffer, &mut *self.limit, count)")
+        );
+        assert!(entry.contains("pub fn set_memo(&mut self, value: &[u8]) -> &mut Self"));
+
+        let inner = section(
+            &code,
+            "pub struct FillsEntryEncoder<'a>",
+            "/// flags Group Decoder",
+        );
+        assert!(inner.contains("pub fn set_note(&mut self, value: &[u8]) -> &mut Self"));
+        assert!(inner.contains("self.buffer.put_u8(*self.limit, len);"));
     }
 
     #[test]

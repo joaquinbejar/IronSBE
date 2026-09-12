@@ -15,7 +15,8 @@ use ironsbe_schema::ir::{ResolvedGroup, SchemaIr, to_snake_case};
 use crate::error::CodegenError;
 use crate::rust::fields::{generate_entry_field_setter, generate_field_getter};
 use crate::rust::var_data::{
-    VarDataInfo, end_offset_parts, generate_var_data_getter, resolve_var_data,
+    VarDataInfo, end_offset_parts, generate_var_data_getter, generate_var_data_setter,
+    resolve_var_data,
 };
 
 /// Byte offset just past the fixed block of a group entry, as seen from an
@@ -357,11 +358,16 @@ pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
 
     // Group encoder struct
     output.push_str(&format!("/// {} Group Encoder.\n", group.name));
+    output.push_str("///\n");
+    output.push_str("/// Borrows the parent's write cursor: the header and every entry are\n");
+    output.push_str("/// appended at the cursor, so the parent's `encoded_length()` and the\n");
+    output.push_str("/// position of whatever follows this group stay correct.\n");
     output.push_str(&format!("pub struct {}<'a> {{\n", encoder_name));
     output.push_str("    buffer: &'a mut [u8],\n");
+    output.push_str("    limit: &'a mut usize,\n");
+    output.push_str("    start: usize,\n");
     output.push_str("    count: u16,\n");
     output.push_str("    index: u16,\n");
-    output.push_str("    offset: usize,\n");
     output.push_str("}\n\n");
 
     // Group encoder implementation
@@ -373,27 +379,50 @@ pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     ));
 
     // wrap constructor
-    output.push_str("    /// Wraps a buffer at the group header position, writing the header.\n");
+    output.push_str(
+        "    /// Writes the group header at the cursor and advances it past the header.\n",
+    );
     output.push_str("    ///\n");
     output.push_str("    /// # Arguments\n");
     output.push_str("    /// * `buffer` - Mutable buffer to write to\n");
-    output.push_str("    /// * `offset` - Offset of the group header\n");
+    output.push_str(
+        "    /// * `limit` - Parent's write cursor, positioned where the group header goes\n",
+    );
     output.push_str("    /// * `count` - Number of entries to encode\n");
-    output.push_str("    pub fn wrap(buffer: &'a mut [u8], offset: usize, count: u16) -> Self {\n");
+    output.push_str(
+        "    pub fn wrap(buffer: &'a mut [u8], limit: &'a mut usize, count: u16) -> Self {\n",
+    );
+    output.push_str("        let start = *limit;\n");
     output.push_str("        let header = GroupHeader::new(Self::BLOCK_LENGTH, count);\n");
-    output.push_str("        header.encode(buffer, offset);\n");
+    output.push_str("        header.encode(buffer, start);\n");
+    output.push_str("        *limit = start + GroupHeader::ENCODED_LENGTH;\n");
     output.push_str("        Self {\n");
     output.push_str("            buffer,\n");
+    output.push_str("            limit,\n");
+    output.push_str("            start,\n");
     output.push_str("            count,\n");
     output.push_str("            index: 0,\n");
-    output.push_str("            offset: offset + GroupHeader::ENCODED_LENGTH,\n");
     output.push_str("        }\n");
+    output.push_str("    }\n\n");
+
+    output.push_str("    /// Returns the number of entries declared for this group.\n");
+    output.push_str("    #[must_use]\n");
+    output.push_str("    pub const fn count(&self) -> u16 {\n");
+    output.push_str("        self.count\n");
     output.push_str("    }\n\n");
 
     // next_entry
     output.push_str(
         "    /// Returns the next entry encoder, or `None` if all entries are written.\n",
     );
+    output.push_str("    ///\n");
+    output.push_str("    /// Advances the cursor past the entry's fixed block");
+    if layout.is_fixed_stride() {
+        output.push_str(".\n");
+    } else {
+        output.push_str("; nested groups and\n");
+        output.push_str("    /// var data written through the entry advance it further.\n");
+    }
     output.push_str(&format!(
         "    pub fn next_entry(&mut self) -> Option<{}<'_>> {{\n",
         entry_name
@@ -401,24 +430,29 @@ pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     output.push_str("        if self.index >= self.count {\n");
     output.push_str("            return None;\n");
     output.push_str("        }\n");
-    output.push_str("        let offset = self.offset;\n");
-    output.push_str("        self.offset += Self::BLOCK_LENGTH as usize;\n");
+    output.push_str("        let offset = *self.limit;\n");
+    output.push_str("        *self.limit = offset + Self::BLOCK_LENGTH as usize;\n");
     output.push_str("        self.index += 1;\n");
-    output.push_str(&format!(
-        "        Some({}::wrap(&mut *self.buffer, offset))\n",
-        entry_name
-    ));
+    if layout.is_fixed_stride() {
+        output.push_str(&format!(
+            "        Some({}::wrap(&mut *self.buffer, offset))\n",
+            entry_name
+        ));
+    } else {
+        output.push_str(&format!(
+            "        Some({}::wrap(&mut *self.buffer, offset, &mut *self.limit))\n",
+            entry_name
+        ));
+    }
     output.push_str("    }\n\n");
 
     // encoded_length
-    output.push_str(
-        "    /// Returns the total encoded length of this group (header + all entries).\n",
-    );
+    output
+        .push_str("    /// Returns the bytes written for this group so far (header + entries).\n");
+    output.push_str("    #[inline]\n");
     output.push_str("    #[must_use]\n");
-    output.push_str("    pub const fn encoded_length(&self) -> usize {\n");
-    output.push_str(
-        "        GroupHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize * self.count as usize\n",
-    );
+    output.push_str("    pub fn encoded_length(&self) -> usize {\n");
+    output.push_str("        *self.limit - self.start\n");
     output.push_str("    }\n");
     output.push_str("}\n\n");
 
@@ -433,26 +467,103 @@ pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     output
 }
 
+/// Generates a group encoder accessor (`<group>_count(count)`) on a parent
+/// encoder: a message encoder or an entry encoder with nested groups.
+///
+/// # Arguments
+/// * `group_name` - Schema name of the group
+/// * `encoder_type` - Group encoder type, qualified as needed from the host
+/// * `cursor_ref` - Expression lending the parent's cursor, e.g.
+///   `&mut self.limit` on a message encoder or `&mut *self.limit` on an
+///   entry encoder
+pub(crate) fn generate_group_encoder_accessor(
+    group_name: &str,
+    encoder_type: &str,
+    cursor_ref: &str,
+) -> String {
+    let mut output = String::new();
+
+    output.push_str(&format!(
+        "    /// Begin encoding the {group_name} repeating group at the write cursor.\n"
+    ));
+    output.push_str("    ///\n");
+    output.push_str(
+        "    /// The returned encoder borrows the cursor; once it is dropped the cursor\n",
+    );
+    output
+        .push_str("    /// sits right after the last entry written. Groups and var data must be\n");
+    output.push_str("    /// written in schema order.\n");
+    output.push_str(&format!(
+        "    pub fn {}_count(&mut self, count: u16) -> {encoder_type}<'_> {{\n",
+        to_snake_case(group_name)
+    ));
+    output.push_str(&format!(
+        "        {encoder_type}::wrap(&mut *self.buffer, {cursor_ref}, count)\n"
+    ));
+    output.push_str("    }\n\n");
+
+    output
+}
+
 /// Generates a group entry encoder.
+///
+/// Entries of fixed-stride groups keep the `{ buffer, offset }` shape and
+/// the `wrap(buffer, offset)` constructor. Entries that carry nested groups
+/// or var data also borrow the group's write cursor so those parts can be
+/// appended after the fixed block.
 fn generate_entry_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     let mut output = String::new();
     let group = layout.group;
     let entry_name = group.entry_encoder_name();
+    let fixed_stride = layout.is_fixed_stride();
 
     output.push_str(&format!("/// {} Entry Encoder.\n", group.name));
+    if !fixed_stride {
+        output.push_str("///\n");
+        output.push_str("/// Fixed fields are written at their offsets inside the entry block;\n");
+        output.push_str("/// nested groups and var data are appended at the shared write cursor\n");
+        output.push_str("/// and must be written in schema order.\n");
+    }
     output.push_str(&format!("pub struct {}<'a> {{\n", entry_name));
     output.push_str("    buffer: &'a mut [u8],\n");
     output.push_str("    offset: usize,\n");
+    if !fixed_stride {
+        output.push_str("    limit: &'a mut usize,\n");
+    }
     output.push_str("}\n\n");
 
     output.push_str(&format!("impl<'a> {}<'a> {{\n", entry_name));
-    output.push_str("    pub fn wrap(buffer: &'a mut [u8], offset: usize) -> Self {\n");
-    output.push_str("        Self { buffer, offset }\n");
+    if fixed_stride {
+        output.push_str("    /// Wraps an entry whose fixed block starts at `offset`.\n");
+        output.push_str("    pub fn wrap(buffer: &'a mut [u8], offset: usize) -> Self {\n");
+        output.push_str("        Self { buffer, offset }\n");
+    } else {
+        output.push_str("    /// Wraps an entry whose fixed block starts at `offset`, appending\n");
+        output.push_str("    /// nested groups and var data at `limit`.\n");
+        output.push_str(
+            "    pub fn wrap(buffer: &'a mut [u8], offset: usize, limit: &'a mut usize) -> Self {\n",
+        );
+        output.push_str("        Self { buffer, offset, limit }\n");
+    }
     output.push_str("    }\n\n");
 
     // Field setters
     for field in &group.fields {
         output.push_str(&generate_entry_field_setter(ir, field));
+    }
+
+    // Nested group encoder accessors (advance the shared cursor)
+    for nested in &layout.nested {
+        output.push_str(&generate_group_encoder_accessor(
+            &nested.group.name,
+            &nested.group.encoder_name(),
+            "&mut *self.limit",
+        ));
+    }
+
+    // Var data setters (append at the shared cursor)
+    for info in &layout.var_data {
+        output.push_str(&generate_var_data_setter(info, "*self.limit"));
     }
 
     output.push_str("}\n\n");
