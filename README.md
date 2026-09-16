@@ -193,6 +193,57 @@ fn main() {
 }
 ```
 
+### Repeating Groups and Var Data
+
+Groups and `<data>` fields are appended at a write cursor, in schema order.
+Call `finish()` to complete the message: any group not begun or var data
+field not set is encoded as empty (a group header with zero entries, a
+zero-length var data header), so the frame is always well-formed. Writing
+a part out of schema order, or twice, panics.
+
+```rust
+use trading::QuoteEncoder;
+
+fn encode(buffer: &mut [u8]) -> usize {
+    let mut encoder = QuoteEncoder::wrap(buffer, 0);
+    encoder.set_request_id(7);
+    {
+        let mut legs = encoder.legs_count(2);
+        legs.next_entry().unwrap().set_leg_qty(10).set_leg_tag(b"A");
+        legs.next_entry().unwrap().set_leg_qty(20); // legTag encoded as empty
+    }
+    // comment never set: encoded as empty by finish()
+    encoder.finish()
+}
+```
+
+The random-access decoder positions each group and var data field by
+walking the preceding groups on the wire, on every accessor call. For hot
+paths, messages with var data or variable-stride groups also get a
+sequential `<Message>Reader` that reads the frame front to back with one
+cursor, visiting every header exactly once:
+
+```rust
+use trading::QuoteReader;
+
+fn read(frame: &[u8]) -> usize {
+    let mut reader = QuoteReader::decode(frame).unwrap();
+    let request_id = reader.request_id();
+    {
+        let mut legs = reader.legs();
+        while let Some(mut leg) = legs.next_entry() {
+            let _ = (leg.leg_qty(), leg.leg_tag());
+        }
+    }
+    let _comment = reader.comment(); // or skip it: parts not read are walked lazily
+    reader.finish() // encoded length
+}
+```
+
+On a book with 256 variable entries followed by eight var data fields the
+sequential path decodes in 281 ns (p50) against 2245 ns for random access
+(`cargo bench -p ironsbe-bench --bench sequential_decode`).
+
 ---
 
 ## Architecture
@@ -526,6 +577,8 @@ fn main() {
 | Repeating groups | ✅ |
 | Nested repeating groups | ✅ accessors on entry codecs (`entry.<group>()` / `entry.<group>_count(n)`) |
 | Variable-length data (`<data>`) | ✅ at message level and inside repeating group entries; length headers `uint8` / `uint16` / `uint32` |
+| Unwritten groups / var data | ✅ encoded as empty on `finish()` or entry drop; out-of-order writes panic |
+| Sequential single-pass decoding | ✅ `<Message>Reader` for messages with var data or variable-stride groups |
 | Optional fields (null values) | ✅ |
 | Schema versioning | ✅ |
 | Little-endian byte order | ✅ |
