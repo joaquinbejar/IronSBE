@@ -12,6 +12,7 @@ use crate::rust::groups::{
     GroupLayout, generate_group_accessor, generate_group_decoder, generate_group_encoder,
     generate_group_encoder_accessor, generate_group_offset_walker,
 };
+use crate::rust::readers::{generate_group_reader, generate_message_reader, message_needs_reader};
 use crate::rust::var_data::{
     VarDataInfo, end_offset_parts, generate_var_data_getter, generate_var_data_setter,
     resolve_var_data,
@@ -56,7 +57,13 @@ impl<'a> MessageGenerator<'a> {
             output.push_str(&self.generate_decoder(msg, &groups, &var_data));
             output.push_str(&self.generate_encoder(msg, &groups, &var_data));
 
-            // Generate group decoders and encoders in a message-scoped module
+            // Sequential reader, only where random access has to walk the wire
+            let needs_reader = message_needs_reader(&groups, &var_data);
+            if needs_reader {
+                output.push_str(&generate_message_reader(self.ir, msg, &groups, &var_data));
+            }
+
+            // Generate group decoders, encoders and readers in a message-scoped module
             if !groups.is_empty() {
                 let mod_name = to_snake_case(&msg.name);
                 output.push_str(&format!("/// Types for {} repeating groups.\n", msg.name));
@@ -65,6 +72,9 @@ impl<'a> MessageGenerator<'a> {
                 for layout in &groups {
                     output.push_str(&generate_group_decoder(self.ir, layout));
                     output.push_str(&generate_group_encoder(self.ir, layout));
+                    if needs_reader {
+                        output.push_str(&generate_group_reader(self.ir, layout));
+                    }
                 }
                 output.push_str("}\n\n");
             }
@@ -1606,5 +1616,99 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("var data length encoding 'int64'"), "{msg}");
         assert!(msg.contains("message 'Quote', data 'label'"), "{msg}");
+    }
+
+    #[test]
+    fn test_reader_emitted_only_for_messages_that_walk_the_wire() {
+        // var data after flat groups: reader (var data still chains offsets)
+        let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
+        assert!(code.contains("pub struct QuoteReader<'a> {"));
+        // var data only: reader
+        let code = generate_ok(MSG_ONLY_VAR_DATA);
+        assert!(code.contains("pub struct BlobReader<'a> {"));
+        // flat groups only: random access is already O(1), no reader
+        let code = generate_ok(MSG_TWO_GROUPS);
+        assert!(!code.contains("ListOrdersReader"));
+        assert!(!code.contains("GroupReader"));
+        // fixed fields only: no reader
+        let code = generate_ok(MSG_FIXED_ONLY);
+        assert!(!code.contains("PingReader"));
+    }
+
+    #[test]
+    fn test_message_reader_reuses_decoder_validation_and_field_getters() {
+        let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
+        let reader = section(&code, "impl<'a> QuoteReader<'a> {", "\n}\n\n");
+
+        assert!(reader.contains("pos: offset + Self::BLOCK_LENGTH as usize,"));
+        assert!(reader.contains("let decoder = QuoteDecoder::decode(buffer)?;"));
+        assert!(reader.contains("decoder.acting_version,"));
+        // same fixed-field getter as the decoder
+        assert!(reader.contains(
+            "pub fn qty(&self) -> u64 {\n        self.buffer.get_u64_le(self.offset + 0)"
+        ));
+        // flat group: existing decoder, cursor stepped in O(1)
+        assert!(reader.contains("pub fn legs(&mut self) -> quote::LegsGroupDecoder<'a> {"));
+        assert!(
+            reader.contains("let group = quote::LegsGroupDecoder::wrap(self.buffer, self.pos);")
+        );
+        assert!(reader.contains("self.pos = group.end_offset();"));
+        // var data read once at the cursor, in schema order
+        assert!(reader.contains("self.sbe_advance_to(1, \"var data field 'label'\");"));
+        assert!(reader.contains("self.sbe_advance_to(2, \"var data field 'payload'\");"));
+        assert!(reader.contains("pub fn finish(mut self) -> usize {\n        self.sbe_skip_to(Self::SBE_VAR_PARTS);\n        MessageHeader::ENCODED_LENGTH + (self.pos - self.offset)"));
+        assert!(reader.contains("const SBE_VAR_PARTS: u16 = 3;"));
+        // no group readers for flat groups
+        assert!(!code.contains("LegsGroupReader"));
+    }
+
+    #[test]
+    fn test_variable_groups_get_readers_recursively() {
+        let code = generate_ok(MSG_NESTED_WITH_VAR_DATA);
+
+        let reader = section(&code, "impl<'a> NestedReader<'a> {", "\n}\n\n");
+        assert!(reader.contains("pub fn orders(&mut self) -> nested::OrdersGroupReader<'_, 'a> {"));
+        assert!(reader.contains("nested::OrdersGroupReader::wrap(self.buffer, &mut self.pos)"));
+        assert!(reader.contains("pub fn flags(&mut self) -> nested::FlagsGroupDecoder<'a> {"));
+        assert!(reader.contains("pub fn trailer(&mut self) -> &'a [u8] {"));
+
+        // group reader borrows the cursor and walks leftovers on drop
+        assert!(code.contains("pub struct OrdersGroupReader<'r, 'a> {"));
+        assert!(
+            code.contains("pub fn next_entry(&mut self) -> Option<OrdersEntryReader<'_, 'a>> {")
+        );
+        let drop = section(
+            &code,
+            "impl Drop for OrdersGroupReader<'_, '_> {",
+            "\n}\n\n",
+        );
+        assert!(drop.contains("if std::thread::panicking() {"));
+        assert!(drop.contains(
+            "*self.pos = OrdersEntryDecoder::wrap(self.buffer, *self.pos, self.block_length).end_offset();"
+        ));
+
+        // entry reader: nested variable group then var data, borrowed cursor
+        let entry = section(&code, "impl<'e, 'a> OrdersEntryReader<'e, 'a> {", "\n}\n\n");
+        assert!(entry.contains("pub fn fills(&mut self) -> FillsGroupReader<'_, 'a> {"));
+        assert!(entry.contains("FillsGroupReader::wrap(self.buffer, &mut *self.pos)"));
+        assert!(entry.contains("self.sbe_advance_to(1, \"var data field 'memo'\");"));
+        assert!(
+            entry.contains(
+                "*self.pos = FillsGroupDecoder::wrap(self.buffer, *self.pos).end_offset();"
+            )
+        );
+        assert!(entry.contains("const SBE_VAR_PARTS: u16 = 2;"));
+        let entry_drop = section(
+            &code,
+            "impl Drop for OrdersEntryReader<'_, '_> {",
+            "\n}\n\n",
+        );
+        assert!(entry_drop.contains("self.sbe_skip_to(Self::SBE_VAR_PARTS);"));
+
+        // nested variable group gets its own reader pair; the flat one does not
+        assert!(code.contains("pub struct FillsGroupReader<'r, 'a> {"));
+        assert!(code.contains("pub struct FillsEntryReader<'e, 'a> {"));
+        assert!(!code.contains("FlagsGroupReader"));
+        assert!(!code.contains("FlagsEntryReader"));
     }
 }
