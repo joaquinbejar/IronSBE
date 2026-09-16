@@ -251,11 +251,21 @@ pub(crate) fn end_offset_parts(
 
 /// Generates `set_<name>` for one var data field on an encoder.
 ///
+/// The host carries the variable-part guard (see `var_parts`): the setter
+/// first fills every part skipped since the last write with an empty header,
+/// then appends its own header and payload.
+///
 /// # Arguments
 /// * `info` - Resolved field layout
 /// * `cursor` - Place expression of the write cursor, e.g. `self.limit` on a
 ///   message encoder or `*self.limit` on an entry encoder
-pub(crate) fn generate_var_data_setter(info: &VarDataInfo, cursor: &str) -> String {
+/// * `part_index` - Position of the field among the owner's variable parts
+///   (repeating groups first, then var data fields)
+pub(crate) fn generate_var_data_setter(
+    info: &VarDataInfo,
+    cursor: &str,
+    part_index: usize,
+) -> String {
     let mut output = String::new();
 
     output.push_str(&format!(
@@ -265,15 +275,22 @@ pub(crate) fn generate_var_data_setter(info: &VarDataInfo, cursor: &str) -> Stri
     output.push_str("    ///\n");
     output.push_str("    /// Appends the length header followed by `value` at the write cursor.\n");
     output.push_str("    /// Var data fields must be written in schema order, after all\n");
-    output.push_str("    /// repeating groups.\n");
+    output.push_str("    /// repeating groups. Any group or var data field skipped before this\n");
+    output.push_str("    /// one is written as empty first; a field never written encodes as\n");
+    output.push_str("    /// empty when the entry is dropped or the message is finished.\n");
     output.push_str("    ///\n");
     output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if `value.len()` does not fit in the length header, or if\n");
-    output.push_str("    /// the buffer is too short.\n");
+    output.push_str("    /// Panics if `value.len()` does not fit in the length header, if the\n");
+    output.push_str("    /// buffer is too short, or if this field or a later part was already\n");
+    output.push_str("    /// written (out-of-schema-order write).\n");
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
         "    pub fn set_{}(&mut self, value: &[u8]) -> &mut Self {{\n",
         info.accessor
+    ));
+    output.push_str(&format!(
+        "        self.sbe_advance_to({part_index}, \"var data field '{}'\");\n",
+        info.name
     ));
     output.push_str(&format!(
         "        let Ok(len) = {}::try_from(value.len()) else {{\n",
@@ -294,6 +311,7 @@ pub(crate) fn generate_var_data_setter(info: &VarDataInfo, cursor: &str) -> Stri
     ));
     output.push_str("        self.buffer.put_bytes(start, value);\n");
     output.push_str(&format!("        {cursor} = start + value.len();\n"));
+    output.push_str(&format!("        self.written = {};\n", part_index + 1));
     output.push_str("        self\n");
     output.push_str("    }\n\n");
 
@@ -361,10 +379,21 @@ mod tests {
 
     #[test]
     fn test_var_data_setter_uses_cursor_expression() {
-        let code = generate_var_data_setter(&info("legTag", 2), "*self.limit");
+        let code = generate_var_data_setter(&info("legTag", 2), "*self.limit", 0);
         assert!(code.contains("pub fn set_leg_tag(&mut self, value: &[u8]) -> &mut Self"));
         assert!(code.contains("self.buffer.put_u16_le(*self.limit, len);"));
         assert!(code.contains("let start = *self.limit + 2;"));
         assert!(code.contains("*self.limit = start + value.len();"));
+    }
+
+    #[test]
+    fn test_var_data_setter_guards_its_part_index() {
+        let code = generate_var_data_setter(&info("comment", 2), "self.limit", 3);
+        assert!(code.contains("self.sbe_advance_to(3, \"var data field 'comment'\");"));
+        assert!(code.contains("self.written = 4;"));
+        // the guard runs before anything is written
+        let guard = code.find("sbe_advance_to").expect("guard call");
+        let write = code.find("put_u16_le").expect("header write");
+        assert!(guard < write);
     }
 }

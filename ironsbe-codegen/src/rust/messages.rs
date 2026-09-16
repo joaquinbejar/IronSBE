@@ -16,6 +16,7 @@ use crate::rust::var_data::{
     VarDataInfo, end_offset_parts, generate_var_data_getter, generate_var_data_setter,
     resolve_var_data,
 };
+use crate::rust::var_parts::{collect_var_parts, generate_encoder_parts_guard};
 
 /// Byte offset just past the root block, as seen from a message decoder.
 const MESSAGE_BLOCK_END: &str = "self.offset + Self::BLOCK_LENGTH as usize";
@@ -220,17 +221,30 @@ impl<'a> MessageGenerator<'a> {
     ) -> String {
         let mut output = String::new();
         let encoder_name = msg.encoder_name();
+        let mod_name = to_snake_case(&msg.name);
+        let parts = collect_var_parts(groups, var_data, &format!("{mod_name}::"));
+        let has_parts = !parts.is_empty();
 
         // Struct definition
         output.push_str(&format!("/// {} Encoder.\n", msg.name));
         output.push_str("///\n");
         output.push_str("/// Fixed fields are written at their schema offsets. Repeating groups\n");
         output.push_str("/// and var data fields are appended at a write cursor (`limit`) and\n");
-        output.push_str("/// must be written in schema order.\n");
+        output.push_str("/// must be written in schema order.");
+        if has_parts {
+            output.push_str(" Call `finish()` once done: it encodes\n");
+            output.push_str("/// every group or var data field not written as empty and returns\n");
+            output.push_str("/// the frame length.\n");
+        } else {
+            output.push('\n');
+        }
         output.push_str(&format!("pub struct {}<'a> {{\n", encoder_name));
         output.push_str("    buffer: &'a mut [u8],\n");
         output.push_str("    offset: usize,\n");
         output.push_str("    limit: usize,\n");
+        if has_parts {
+            output.push_str("    written: u16,\n");
+        }
         output.push_str("}\n\n");
 
         // Implementation
@@ -255,7 +269,13 @@ impl<'a> MessageGenerator<'a> {
         output.push_str(
             "        let limit = offset + MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize;\n",
         );
-        output.push_str("        let mut encoder = Self { buffer, offset, limit };\n");
+        if has_parts {
+            output.push_str(
+                "        let mut encoder = Self { buffer, offset, limit, written: 0 };\n",
+            );
+        } else {
+            output.push_str("        let mut encoder = Self { buffer, offset, limit };\n");
+        }
         output.push_str("        encoder.write_header();\n");
         output.push_str("        encoder\n");
         output.push_str("    }\n\n");
@@ -274,12 +294,21 @@ impl<'a> MessageGenerator<'a> {
         // Encoded length
         output.push_str("    /// Returns the encoded length of the message so far: header,\n");
         output.push_str("    /// fixed block, and every repeating group and var data field\n");
-        output.push_str("    /// written through this encoder.\n");
+        output.push_str("    /// written through this encoder.");
+        if has_parts {
+            output.push_str(" Parts not written yet are not\n");
+            output.push_str("    /// counted; use `finish()` to complete the message.\n");
+        } else {
+            output.push('\n');
+        }
         output.push_str("    #[inline]\n");
         output.push_str("    #[must_use]\n");
         output.push_str("    pub const fn encoded_length(&self) -> usize {\n");
         output.push_str("        self.limit - self.offset\n");
         output.push_str("    }\n\n");
+
+        // Finish
+        output.push_str(&Self::generate_encoder_finish(has_parts));
 
         // Field setters
         for field in &msg.fields {
@@ -287,21 +316,65 @@ impl<'a> MessageGenerator<'a> {
         }
 
         // Group encoder accessors (lend the write cursor to the group encoder)
-        let mod_name = to_snake_case(&msg.name);
-        for layout in groups {
+        for (index, layout) in groups.iter().enumerate() {
             output.push_str(&generate_group_encoder_accessor(
                 &layout.group.name,
                 &format!("{mod_name}::{}", layout.group.encoder_name()),
                 "&mut self.limit",
+                index,
             ));
         }
 
-        // Var data setters (append at the write cursor)
-        for info in var_data {
-            output.push_str(&generate_var_data_setter(info, "self.limit"));
+        // Var data setters (append at the write cursor, after all groups)
+        for (index, info) in var_data.iter().enumerate() {
+            output.push_str(&generate_var_data_setter(
+                info,
+                "self.limit",
+                groups.len() + index,
+            ));
         }
 
+        // Variable-part guard (only encoders with parts carry `written`)
+        output.push_str(&generate_encoder_parts_guard(&parts, "self.limit"));
+
         output.push_str("}\n\n");
+
+        output
+    }
+
+    /// Generates `finish()` on a message encoder.
+    ///
+    /// Emitted on every encoder so callers can rely on it: with variable
+    /// parts it fills the missing ones and returns the frame length; without
+    /// them it is `encoded_length()`.
+    fn generate_encoder_finish(has_parts: bool) -> String {
+        let mut output = String::new();
+
+        output.push_str("    /// Completes the message and returns its encoded length in bytes:\n");
+        output.push_str("    /// header, fixed block and variable section.\n");
+        if has_parts {
+            output.push_str("    ///\n");
+            output.push_str(
+                "    /// Every repeating group not begun and every var data field not set is\n",
+            );
+            output.push_str(
+                "    /// encoded as empty (a group header with zero entries, a zero-length\n",
+            );
+            output.push_str("    /// var data header), so the frame is always well-formed.\n");
+            output.push_str("    ///\n");
+            output.push_str("    /// # Panics\n");
+            output.push_str("    /// Panics if the buffer is too short for the empty headers.\n");
+        }
+        output.push_str("    #[must_use]\n");
+        if has_parts {
+            output.push_str("    pub fn finish(mut self) -> usize {\n");
+            output.push_str("        self.sbe_fill_to(Self::SBE_VAR_PARTS);\n");
+            output.push_str("        self.limit - self.offset\n");
+        } else {
+            output.push_str("    pub const fn finish(self) -> usize {\n");
+            output.push_str("        self.encoded_length()\n");
+        }
+        output.push_str("    }\n\n");
 
         output
     }
@@ -987,8 +1060,9 @@ mod tests {
         ));
 
         // Encoder lends its cursor to each group encoder instead of pre-advancing it.
+        let orders_count = section(&code, "pub fn orders_count(", "    }\n");
         assert!(
-            !code.contains("self.limit += GroupHeader::ENCODED_LENGTH"),
+            !orders_count.contains("self.limit +="),
             "message encoder must not precompute the group extent"
         );
         assert!(code.contains(
@@ -997,6 +1071,93 @@ mod tests {
         assert!(code.contains(
             "list_orders::FillsGroupEncoder::wrap(&mut *self.buffer, &mut self.limit, count)"
         ));
+    }
+
+    #[test]
+    fn test_encoder_with_parts_carries_written_counter_and_guard() {
+        let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
+        let encoder = section(&code, "pub struct QuoteEncoder<'a> {", "\n}\n");
+        assert!(encoder.contains("    written: u16,"));
+        assert!(code.contains("let mut encoder = Self { buffer, offset, limit, written: 0 };"));
+
+        let imp = section(&code, "impl<'a> QuoteEncoder<'a> {", "\n}\n\n");
+        assert!(imp.contains("const SBE_VAR_PARTS: u16 = 3;"));
+        assert!(imp.contains("fn sbe_advance_to(&mut self, target: u16, what: &'static str)"));
+        // parts in schema order: the group, then the two var data fields
+        assert!(imp.contains("self.sbe_advance_to(0, \"repeating group 'legs'\");"));
+        assert!(imp.contains("self.sbe_advance_to(1, \"var data field 'label'\");"));
+        assert!(imp.contains("self.sbe_advance_to(2, \"var data field 'payload'\");"));
+        // empty headers use the group encoder's block length and the field widths
+        assert!(imp.contains(
+            "GroupHeader::new(quote::LegsGroupEncoder::BLOCK_LENGTH, 0).encode(self.buffer, self.limit);"
+        ));
+        assert!(
+            imp.contains(
+                "self.buffer.put_u16_le(self.limit, 0);\n                self.limit += 2;"
+            )
+        );
+        assert!(
+            imp.contains("self.buffer.put_u8(self.limit, 0);\n                self.limit += 1;")
+        );
+        // finish fills the tail and returns the frame length
+        assert!(imp.contains(
+            "pub fn finish(mut self) -> usize {\n        self.sbe_fill_to(Self::SBE_VAR_PARTS);\n        self.limit - self.offset\n    }"
+        ));
+    }
+
+    #[test]
+    fn test_encoder_with_flat_groups_only_still_guards_groups() {
+        let code = generate_ok(MSG_TWO_GROUPS);
+        let imp = section(&code, "impl<'a> ListOrdersEncoder<'a> {", "\n}\n\n");
+        assert!(imp.contains("const SBE_VAR_PARTS: u16 = 2;"));
+        assert!(imp.contains("self.sbe_advance_to(0, \"repeating group 'orders'\");"));
+        assert!(imp.contains("self.sbe_advance_to(1, \"repeating group 'fills'\");"));
+        assert!(imp.contains("pub fn finish(mut self) -> usize {"));
+    }
+
+    #[test]
+    fn test_flat_encoder_has_no_counter_and_const_finish() {
+        let code = generate_ok(MSG_FIXED_ONLY);
+        let encoder = section(&code, "pub struct PingEncoder<'a> {", "\n}\n");
+        assert!(!encoder.contains("written"));
+        assert!(code.contains("let mut encoder = Self { buffer, offset, limit };"));
+
+        let imp = section(&code, "impl<'a> PingEncoder<'a> {", "\n}\n\n");
+        assert!(!imp.contains("SBE_VAR_PARTS"));
+        assert!(!imp.contains("sbe_advance_to"));
+        assert!(imp.contains(
+            "pub const fn finish(self) -> usize {\n        self.encoded_length()\n    }"
+        ));
+    }
+
+    #[test]
+    fn test_variable_entry_encoder_guards_and_fills_on_drop() {
+        let code = generate_ok(MSG_NESTED_WITH_VAR_DATA);
+
+        // orders entries: nested group `fills` is part 0, `memo` is part 1
+        let orders = section(&code, "pub struct OrdersEntryEncoder<'a> {", "\n}\n");
+        assert!(orders.contains("    limit: &'a mut usize,\n    written: u16,"));
+        let orders_impl = section(&code, "impl<'a> OrdersEntryEncoder<'a> {", "\n}\n\n");
+        assert!(orders_impl.contains("Self { buffer, offset, limit, written: 0 }"));
+        assert!(orders_impl.contains("const SBE_VAR_PARTS: u16 = 2;"));
+        assert!(orders_impl.contains("self.sbe_advance_to(0, \"repeating group 'fills'\");"));
+        assert!(orders_impl.contains("self.sbe_advance_to(1, \"var data field 'memo'\");"));
+        assert!(orders_impl.contains(
+            "GroupHeader::new(FillsGroupEncoder::BLOCK_LENGTH, 0).encode(self.buffer, *self.limit);"
+        ));
+        assert!(orders_impl.contains("*self.limit += GroupHeader::ENCODED_LENGTH;"));
+        assert!(orders_impl.contains(
+            "self.buffer.put_u16_le(*self.limit, 0);\n                *self.limit += 2;"
+        ));
+        assert!(code.contains("impl Drop for OrdersEntryEncoder<'_> {"));
+        assert!(code.contains("impl Drop for FillsEntryEncoder<'_> {"));
+
+        // flat entries stay untouched
+        let flags = section(&code, "pub struct FlagsEntryEncoder<'a> {", "\n}\n");
+        assert!(!flags.contains("written"));
+        assert!(!code.contains("impl Drop for FlagsEntryEncoder"));
+        let flags_impl = section(&code, "impl<'a> FlagsEntryEncoder<'a> {", "\n}\n\n");
+        assert!(!flags_impl.contains("SBE_VAR_PARTS"));
     }
 
     #[test]
