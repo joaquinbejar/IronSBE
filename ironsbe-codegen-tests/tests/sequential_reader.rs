@@ -12,6 +12,9 @@ use ironsbe_codegen_tests::var_data::{
 use ironsbe_core::decoder::{DecodeError, SbeDecoder};
 use ironsbe_core::header::{GroupHeader, MessageHeader};
 
+/// Length header width of `varStringEncoding` (uint16).
+const U16_HEADER_LEN: usize = 2;
+
 /// One `Quote.legs` entry: fixed `legQty` followed by the `legTag` var string.
 type Leg<'a> = (u32, &'a [u8]);
 /// One `Nested.fills` entry: fixed `fillId` followed by the `note` var data.
@@ -468,4 +471,104 @@ fn test_reader_drop_while_panicking_does_not_walk_a_truncated_buffer() {
     // a walking drop would index past `cut` and abort the process on the
     // second panic; the guard turns it into an ordinary unwind
     assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------
+// Truncated frames: a skipped part is checked like a read one
+// ---------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "var data field 'blob' extends past the end of the buffer")]
+fn test_reader_finish_panics_on_truncated_final_payload() {
+    let mut buf = [0u8; 32];
+    let mut encoder = OnlyDataEncoder::wrap(&mut buf, 0);
+    encoder.set_blob(&[1, 2, 3, 4, 5]);
+    let len = encoder.finish();
+    // keep the message header and the uint32 length header, drop the payload
+    let cut = MessageHeader::ENCODED_LENGTH + 4;
+    assert!(cut < len);
+
+    let reader = OnlyDataReader::decode(&buf[..cut]).expect("header and root block are present");
+    let _ = reader.finish();
+}
+
+#[test]
+#[should_panic(expected = "var data field 'legTag' extends past the end of the buffer")]
+fn test_reader_entry_drop_panics_on_truncated_var_data() {
+    let mut buf = [0u8; 64];
+    let len = encode_quote(&mut buf, &[(1, b"abc")], b"c");
+    // keep everything up to and including the legTag length header
+    let cut = MessageHeader::ENCODED_LENGTH
+        + QuoteEncoder::BLOCK_LENGTH as usize
+        + GroupHeader::ENCODED_LENGTH
+        + 4
+        + U16_HEADER_LEN;
+    assert!(cut < len);
+
+    let mut reader = QuoteReader::wrap(&buf[..cut], MessageHeader::ENCODED_LENGTH, SCHEMA_VERSION);
+    let mut legs = reader.legs();
+    let entry = legs.next_entry().expect("entry");
+    assert_eq!(entry.leg_qty(), 1);
+    drop(entry); // walks legTag: header present, payload missing
+}
+
+#[test]
+#[should_panic(expected = "repeating group 'legs' extends past the end of the buffer")]
+fn test_reader_group_drop_panics_on_truncated_entries() {
+    let mut buf = [0u8; 64];
+    let len = encode_quote(&mut buf, &[(1, b"abc")], b"c");
+    let cut = MessageHeader::ENCODED_LENGTH
+        + QuoteEncoder::BLOCK_LENGTH as usize
+        + GroupHeader::ENCODED_LENGTH
+        + 4
+        + U16_HEADER_LEN;
+    assert!(cut < len);
+
+    let mut reader = QuoteReader::wrap(&buf[..cut], MessageHeader::ENCODED_LENGTH, SCHEMA_VERSION);
+    reader.legs(); // dropped untouched: walks the entry, whose payload is missing
+}
+
+#[test]
+#[should_panic(expected = "repeating group 'legs' extends past the end of the buffer")]
+fn test_reader_skipped_group_panics_when_entries_are_missing() {
+    let mut buf = [0u8; 64];
+    let len = encode_quote(&mut buf, &[(1, b"abc")], b"c");
+    let cut = MessageHeader::ENCODED_LENGTH
+        + QuoteEncoder::BLOCK_LENGTH as usize
+        + GroupHeader::ENCODED_LENGTH
+        + 4
+        + U16_HEADER_LEN;
+    assert!(cut < len);
+
+    let mut reader = QuoteReader::wrap(&buf[..cut], MessageHeader::ENCODED_LENGTH, SCHEMA_VERSION);
+    reader.comment(); // skips legs first
+}
+
+#[test]
+#[should_panic(expected = "repeating group 'legs' extends past the end of the buffer")]
+fn test_reader_fixed_group_accessor_panics_on_truncated_group() {
+    let mut buf = [0u8; 128];
+    let len = encode_example(&mut buf, &[(1, 10), (2, 20)], &[]);
+    // keep the group header (count = 2) and one 12-byte entry
+    let cut = MessageHeader::ENCODED_LENGTH
+        + ExampleEncoder::BLOCK_LENGTH as usize
+        + GroupHeader::ENCODED_LENGTH
+        + 12;
+    assert!(cut < len);
+
+    let mut reader =
+        ExampleReader::wrap(&buf[..cut], MessageHeader::ENCODED_LENGTH, SCHEMA_VERSION);
+    reader.legs();
+}
+
+#[test]
+fn test_reader_exact_frame_is_not_rejected() {
+    let mut buf = [0u8; 64];
+    let len = encode_quote(&mut buf, &[(1, b"abc")], b"c");
+    let reader = QuoteReader::decode(&buf[..len]).expect("read Quote");
+    assert_eq!(
+        reader.finish(),
+        len,
+        "a frame that ends exactly on its last byte is complete"
+    );
 }

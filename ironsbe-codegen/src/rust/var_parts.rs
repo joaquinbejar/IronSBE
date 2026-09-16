@@ -213,7 +213,27 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
     output.push_str("        self.sbe_skip_to(target);\n");
     output.push_str("    }\n\n");
 
-    output.push_str("    /// Advances the cursor past variable part `index`.\n");
+    output.push_str(
+        "    /// Returns `end` when it lies within the buffer, so a skipped part whose\n",
+    );
+    output.push_str("    /// payload is missing is rejected like a read one.\n");
+    output.push_str("    ///\n");
+    output.push_str("    /// # Panics\n");
+    output.push_str("    /// Panics if `what` extends past the end of the buffer.\n");
+    output.push_str("    #[inline]\n");
+    output
+        .push_str("    fn sbe_bounded(&self, end: Option<usize>, what: &'static str) -> usize {\n");
+    output.push_str("        match end {\n");
+    output.push_str("            Some(end) if end <= self.buffer.len() => end,\n");
+    output.push_str("            _ => panic!(\n");
+    output.push_str("                \"{what} extends past the end of the buffer ({} bytes)\",\n");
+    output.push_str("                self.buffer.len()\n");
+    output.push_str("            ),\n");
+    output.push_str("        }\n");
+    output.push_str("    }\n\n");
+
+    output.push_str("    /// Advances the cursor past variable part `index`, reading its header\n");
+    output.push_str("    /// once and checking that the part fits in the buffer.\n");
     output.push_str("    ///\n");
     output.push_str("    /// # Panics\n");
     output.push_str("    /// Panics if the buffer is shorter than the wire lengths claim.\n");
@@ -229,7 +249,10 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
                     "                // {name}: walk the repeating group\n"
                 ));
                 output.push_str(&format!(
-                    "                {cursor} = {decoder_type}::wrap(self.buffer, {cursor}).end_offset();\n"
+                    "                let end = {decoder_type}::wrap(self.buffer, {cursor}).end_offset();\n"
+                ));
+                output.push_str(&format!(
+                    "                {cursor} = self.sbe_bounded(Some(end), \"repeating group '{name}'\");\n"
                 ));
             }
             VarPart::Data(info) => {
@@ -238,8 +261,16 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
                     info.name
                 ));
                 output.push_str(&format!(
-                    "                {cursor} += {} + self.buffer.{}({cursor}) as usize;\n",
-                    info.header_length, info.read_method
+                    "                let len = self.buffer.{}({cursor}) as usize;\n",
+                    info.read_method
+                ));
+                output.push_str(&format!(
+                    "                let end = ({cursor}).checked_add({}).and_then(|start| start.checked_add(len));\n",
+                    info.header_length
+                ));
+                output.push_str(&format!(
+                    "                {cursor} = self.sbe_bounded(end, \"var data field '{}'\");\n",
+                    info.name
                 ));
             }
         }
@@ -265,6 +296,7 @@ mod tests {
         };
         VarDataInfo {
             name: name.to_string(),
+            getter: to_snake_case(name),
             accessor: to_snake_case(name),
             id: 1,
             length_type,
@@ -347,13 +379,28 @@ mod tests {
         assert!(code.contains("fn sbe_skip_to(&mut self, target: u16)"));
         assert!(code.contains("fn sbe_advance_to(&mut self, target: u16, what: &'static str)"));
         assert!(code.contains("read out of schema order"));
+        assert!(
+            code.contains("fn sbe_bounded(&self, end: Option<usize>, what: &'static str) -> usize")
+        );
+        assert!(code.contains("extends past the end of the buffer"));
         assert!(code.contains(
-            "self.pos = m::OrdersGroupDecoder::wrap(self.buffer, self.pos).end_offset();"
+            "let end = m::OrdersGroupDecoder::wrap(self.buffer, self.pos).end_offset();"
         ));
+        assert!(
+            code.contains("self.pos = self.sbe_bounded(Some(end), \"repeating group 'Orders'\");")
+        );
+        assert!(
+            code.contains(
+                "let end = m::FlagsGroupDecoder::wrap(self.buffer, self.pos).end_offset();"
+            )
+        );
+        assert!(code.contains("let len = self.buffer.get_u32_le(self.pos) as usize;"));
         assert!(code.contains(
-            "self.pos = m::FlagsGroupDecoder::wrap(self.buffer, self.pos).end_offset();"
+            "let end = (self.pos).checked_add(4).and_then(|start| start.checked_add(len));"
         ));
-        assert!(code.contains("self.pos += 4 + self.buffer.get_u32_le(self.pos) as usize;"));
+        assert!(code.contains("self.pos = self.sbe_bounded(end, \"var data field 'trailer'\");"));
+        // every header is read exactly once per skipped part
+        assert_eq!(code.matches("get_u32_le").count(), 1);
     }
 
     #[test]
@@ -361,6 +408,10 @@ mod tests {
         let data = [info("note", 1)];
         let parts = [VarPart::Data(&data[0])];
         let code = generate_reader_parts_skip(&parts, "*self.pos");
-        assert!(code.contains("*self.pos += 1 + self.buffer.get_u8(*self.pos) as usize;"));
+        assert!(code.contains("let len = self.buffer.get_u8(*self.pos) as usize;"));
+        assert!(code.contains(
+            "let end = (*self.pos).checked_add(1).and_then(|start| start.checked_add(len));"
+        ));
+        assert!(code.contains("*self.pos = self.sbe_bounded(end, \"var data field 'note'\");"));
     }
 }

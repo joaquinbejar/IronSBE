@@ -17,13 +17,17 @@ use ironsbe_schema::ir::{ResolvedVarData, SchemaIr, TypeKind, to_snake_case};
 use ironsbe_schema::types::PrimitiveType;
 
 use crate::error::CodegenError;
+use crate::rust::names::{accessor_name, renamed_note};
 
 /// Resolved wire layout of one `<data>` (variable-length) field.
 pub(crate) struct VarDataInfo {
     /// Original schema name, used in doc comments.
     pub(crate) name: String,
-    /// snake_case base name for the generated accessors.
+    /// snake_case base name for the setter and the private offset helper.
     pub(crate) accessor: String,
+    /// Name of the public getter: `accessor`, or `accessor` with a trailing
+    /// underscore when it collides with a method the host defines.
+    pub(crate) getter: String,
     /// Field ID from the schema.
     pub(crate) id: u16,
     /// SBE name of the length primitive (`uint16`), used in doc comments.
@@ -45,6 +49,8 @@ pub(crate) struct VarDataInfo {
 /// * `context` - Human-readable owner, e.g. `message 'Quote', group 'legs'`
 /// * `path` - Dotted owner path for `UnknownType`, e.g. `Quote.legs`
 /// * `var_data` - The owner's `<data>` fields in schema order
+/// * `reserved` - Methods the owner's decoders define themselves, which a
+///   getter must not shadow (see `names`)
 ///
 /// # Errors
 /// Returns [`CodegenError::UnknownType`] when the referenced type is not
@@ -56,6 +62,7 @@ pub(crate) fn resolve_var_data(
     context: &str,
     path: &str,
     var_data: &[ResolvedVarData],
+    reserved: &[&str],
 ) -> Result<Vec<VarDataInfo>, CodegenError> {
     var_data
         .iter()
@@ -98,9 +105,11 @@ pub(crate) fn resolve_var_data(
                     }
                 };
 
+            let accessor = to_snake_case(&vd.name);
             Ok(VarDataInfo {
                 name: vd.name.clone(),
-                accessor: to_snake_case(&vd.name),
+                getter: accessor_name(&accessor, reserved),
+                accessor,
                 id: vd.id,
                 length_type,
                 length_rust_type,
@@ -176,6 +185,7 @@ pub(crate) fn generate_var_data_getter(
         "    /// Positioning walks any preceding variable-stride group on each call, so\n",
     );
     output.push_str("    /// on hot paths read the field once and cache the slice.\n");
+    output.push_str(&renamed_note(&info.accessor, &info.getter));
     output.push_str("    ///\n");
     output.push_str("    /// # Panics\n");
     output.push_str(
@@ -185,7 +195,7 @@ pub(crate) fn generate_var_data_getter(
     output.push_str("    #[must_use]\n");
     output.push_str(&format!(
         "    pub fn {}(&self) -> &'a [u8] {{\n",
-        info.accessor
+        info.getter
     ));
     output.push_str(&format!(
         "        let pos = self.sbe_{}_offset();\n",
@@ -215,7 +225,7 @@ pub(crate) fn generate_var_data_getter(
     ));
     output.push_str(&format!(
         "        std::str::from_utf8(self.{}()).unwrap_or(\"\")\n",
-        info.accessor
+        info.getter
     ));
     output.push_str("    }\n\n");
 
@@ -330,6 +340,7 @@ mod tests {
         };
         VarDataInfo {
             name: name.to_string(),
+            getter: to_snake_case(name),
             accessor: to_snake_case(name),
             id: 1,
             length_type,
@@ -395,5 +406,17 @@ mod tests {
         let guard = code.find("sbe_advance_to").expect("guard call");
         let write = code.find("put_u16_le").expect("header write");
         assert!(guard < write);
+    }
+
+    #[test]
+    fn test_var_data_getter_uses_renamed_getter_but_plain_offset_helper() {
+        let mut field = info("finish", 2);
+        field.getter = "finish_".to_string();
+        let code = generate_var_data_getter(0, std::slice::from_ref(&field), 0, "b");
+        assert!(code.contains("fn sbe_finish_offset(&self) -> usize"));
+        assert!(code.contains("pub fn finish_(&self) -> &'a [u8]"));
+        assert!(code.contains("pub fn finish_as_str(&self) -> &'a str"));
+        assert!(code.contains("Renamed from `finish` to avoid the generated `finish()` method."));
+        assert!(!code.contains("pub fn finish(&self)"));
     }
 }

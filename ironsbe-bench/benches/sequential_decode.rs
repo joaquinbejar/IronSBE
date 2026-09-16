@@ -7,9 +7,12 @@
 //! sequential `BookReader` walks the group once and reads each var data
 //! header once (issue #64).
 //!
-//! This bench has `harness = false` in `Cargo.toml`: each batch of decodes
-//! is timed with `Instant::now()` and recorded in an `hdrhistogram`, so the
-//! table reports p50 / p99 / p99.9 per decode instead of criterion's mean.
+//! This bench has `harness = false` in `Cargo.toml`: every single decode is
+//! timed with `Instant::now()` and recorded in an `hdrhistogram`, so the
+//! table reports true per-decode p50 / p99 / p99.9 (tail latency is not
+//! diluted by batch averaging) instead of criterion's mean. The cost of the
+//! two clock reads (roughly 20 ns on Apple silicon) is included in every
+//! sample and affects both paths equally.
 //!
 //! Run with: `cargo bench -p ironsbe-bench --bench sequential_decode`
 
@@ -30,10 +33,8 @@ use book::{BookDecoder, BookEncoder, BookReader};
 const LEVEL_COUNTS: [u16; 3] = [16, 64, 256];
 /// Decodes run before measuring, per path and size.
 const WARMUP_DECODES: usize = 2_000;
-/// Timed samples per path and size.
-const SAMPLES: usize = 5_000;
-/// Decodes per timed sample; the histogram stores nanoseconds per decode.
-const BATCH: u64 = 16;
+/// Individually timed decodes per path and size.
+const SAMPLES: usize = 100_000;
 
 /// Var data written after the group; the random-access path re-walks
 /// `levels` once per field.
@@ -126,7 +127,8 @@ fn decode_sequential(frame: &[u8]) -> u64 {
     acc ^ reader.finish() as u64
 }
 
-/// Times `decode` on `frame` and returns nanoseconds per decode.
+/// Times each call of `decode` on `frame` and returns the nanoseconds per
+/// decode as a histogram.
 fn measure(frame: &[u8], decode: fn(&[u8]) -> u64) -> Histogram<u64> {
     for _ in 0..WARMUP_DECODES {
         black_box(decode(black_box(frame)));
@@ -135,11 +137,9 @@ fn measure(frame: &[u8], decode: fn(&[u8]) -> u64) -> Histogram<u64> {
         Histogram::<u64>::new_with_bounds(1, 1_000_000_000, 3).expect("histogram bounds are valid");
     for _ in 0..SAMPLES {
         let start = Instant::now();
-        for _ in 0..BATCH {
-            black_box(decode(black_box(frame)));
-        }
-        let per_decode = start.elapsed().as_nanos() as u64 / BATCH;
-        hist.record(per_decode.max(1)).expect("record");
+        black_box(decode(black_box(frame)));
+        let elapsed = start.elapsed().as_nanos() as u64;
+        hist.record(elapsed.max(1)).expect("record");
     }
     hist
 }
@@ -156,11 +156,10 @@ fn render_row(levels: u16, name: &str, hist: &Histogram<u64>) {
 
 fn main() {
     println!(
-        "Running sequential_decode ({} trailing var data fields, {} warmup + {} x {} measured decodes per path and size)",
+        "Running sequential_decode ({} trailing var data fields, {} warmup + {} individually timed decodes per path and size)",
         TRAILING_FIELDS.len(),
         WARMUP_DECODES,
         SAMPLES,
-        BATCH,
     );
     println!();
     println!("| Levels | Path          |        p50 |        p99 |      p99.9 |");

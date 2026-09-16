@@ -7,17 +7,27 @@
 use ironsbe_schema::ir::{ResolvedField, SchemaIr, TypeKind};
 use ironsbe_schema::types::PrimitiveType;
 
+use crate::rust::names::{accessor_name, renamed_note};
+
 /// Generates a field getter method.
 ///
 /// Emitted inside an `impl` block whose `self` has `buffer: &'a [u8]` and
-/// `offset: usize` (start of the fixed block).
-pub(crate) fn generate_field_getter(ir: &SchemaIr, field: &ResolvedField) -> String {
+/// `offset: usize` (start of the fixed block). `reserved` lists the methods
+/// the host defines itself; a field named like one of them gets a trailing
+/// underscore (see `names`).
+pub(crate) fn generate_field_getter(
+    ir: &SchemaIr,
+    field: &ResolvedField,
+    reserved: &[&str],
+) -> String {
     let mut output = String::new();
+    let getter = accessor_name(&field.getter_name, reserved);
 
     output.push_str(&format!(
         "    /// Field: {} (id={}, offset={}).\n",
         field.name, field.id, field.offset
     ));
+    output.push_str(&renamed_note(&field.getter_name, &getter));
     output.push_str("    #[inline(always)]\n");
     output.push_str("    #[must_use]\n");
 
@@ -28,10 +38,7 @@ pub(crate) fn generate_field_getter(ir: &SchemaIr, field: &ResolvedField) -> Str
 
         if elem_type == "u8" {
             // Byte array - return &[u8]
-            output.push_str(&format!(
-                "    pub fn {}(&self) -> &'a [u8] {{\n",
-                field.getter_name
-            ));
+            output.push_str(&format!("    pub fn {}(&self) -> &'a [u8] {{\n", getter));
             output.push_str(&format!(
                 "        &self.buffer[self.offset + {}..self.offset + {} + {}]\n",
                 field.offset, field.offset, len
@@ -47,7 +54,7 @@ pub(crate) fn generate_field_getter(ir: &SchemaIr, field: &ResolvedField) -> Str
             output.push_str("    #[must_use]\n");
             output.push_str(&format!(
                 "    pub fn {}_as_str(&self) -> &'a str {{\n",
-                field.getter_name
+                getter
             ));
             output.push_str(&format!(
                 "        let bytes = &self.buffer[self.offset + {}..self.offset + {} + {}];\n",
@@ -60,10 +67,7 @@ pub(crate) fn generate_field_getter(ir: &SchemaIr, field: &ResolvedField) -> Str
             output.push_str("    }\n\n");
         } else {
             // Other array types
-            output.push_str(&format!(
-                "    pub fn {}(&self) -> &'a [u8] {{\n",
-                field.getter_name
-            ));
+            output.push_str(&format!("    pub fn {}(&self) -> &'a [u8] {{\n", getter));
             output.push_str(&format!(
                 "        &self.buffer[self.offset + {}..self.offset + {}]\n",
                 field.offset,
@@ -82,7 +86,7 @@ pub(crate) fn generate_field_getter(ir: &SchemaIr, field: &ResolvedField) -> Str
                 let read_method = get_read_method(Some(*encoding));
                 output.push_str(&format!(
                     "    pub fn {}(&self) -> {} {{\n",
-                    field.getter_name, rust_type
+                    getter, rust_type
                 ));
                 output.push_str(&format!(
                     "        {}::from(self.buffer.{}(self.offset + {}))\n",
@@ -95,7 +99,7 @@ pub(crate) fn generate_field_getter(ir: &SchemaIr, field: &ResolvedField) -> Str
                 let read_method = get_read_method(Some(*encoding));
                 output.push_str(&format!(
                     "    pub fn {}(&self) -> {} {{\n",
-                    field.getter_name, rust_type
+                    getter, rust_type
                 ));
                 output.push_str(&format!(
                     "        {}::from_raw(self.buffer.{}(self.offset + {}))\n",
@@ -107,7 +111,7 @@ pub(crate) fn generate_field_getter(ir: &SchemaIr, field: &ResolvedField) -> Str
                 // Composite field - return wrapper struct
                 output.push_str(&format!(
                     "    pub fn {}(&self) -> {}<'a> {{\n",
-                    field.getter_name, rust_type
+                    getter, rust_type
                 ));
                 output.push_str(&format!(
                     "        {}::wrap(self.buffer, self.offset + {})\n",
@@ -120,7 +124,7 @@ pub(crate) fn generate_field_getter(ir: &SchemaIr, field: &ResolvedField) -> Str
                 let read_method = get_read_method(field.primitive_type);
                 output.push_str(&format!(
                     "    pub fn {}(&self) -> {} {{\n",
-                    field.getter_name, rust_type
+                    getter, rust_type
                 ));
                 output.push_str(&format!(
                     "        self.buffer.{}(self.offset + {})\n",

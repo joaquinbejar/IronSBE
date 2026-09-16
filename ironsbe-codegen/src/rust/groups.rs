@@ -14,6 +14,7 @@ use ironsbe_schema::ir::{ResolvedGroup, SchemaIr, to_snake_case};
 
 use crate::error::CodegenError;
 use crate::rust::fields::{generate_entry_field_setter, generate_field_getter};
+use crate::rust::names::{ENTRY_RESERVED, accessor_name, renamed_note};
 use crate::rust::var_data::{
     VarDataInfo, end_offset_parts, generate_var_data_getter, generate_var_data_setter,
     resolve_var_data,
@@ -68,7 +69,7 @@ impl<'g> GroupLayout<'g> {
     ) -> Result<Self, CodegenError> {
         let context = format!("{parent_context}, group '{}'", group.name);
         let path = format!("{parent_path}.{}", group.name);
-        let var_data = resolve_var_data(ir, &context, &path, &group.var_data)?;
+        let var_data = resolve_var_data(ir, &context, &path, &group.var_data, ENTRY_RESERVED)?;
         let nested = group
             .nested_groups
             .iter()
@@ -137,12 +138,16 @@ pub(crate) fn generate_group_offset_walker(base_expr: &str, decoders: &[String])
 /// * `group_name` - Schema name of the group
 /// * `decoder_type` - Group decoder type, qualified as needed from the host
 /// * `index` - 0-based position of the group among its siblings
+/// * `reserved` - Methods the host defines itself (see `names`)
 pub(crate) fn generate_group_accessor(
     group_name: &str,
     decoder_type: &str,
     index: usize,
+    reserved: &[&str],
 ) -> String {
     let mut output = String::new();
+    let snake = to_snake_case(group_name);
+    let accessor = accessor_name(&snake, reserved);
 
     output.push_str(&format!("    /// Access {group_name} repeating group.\n"));
     output.push_str("    ///\n");
@@ -153,11 +158,11 @@ pub(crate) fn generate_group_accessor(
         "    /// group, O(entries) per variable-stride group), so on hot paths call this\n",
     );
     output.push_str("    /// once per message and iterate the returned decoder.\n");
+    output.push_str(&renamed_note(&snake, &accessor));
     output.push_str("    #[inline]\n");
     output.push_str("    #[must_use]\n");
     output.push_str(&format!(
-        "    pub fn {}(&self) -> {decoder_type}<'a> {{\n",
-        to_snake_case(group_name)
+        "    pub fn {accessor}(&self) -> {decoder_type}<'a> {{\n"
     ));
     output.push_str(&format!(
         "        {decoder_type}::wrap(self.buffer, self.sbe_group_offset({index}))\n"
@@ -305,7 +310,7 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
 
     // Field getters
     for field in &group.fields {
-        output.push_str(&generate_field_getter(ir, field));
+        output.push_str(&generate_field_getter(ir, field, ENTRY_RESERVED));
     }
 
     // Nested group accessors
@@ -320,6 +325,7 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
             &nested.group.name,
             &nested.group.decoder_name(),
             index,
+            ENTRY_RESERVED,
         ));
     }
 
@@ -664,6 +670,7 @@ fn generate_entry_encoder_drop(entry_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rust::names::MESSAGE_RESERVED;
 
     #[test]
     fn test_group_generator_new() {
@@ -696,9 +703,16 @@ mod tests {
 
     #[test]
     fn test_group_accessor_uses_walker_index() {
-        let code = generate_group_accessor("fills", "FillsGroupDecoder", 1);
+        let code = generate_group_accessor("fills", "FillsGroupDecoder", 1, ENTRY_RESERVED);
         assert!(code.contains("pub fn fills(&self) -> FillsGroupDecoder<'a> {"));
         assert!(code.contains("FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1))"));
+    }
+
+    #[test]
+    fn test_group_accessor_renames_reserved_group_name() {
+        let code = generate_group_accessor("decode", "m::DecodeGroupDecoder", 0, MESSAGE_RESERVED);
+        assert!(code.contains("pub fn decode_(&self) -> m::DecodeGroupDecoder<'a> {"));
+        assert!(code.contains("Renamed from `decode` to avoid the generated `decode()` method."));
     }
 
     #[test]

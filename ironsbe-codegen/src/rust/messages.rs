@@ -12,6 +12,7 @@ use crate::rust::groups::{
     GroupLayout, generate_group_accessor, generate_group_decoder, generate_group_encoder,
     generate_group_encoder_accessor, generate_group_offset_walker,
 };
+use crate::rust::names::MESSAGE_RESERVED;
 use crate::rust::readers::{generate_group_reader, generate_message_reader, message_needs_reader};
 use crate::rust::var_data::{
     VarDataInfo, end_offset_parts, generate_var_data_getter, generate_var_data_setter,
@@ -47,7 +48,13 @@ impl<'a> MessageGenerator<'a> {
 
         for msg in &self.ir.messages {
             let context = format!("message '{}'", msg.name);
-            let var_data = resolve_var_data(self.ir, &context, &msg.name, &msg.var_data)?;
+            let var_data = resolve_var_data(
+                self.ir,
+                &context,
+                &msg.name,
+                &msg.var_data,
+                MESSAGE_RESERVED,
+            )?;
             let groups = msg
                 .groups
                 .iter()
@@ -135,7 +142,7 @@ impl<'a> MessageGenerator<'a> {
 
         // Field getters
         for field in &msg.fields {
-            output.push_str(&generate_field_getter(self.ir, field));
+            output.push_str(&generate_field_getter(self.ir, field, MESSAGE_RESERVED));
         }
 
         // Group accessors. Groups follow the fixed block back to back, so the
@@ -153,6 +160,7 @@ impl<'a> MessageGenerator<'a> {
                 &layout.group.name,
                 decoder_type,
                 index,
+                MESSAGE_RESERVED,
             ));
         }
 
@@ -1652,7 +1660,9 @@ mod tests {
         assert!(
             reader.contains("let group = quote::LegsGroupDecoder::wrap(self.buffer, self.pos);")
         );
-        assert!(reader.contains("self.pos = group.end_offset();"));
+        assert!(reader.contains(
+            "self.pos = self.sbe_bounded(Some(group.end_offset()), \"repeating group 'legs'\");"
+        ));
         // var data read once at the cursor, in schema order
         assert!(reader.contains("self.sbe_advance_to(1, \"var data field 'label'\");"));
         assert!(reader.contains("self.sbe_advance_to(2, \"var data field 'payload'\");"));
@@ -1684,8 +1694,10 @@ mod tests {
         );
         assert!(drop.contains("if std::thread::panicking() {"));
         assert!(drop.contains(
-            "*self.pos = OrdersEntryDecoder::wrap(self.buffer, *self.pos, self.block_length).end_offset();"
+            "let end = OrdersEntryDecoder::wrap(self.buffer, *self.pos, self.block_length).end_offset();"
         ));
+        assert!(drop.contains("end <= self.buffer.len(),"));
+        assert!(drop.contains("*self.pos = end;"));
 
         // entry reader: nested variable group then var data, borrowed cursor
         let entry = section(&code, "impl<'e, 'a> OrdersEntryReader<'e, 'a> {", "\n}\n\n");
@@ -1694,7 +1706,7 @@ mod tests {
         assert!(entry.contains("self.sbe_advance_to(1, \"var data field 'memo'\");"));
         assert!(
             entry.contains(
-                "*self.pos = FillsGroupDecoder::wrap(self.buffer, *self.pos).end_offset();"
+                "let end = FillsGroupDecoder::wrap(self.buffer, *self.pos).end_offset();"
             )
         );
         assert!(entry.contains("const SBE_VAR_PARTS: u16 = 2;"));
@@ -1710,5 +1722,48 @@ mod tests {
         assert!(code.contains("pub struct FillsEntryReader<'e, 'a> {"));
         assert!(!code.contains("FlagsGroupReader"));
         assert!(!code.contains("FlagsEntryReader"));
+    }
+
+    /// Field, group and var data named like generated methods.
+    const MSG_RESERVED_NAMES: &str = r#"
+    <sbe:message name="Reserved" id="7" blockLength="4">
+        <field name="wrap" id="1" type="uint32" offset="0"/>
+        <group name="decode" id="10" dimensionType="groupSizeEncoding" blockLength="2">
+            <field name="endOffset" id="11" type="uint16" offset="0"/>
+        </group>
+        <data name="finish" id="2" type="varStringEncoding"/>
+    </sbe:message>"#;
+
+    #[test]
+    fn test_reserved_schema_names_are_suffixed_on_decoder_and_reader() {
+        let code = generate_ok(MSG_RESERVED_NAMES);
+
+        let decoder = section(&code, "impl<'a> ReservedDecoder<'a> {", "\n}\n\n");
+        assert!(decoder.contains("pub fn wrap_(&self) -> u32 {"));
+        assert!(decoder.contains("pub fn decode_(&self) -> reserved::DecodeGroupDecoder<'a> {"));
+        assert!(decoder.contains("pub fn finish_(&self) -> &'a [u8] {"));
+        assert!(decoder.contains("fn sbe_finish_offset(&self) -> usize {"));
+        assert!(
+            decoder.contains("Renamed from `finish` to avoid the generated `finish()` method.")
+        );
+
+        let reader = section(&code, "impl<'a> ReservedReader<'a> {", "\n}\n\n");
+        assert!(reader.contains("pub fn wrap_(&self) -> u32 {"));
+        assert!(reader.contains("pub fn decode_(&mut self) -> reserved::DecodeGroupDecoder<'a> {"));
+        assert!(reader.contains("pub fn finish_(&mut self) -> &'a [u8] {"));
+        assert!(reader.contains("pub fn finish(mut self) -> usize {"));
+        assert!(reader.contains("pub fn decode(buffer: &'a [u8]) -> Result<Self, DecodeError> {"));
+
+        // entry decoder keeps its own end_offset() next to the renamed getter
+        let entry = section(&code, "impl<'a> DecodeEntryDecoder<'a> {", "\n}\n\n");
+        assert!(entry.contains("pub fn end_offset_(&self) -> u16 {"));
+        assert!(entry.contains("pub fn end_offset(&self) -> usize {"));
+
+        // setters and group accessors on the encoder are prefixed, so untouched
+        let encoder = section(&code, "impl<'a> ReservedEncoder<'a> {", "\n}\n\n");
+        assert!(encoder.contains("pub fn set_wrap(&mut self, value: u32)"));
+        assert!(encoder.contains("pub fn decode_count(&mut self, count: u16)"));
+        assert!(encoder.contains("pub fn set_finish(&mut self, value: &[u8])"));
+        assert!(encoder.contains("pub fn finish(mut self) -> usize {"));
     }
 }
