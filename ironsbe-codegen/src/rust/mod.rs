@@ -4,6 +4,7 @@ pub mod enums;
 pub(crate) mod fields;
 pub mod groups;
 pub mod messages;
+pub(crate) mod names;
 pub(crate) mod readers;
 pub mod types;
 pub(crate) mod var_data;

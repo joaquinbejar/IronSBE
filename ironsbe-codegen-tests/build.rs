@@ -100,6 +100,17 @@ const VAR_DATA_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <sbe:message name="Flat" id="6" blockLength="8">
         <field name="ts" id="1" type="uint64" offset="0"/>
     </sbe:message>
+
+    <!-- Schema names that collide with generated methods: the decoder and
+         reader accessors get a trailing underscore (wrap_, decode_, finish_,
+         end_offset_), setters keep their prefix -->
+    <sbe:message name="Reserved" id="7" blockLength="4">
+        <field name="wrap" id="1" type="uint32" offset="0"/>
+        <group name="decode" id="10" dimensionType="groupSizeEncoding" blockLength="2">
+            <field name="endOffset" id="11" type="uint16" offset="0"/>
+        </group>
+        <data name="finish" id="2" type="varStringEncoding"/>
+    </sbe:message>
 </sbe:messageSchema>"#;
 
 fn main() {

@@ -21,6 +21,7 @@ use ironsbe_schema::ir::{ResolvedMessage, SchemaIr, to_snake_case};
 
 use crate::rust::fields::generate_field_getter;
 use crate::rust::groups::GroupLayout;
+use crate::rust::names::{ENTRY_RESERVED, MESSAGE_RESERVED, accessor_name, renamed_note};
 use crate::rust::var_data::VarDataInfo;
 use crate::rust::var_parts::{VarPart, collect_var_parts, generate_reader_parts_skip};
 
@@ -137,7 +138,7 @@ pub(crate) fn generate_message_reader(
 
     // Fixed field getters: same emitter as the decoder (`buffer` + `offset`)
     for field in &msg.fields {
-        output.push_str(&generate_field_getter(ir, field));
+        output.push_str(&generate_field_getter(ir, field, MESSAGE_RESERVED));
     }
 
     // Variable parts, in schema order
@@ -145,6 +146,7 @@ pub(crate) fn generate_message_reader(
         &parts,
         "self.pos",
         "&mut self.pos",
+        MESSAGE_RESERVED,
     ));
 
     // Finish
@@ -268,8 +270,17 @@ pub(crate) fn generate_group_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> 
     output.push_str("        }\n");
     output.push_str("        while self.index < self.count {\n");
     output.push_str(&format!(
-        "            *self.pos = {entry_decoder}::wrap(self.buffer, *self.pos, self.block_length).end_offset();\n"
+        "            let end = {entry_decoder}::wrap(self.buffer, *self.pos, self.block_length).end_offset();\n"
     ));
+    output.push_str("            assert!(\n");
+    output.push_str("                end <= self.buffer.len(),\n");
+    output.push_str(&format!(
+        "                \"repeating group '{}' extends past the end of the buffer ({{}} bytes)\",\n",
+        group.name
+    ));
+    output.push_str("                self.buffer.len()\n");
+    output.push_str("            );\n");
+    output.push_str("            *self.pos = end;\n");
     output.push_str("            self.index += 1;\n");
     output.push_str("        }\n");
     output.push_str("    }\n");
@@ -314,13 +325,14 @@ fn generate_entry_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     output.push_str("    }\n\n");
 
     for field in &group.fields {
-        output.push_str(&generate_field_getter(ir, field));
+        output.push_str(&generate_field_getter(ir, field, ENTRY_RESERVED));
     }
 
     output.push_str(&generate_reader_part_accessors(
         &parts,
         "*self.pos",
         "&mut *self.pos",
+        ENTRY_RESERVED,
     ));
 
     output.push_str(&generate_reader_parts_skip(&parts, "*self.pos"));
@@ -350,7 +362,13 @@ fn generate_entry_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
 /// * `cursor` - Place expression of the read cursor (`self.pos` / `*self.pos`)
 /// * `cursor_ref` - Expression lending the cursor to a group reader
 ///   (`&mut self.pos` / `&mut *self.pos`)
-fn generate_reader_part_accessors(parts: &[VarPart<'_>], cursor: &str, cursor_ref: &str) -> String {
+/// * `reserved` - Methods the host defines itself (see `names`)
+fn generate_reader_part_accessors(
+    parts: &[VarPart<'_>],
+    cursor: &str,
+    cursor_ref: &str,
+    reserved: &[&str],
+) -> String {
     let mut output = String::new();
     for (index, part) in parts.iter().enumerate() {
         match part {
@@ -367,6 +385,7 @@ fn generate_reader_part_accessors(parts: &[VarPart<'_>], cursor: &str, cursor_re
                         name,
                         decoder_type,
                         cursor,
+                        reserved,
                     ));
                 } else {
                     output.push_str(&generate_variable_group_accessor(
@@ -374,6 +393,7 @@ fn generate_reader_part_accessors(parts: &[VarPart<'_>], cursor: &str, cursor_re
                         name,
                         reader_type,
                         cursor_ref,
+                        reserved,
                     ));
                 }
             }
@@ -393,8 +413,11 @@ fn generate_fixed_group_accessor(
     group_name: &str,
     decoder_type: &str,
     cursor: &str,
+    reserved: &[&str],
 ) -> String {
     let mut output = String::new();
+    let snake = to_snake_case(group_name);
+    let accessor = accessor_name(&snake, reserved);
 
     output.push_str(&format!(
         "    /// Reads the {group_name} repeating group at the cursor and advances past it.\n"
@@ -404,15 +427,15 @@ fn generate_fixed_group_accessor(
         .push_str("    /// Entries are exactly `blockLength` bytes, so the returned iterator is\n");
     output
         .push_str("    /// positioned in O(1) and the cursor moves straight to the group's end.\n");
+    output.push_str(&renamed_note(&snake, &accessor));
     output.push_str("    ///\n");
     output.push_str("    /// # Panics\n");
     output
         .push_str("    /// Panics if a later part was already read, or if the buffer is shorter\n");
-    output.push_str("    /// than the group header claims.\n");
+    output.push_str("    /// than the group claims.\n");
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
-        "    pub fn {}(&mut self) -> {decoder_type}<'a> {{\n",
-        to_snake_case(group_name)
+        "    pub fn {accessor}(&mut self) -> {decoder_type}<'a> {{\n"
     ));
     output.push_str(&format!(
         "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\");\n"
@@ -420,7 +443,9 @@ fn generate_fixed_group_accessor(
     output.push_str(&format!(
         "        let group = {decoder_type}::wrap(self.buffer, {cursor});\n"
     ));
-    output.push_str(&format!("        {cursor} = group.end_offset();\n"));
+    output.push_str(&format!(
+        "        {cursor} = self.sbe_bounded(Some(group.end_offset()), \"repeating group '{group_name}'\");\n"
+    ));
     output.push_str(&format!("        self.part = {};\n", part_index + 1));
     output.push_str("        group\n");
     output.push_str("    }\n\n");
@@ -435,8 +460,11 @@ fn generate_variable_group_accessor(
     group_name: &str,
     reader_type: &str,
     cursor_ref: &str,
+    reserved: &[&str],
 ) -> String {
     let mut output = String::new();
+    let snake = to_snake_case(group_name);
+    let accessor = accessor_name(&snake, reserved);
 
     output.push_str(&format!(
         "    /// Reads the {group_name} repeating group at the cursor.\n"
@@ -445,6 +473,7 @@ fn generate_variable_group_accessor(
     output.push_str("    /// The returned reader borrows the cursor: entries are consumed with\n");
     output.push_str("    /// `next_entry()`, and any entry not consumed when it is dropped is\n");
     output.push_str("    /// walked so the cursor lands right after the group.\n");
+    output.push_str(&renamed_note(&snake, &accessor));
     output.push_str("    ///\n");
     output.push_str("    /// # Panics\n");
     output
@@ -452,8 +481,7 @@ fn generate_variable_group_accessor(
     output.push_str("    /// than the group header.\n");
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
-        "    pub fn {}(&mut self) -> {reader_type}<'_, 'a> {{\n",
-        to_snake_case(group_name)
+        "    pub fn {accessor}(&mut self) -> {reader_type}<'_, 'a> {{\n"
     ));
     output.push_str(&format!(
         "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\");\n"
@@ -482,6 +510,7 @@ fn generate_reader_var_data_getter(part_index: usize, info: &VarDataInfo, cursor
         .push_str("    /// Reads the length header at the cursor and advances past the payload.\n");
     output
         .push_str("    /// Returns the raw bytes; call and ignore the result to skip the field.\n");
+    output.push_str(&renamed_note(&info.accessor, &info.getter));
     output.push_str("    ///\n");
     output.push_str("    /// # Panics\n");
     output
@@ -490,7 +519,7 @@ fn generate_reader_var_data_getter(part_index: usize, info: &VarDataInfo, cursor
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
         "    pub fn {}(&mut self) -> &'a [u8] {{\n",
-        info.accessor
+        info.getter
     ));
     output.push_str(&format!(
         "        self.sbe_advance_to({part_index}, \"var data field '{}'\");\n",
@@ -504,9 +533,13 @@ fn generate_reader_var_data_getter(part_index: usize, info: &VarDataInfo, cursor
         "        let start = {cursor} + {};\n",
         info.header_length
     ));
-    output.push_str(&format!("        {cursor} = start + len;\n"));
+    output.push_str(&format!(
+        "        let end = self.sbe_bounded(start.checked_add(len), \"var data field '{}'\");\n",
+        info.name
+    ));
+    output.push_str(&format!("        {cursor} = end;\n"));
     output.push_str(&format!("        self.part = {};\n", part_index + 1));
-    output.push_str("        &self.buffer[start..start + len]\n");
+    output.push_str("        &self.buffer[start..end]\n");
     output.push_str("    }\n\n");
 
     output.push_str(&format!(
@@ -520,7 +553,7 @@ fn generate_reader_var_data_getter(part_index: usize, info: &VarDataInfo, cursor
     ));
     output.push_str(&format!(
         "        std::str::from_utf8(self.{}()).unwrap_or(\"\")\n",
-        info.accessor
+        info.getter
     ));
     output.push_str("    }\n\n");
 
@@ -540,6 +573,7 @@ mod tests {
         };
         VarDataInfo {
             name: name.to_string(),
+            getter: to_snake_case(name),
             accessor: to_snake_case(name),
             id: 1,
             length_type,
@@ -552,21 +586,33 @@ mod tests {
 
     #[test]
     fn test_fixed_group_accessor_returns_decoder_and_steps_cursor() {
-        let code =
-            generate_fixed_group_accessor(1, "notes", "example::NotesGroupDecoder", "self.pos");
+        let code = generate_fixed_group_accessor(
+            1,
+            "notes",
+            "example::NotesGroupDecoder",
+            "self.pos",
+            MESSAGE_RESERVED,
+        );
         assert!(code.contains("pub fn notes(&mut self) -> example::NotesGroupDecoder<'a> {"));
         assert!(code.contains("self.sbe_advance_to(1, \"repeating group 'notes'\");"));
         assert!(
             code.contains("let group = example::NotesGroupDecoder::wrap(self.buffer, self.pos);")
         );
-        assert!(code.contains("self.pos = group.end_offset();"));
+        assert!(code.contains(
+            "self.pos = self.sbe_bounded(Some(group.end_offset()), \"repeating group 'notes'\");"
+        ));
         assert!(code.contains("self.part = 2;"));
     }
 
     #[test]
     fn test_variable_group_accessor_lends_cursor_to_reader() {
-        let code =
-            generate_variable_group_accessor(0, "fills", "FillsGroupReader", "&mut *self.pos");
+        let code = generate_variable_group_accessor(
+            0,
+            "fills",
+            "FillsGroupReader",
+            "&mut *self.pos",
+            ENTRY_RESERVED,
+        );
         assert!(code.contains("pub fn fills(&mut self) -> FillsGroupReader<'_, 'a> {"));
         assert!(code.contains("self.sbe_advance_to(0, \"repeating group 'fills'\");"));
         assert!(code.contains("self.part = 1;"));
@@ -580,14 +626,49 @@ mod tests {
         assert!(code.contains("self.sbe_advance_to(2, \"var data field 'legTag'\");"));
         assert!(code.contains("let len = self.buffer.get_u16_le(*self.pos) as usize;"));
         assert!(code.contains("let start = *self.pos + 2;"));
-        assert!(code.contains("*self.pos = start + len;"));
+        assert!(code.contains(
+            "let end = self.sbe_bounded(start.checked_add(len), \"var data field 'legTag'\");"
+        ));
+        assert!(code.contains("*self.pos = end;"));
         assert!(code.contains("self.part = 3;"));
-        assert!(code.contains("&self.buffer[start..start + len]"));
+        assert!(code.contains("&self.buffer[start..end]"));
         assert!(code.contains("pub fn leg_tag_as_str(&mut self) -> &'a str {"));
         assert_eq!(
             code.matches("get_u16_le").count(),
             1,
             "one header read per call"
         );
+    }
+
+    #[test]
+    fn test_reader_group_accessors_rename_reserved_names() {
+        let code = generate_fixed_group_accessor(
+            0,
+            "decode",
+            "m::DecodeGroupDecoder",
+            "self.pos",
+            MESSAGE_RESERVED,
+        );
+        assert!(code.contains("pub fn decode_(&mut self) -> m::DecodeGroupDecoder<'a> {"));
+        assert!(code.contains("Renamed from `decode` to avoid the generated `decode()` method."));
+
+        let code = generate_variable_group_accessor(
+            0,
+            "finish",
+            "m::FinishGroupReader",
+            "&mut self.pos",
+            MESSAGE_RESERVED,
+        );
+        assert!(code.contains("pub fn finish_(&mut self) -> m::FinishGroupReader<'_, 'a> {"));
+    }
+
+    #[test]
+    fn test_reader_var_data_getter_uses_renamed_getter() {
+        let mut field = info("finish", 2);
+        field.getter = "finish_".to_string();
+        let code = generate_reader_var_data_getter(0, &field, "self.pos");
+        assert!(code.contains("pub fn finish_(&mut self) -> &'a [u8] {"));
+        assert!(code.contains("pub fn finish_as_str(&mut self) -> &'a str {"));
+        assert!(code.contains("Renamed from `finish` to avoid the generated `finish()` method."));
     }
 }

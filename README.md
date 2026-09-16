@@ -241,8 +241,9 @@ fn read(frame: &[u8]) -> usize {
 ```
 
 On a book with 256 variable entries followed by eight var data fields the
-sequential path decodes in 281 ns (p50) against 2245 ns for random access
-(`cargo bench -p ironsbe-bench --bench sequential_decode`).
+sequential path decodes in 375 ns (p50) against 2583 ns for random access,
+each decode timed individually (`cargo bench -p ironsbe-bench --bench
+sequential_decode`).
 
 ---
 
