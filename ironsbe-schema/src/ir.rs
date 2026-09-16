@@ -309,6 +309,12 @@ impl ResolvedMessage {
     pub fn encoder_name(&self) -> String {
         format!("{}Encoder", self.name)
     }
+
+    /// Returns the sequential reader struct name.
+    #[must_use]
+    pub fn reader_name(&self) -> String {
+        format!("{}Reader", self.name)
+    }
 }
 
 /// Resolved field information.
@@ -462,6 +468,18 @@ impl ResolvedGroup {
     #[must_use]
     pub fn entry_encoder_name(&self) -> String {
         format!("{}EntryEncoder", to_pascal_case(&self.name))
+    }
+
+    /// Returns the sequential group reader struct name.
+    #[must_use]
+    pub fn reader_name(&self) -> String {
+        format!("{}GroupReader", to_pascal_case(&self.name))
+    }
+
+    /// Returns the sequential entry reader struct name.
+    #[must_use]
+    pub fn entry_reader_name(&self) -> String {
+        format!("{}EntryReader", to_pascal_case(&self.name))
     }
 }
 
@@ -734,5 +752,38 @@ mod tests {
         let ir = SchemaIr::from_schema(&schema);
 
         assert!(ir.types.contains_key("Decimal"));
+    }
+
+    #[test]
+    fn test_message_codec_names_share_the_message_name() {
+        let msg = ResolvedMessage {
+            name: "Quote".to_string(),
+            template_id: 4,
+            block_length: 4,
+            fields: Vec::new(),
+            groups: Vec::new(),
+            var_data: Vec::new(),
+        };
+        assert_eq!(msg.decoder_name(), "QuoteDecoder");
+        assert_eq!(msg.encoder_name(), "QuoteEncoder");
+        assert_eq!(msg.reader_name(), "QuoteReader");
+    }
+
+    #[test]
+    fn test_group_codec_names_use_pascal_case() {
+        let group = ResolvedGroup {
+            name: "priceLevels".to_string(),
+            id: 10,
+            block_length: 16,
+            fields: Vec::new(),
+            nested_groups: Vec::new(),
+            var_data: Vec::new(),
+        };
+        assert_eq!(group.decoder_name(), "PriceLevelsGroupDecoder");
+        assert_eq!(group.entry_decoder_name(), "PriceLevelsEntryDecoder");
+        assert_eq!(group.encoder_name(), "PriceLevelsGroupEncoder");
+        assert_eq!(group.entry_encoder_name(), "PriceLevelsEntryEncoder");
+        assert_eq!(group.reader_name(), "PriceLevelsGroupReader");
+        assert_eq!(group.entry_reader_name(), "PriceLevelsEntryReader");
     }
 }
