@@ -17,6 +17,10 @@ default = []
 # uring path.
 tcp-uring = ["ironsbe-transport/tcp-uring"]
 
+[build-dependencies]
+# Generates the codecs for the sequential_decode bench at build time.
+ironsbe-codegen = { workspace = true }
+
 [dependencies]
 ironsbe-core = { workspace = true }
 ironsbe-channel = { workspace = true }
@@ -43,4 +47,8 @@ harness = false
 
 [[bench]]
 name = "transport_round_trip"
+harness = false
+
+[[bench]]
+name = "sequential_decode"
 harness = false
