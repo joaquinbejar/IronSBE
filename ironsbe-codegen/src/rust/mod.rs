@@ -6,6 +6,7 @@ pub mod groups;
 pub mod messages;
 pub mod types;
 pub(crate) mod var_data;
+pub(crate) mod var_parts;
 
 pub use enums::EnumGenerator;
 pub use groups::GroupGenerator;

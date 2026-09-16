@@ -18,6 +18,7 @@ use crate::rust::var_data::{
     VarDataInfo, end_offset_parts, generate_var_data_getter, generate_var_data_setter,
     resolve_var_data,
 };
+use crate::rust::var_parts::{collect_var_parts, generate_encoder_parts_guard};
 
 /// Byte offset just past the fixed block of a group entry, as seen from an
 /// entry decoder (`block_length` is the wire value from the group header).
@@ -438,7 +439,16 @@ pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
         output.push_str(".\n");
     } else {
         output.push_str("; nested groups and\n");
-        output.push_str("    /// var data written through the entry advance it further.\n");
+        output.push_str(
+            "    /// var data written through the entry advance it further. The previous\n",
+        );
+        output.push_str(
+            "    /// entry must be dropped first (it borrows this encoder); on drop it\n",
+        );
+        output.push_str(
+            "    /// writes an empty header for every nested group or var data field not\n",
+        );
+        output.push_str("    /// written, so this entry starts where the decoder expects it.\n");
     }
     output.push_str(&format!(
         "    pub fn next_entry(&mut self) -> Option<{}<'_>> {{\n",
@@ -487,16 +497,21 @@ pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
 /// Generates a group encoder accessor (`<group>_count(count)`) on a parent
 /// encoder: a message encoder or an entry encoder with nested groups.
 ///
+/// The host carries the variable-part guard (see `var_parts`): the accessor
+/// first fills every part skipped since the last write with an empty header.
+///
 /// # Arguments
 /// * `group_name` - Schema name of the group
 /// * `encoder_type` - Group encoder type, qualified as needed from the host
 /// * `cursor_ref` - Expression lending the parent's cursor, e.g.
 ///   `&mut self.limit` on a message encoder or `&mut *self.limit` on an
 ///   entry encoder
+/// * `part_index` - Position of the group among the owner's variable parts
 pub(crate) fn generate_group_encoder_accessor(
     group_name: &str,
     encoder_type: &str,
     cursor_ref: &str,
+    part_index: usize,
 ) -> String {
     let mut output = String::new();
 
@@ -509,11 +524,26 @@ pub(crate) fn generate_group_encoder_accessor(
     );
     output
         .push_str("    /// sits right after the last entry written. Groups and var data must be\n");
-    output.push_str("    /// written in schema order.\n");
+    output.push_str(
+        "    /// written in schema order. Any group skipped before this one is written\n",
+    );
+    output.push_str(
+        "    /// as an empty group first; a group never begun encodes as empty when the\n",
+    );
+    output.push_str("    /// entry is dropped or the message is finished.\n");
+    output.push_str("    ///\n");
+    output.push_str("    /// # Panics\n");
+    output
+        .push_str("    /// Panics if this group or a later part was already written, or if the\n");
+    output.push_str("    /// buffer is too short for the group header.\n");
     output.push_str(&format!(
         "    pub fn {}_count(&mut self, count: u16) -> {encoder_type}<'_> {{\n",
         to_snake_case(group_name)
     ));
+    output.push_str(&format!(
+        "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\");\n"
+    ));
+    output.push_str(&format!("        self.written = {};\n", part_index + 1));
     output.push_str(&format!(
         "        {encoder_type}::wrap(&mut *self.buffer, {cursor_ref}, count)\n"
     ));
@@ -527,25 +557,32 @@ pub(crate) fn generate_group_encoder_accessor(
 /// Entries of fixed-stride groups keep the `{ buffer, offset }` shape and
 /// the `wrap(buffer, offset)` constructor. Entries that carry nested groups
 /// or var data also borrow the group's write cursor so those parts can be
-/// appended after the fixed block.
+/// appended after the fixed block, track the parts written so far, and fill
+/// the missing ones with empty headers on drop (issue #63).
 fn generate_entry_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     let mut output = String::new();
     let group = layout.group;
     let entry_name = group.entry_encoder_name();
     let fixed_stride = layout.is_fixed_stride();
+    let parts = collect_var_parts(&layout.nested, &layout.var_data, "");
 
     output.push_str(&format!("/// {} Entry Encoder.\n", group.name));
     if !fixed_stride {
         output.push_str("///\n");
         output.push_str("/// Fixed fields are written at their offsets inside the entry block;\n");
         output.push_str("/// nested groups and var data are appended at the shared write cursor\n");
-        output.push_str("/// and must be written in schema order.\n");
+        output.push_str("/// and must be written in schema order. Parts not written by the time\n");
+        output
+            .push_str("/// the entry is dropped are encoded as empty (a group header with zero\n");
+        output.push_str("/// entries, a zero-length var data header), so the next entry always\n");
+        output.push_str("/// starts where the decoder expects it.\n");
     }
     output.push_str(&format!("pub struct {}<'a> {{\n", entry_name));
     output.push_str("    buffer: &'a mut [u8],\n");
     output.push_str("    offset: usize,\n");
     if !fixed_stride {
         output.push_str("    limit: &'a mut usize,\n");
+        output.push_str("    written: u16,\n");
     }
     output.push_str("}\n\n");
 
@@ -560,7 +597,7 @@ fn generate_entry_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
         output.push_str(
             "    pub fn wrap(buffer: &'a mut [u8], offset: usize, limit: &'a mut usize) -> Self {\n",
         );
-        output.push_str("        Self { buffer, offset, limit }\n");
+        output.push_str("        Self { buffer, offset, limit, written: 0 }\n");
     }
     output.push_str("    }\n\n");
 
@@ -570,19 +607,55 @@ fn generate_entry_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     }
 
     // Nested group encoder accessors (advance the shared cursor)
-    for nested in &layout.nested {
+    for (index, nested) in layout.nested.iter().enumerate() {
         output.push_str(&generate_group_encoder_accessor(
             &nested.group.name,
             &nested.group.encoder_name(),
             "&mut *self.limit",
+            index,
         ));
     }
 
-    // Var data setters (append at the shared cursor)
-    for info in &layout.var_data {
-        output.push_str(&generate_var_data_setter(info, "*self.limit"));
+    // Var data setters (append at the shared cursor, after the nested groups)
+    for (index, info) in layout.var_data.iter().enumerate() {
+        output.push_str(&generate_var_data_setter(
+            info,
+            "*self.limit",
+            layout.nested.len() + index,
+        ));
     }
 
+    // Variable-part guard (only entries with parts carry `written`)
+    output.push_str(&generate_encoder_parts_guard(&parts, "*self.limit"));
+
+    output.push_str("}\n\n");
+
+    if !fixed_stride {
+        output.push_str(&generate_entry_encoder_drop(&entry_name));
+    }
+
+    output
+}
+
+/// Generates the `Drop` impl of a variable-stride entry encoder: it writes
+/// an empty header for every part not written through the entry. It only
+/// writes, it never asserts, and it stays out of the way while unwinding.
+fn generate_entry_encoder_drop(entry_name: &str) -> String {
+    let mut output = String::new();
+
+    output.push_str(&format!("impl Drop for {entry_name}<'_> {{\n"));
+    output.push_str("    /// Encodes every nested group and var data field not written through\n");
+    output.push_str("    /// this entry as empty, so the following entry (or whatever follows\n");
+    output.push_str("    /// the group) starts where the decoder expects it.\n");
+    output.push_str("    ///\n");
+    output.push_str("    /// # Panics\n");
+    output.push_str("    /// Panics if the buffer is too short for the empty headers.\n");
+    output.push_str("    fn drop(&mut self) {\n");
+    output.push_str("        if std::thread::panicking() {\n");
+    output.push_str("            return;\n");
+    output.push_str("        }\n");
+    output.push_str("        self.sbe_fill_to(Self::SBE_VAR_PARTS);\n");
+    output.push_str("    }\n");
     output.push_str("}\n\n");
 
     output
@@ -626,5 +699,28 @@ mod tests {
         let code = generate_group_accessor("fills", "FillsGroupDecoder", 1);
         assert!(code.contains("pub fn fills(&self) -> FillsGroupDecoder<'a> {"));
         assert!(code.contains("FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1))"));
+    }
+
+    #[test]
+    fn test_group_encoder_accessor_guards_its_part_index() {
+        let code =
+            generate_group_encoder_accessor("fills", "FillsGroupEncoder", "&mut *self.limit", 2);
+        assert!(
+            code.contains("pub fn fills_count(&mut self, count: u16) -> FillsGroupEncoder<'_> {")
+        );
+        assert!(code.contains("self.sbe_advance_to(2, \"repeating group 'fills'\");"));
+        assert!(code.contains("self.written = 3;"));
+        assert!(
+            code.contains("FillsGroupEncoder::wrap(&mut *self.buffer, &mut *self.limit, count)")
+        );
+    }
+
+    #[test]
+    fn test_entry_encoder_drop_only_fills_and_skips_while_panicking() {
+        let code = generate_entry_encoder_drop("LegsEntryEncoder");
+        assert!(code.contains("impl Drop for LegsEntryEncoder<'_> {"));
+        assert!(code.contains("if std::thread::panicking() {\n            return;\n        }"));
+        assert!(code.contains("self.sbe_fill_to(Self::SBE_VAR_PARTS);"));
+        assert!(!code.contains("assert!"));
     }
 }
