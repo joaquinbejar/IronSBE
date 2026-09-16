@@ -11,8 +11,8 @@ use std::path::PathBuf;
 /// Schema exercising every var data layout the generator supports:
 /// `uint16`, `uint8` and `uint32` length headers, var data after two flat
 /// repeating groups, var data with no groups, groups with no var data,
-/// var data inside group entries (issue #61), and nested groups whose
-/// entries carry var data.
+/// var data inside group entries (issue #61), nested groups whose entries
+/// carry var data, and a flat message with no variable parts at all.
 const VAR_DATA_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="vardata" id="42" version="1" byteOrder="littleEndian">
@@ -94,6 +94,11 @@ const VAR_DATA_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <field name="flag" id="31" type="uint8" offset="0"/>
         </group>
         <data name="trailer" id="2" type="varDataEncoding32"/>
+    </sbe:message>
+
+    <!-- No groups and no var data: the encoder carries no part counter -->
+    <sbe:message name="Flat" id="6" blockLength="8">
+        <field name="ts" id="1" type="uint64" offset="0"/>
     </sbe:message>
 </sbe:messageSchema>"#;
 
