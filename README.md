@@ -732,3 +732,17 @@ If you have any questions, issues, or would like to provide feedback, please fee
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+<!-- related-projects:start -->
+## Related projects
+
+Repositories by the same author that this project depends on, and repositories that depend on it.
+
+### Used by
+
+| Repository | Description |
+|------------|-------------|
+| [hft-clob-core](https://github.com/joaquinbejar/hft-clob-core) | Single-symbol CLOB matching engine with an integer-only hot path and deterministic replay. |
+| [otc-rfq](https://github.com/joaquinbejar/otc-rfq) | OTC Request-for-Quote engine with REST, SBE streaming and FIX/WebSocket/gRPC venue connectivity. *(build and runtime dependency)* |
+
+<!-- related-projects:end -->
