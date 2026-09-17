@@ -84,6 +84,17 @@ pub struct Datapath {
     comp_scratch: Vec<FrameDesc>,
 }
 
+// `xsk-rs` >= 0.11 keeps the ring bookkeeping behind `Arc<UnsafeCell<_>>`
+// (shared handles used only to enforce drop order), which makes the queue
+// types `!UnwindSafe` / `!RefUnwindSafe` by auto-trait rules.  `Datapath`
+// never exposes that interior mutability: every ring operation goes through
+// `&mut self` (`poll_once`) and there is no `&self` path that touches a ring,
+// so a panic cannot leave state observable through a shared reference in a
+// broken state.  With xsk-rs 0.8 the same layout (raw ring pointers by
+// value) was auto-`UnwindSafe`; these impls preserve that public API.
+impl std::panic::UnwindSafe for Datapath {}
+impl std::panic::RefUnwindSafe for Datapath {}
+
 impl Datapath {
     /// Binds an AF_XDP socket to the configured interface/queue.
     ///
