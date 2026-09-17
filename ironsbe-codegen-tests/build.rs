@@ -126,8 +126,70 @@ const VAR_DATA_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     </sbe:message>
 </sbe:messageSchema>"#;
 
+/// Schema at version 2 whose message and group entry each gained a field in
+/// version 2 (`sinceVersion="2"`). Exercises version-aware block validation
+/// in `decode` and the `Option` getters generated for versioned fields.
+const VERSIONED_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="versioned" id="43" version="2" byteOrder="littleEndian">
+    <types>
+        <type name="uint16" primitiveType="uint16"/>
+        <type name="uint32" primitiveType="uint32"/>
+        <type name="uint64" primitiveType="uint64"/>
+        <composite name="messageHeader">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="templateId" primitiveType="uint16"/>
+            <type name="schemaId" primitiveType="uint16"/>
+            <type name="version" primitiveType="uint16"/>
+        </composite>
+        <composite name="groupSizeEncoding">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="numInGroup" primitiveType="uint16"/>
+        </composite>
+        <composite name="varStringEncoding">
+            <type name="length" primitiveType="uint16"/>
+            <type name="varData" primitiveType="uint8" length="0" characterEncoding="UTF-8"/>
+        </composite>
+    </types>
+
+    <sbe:message name="Evolved" id="1" blockLength="16">
+        <field name="ts" id="1" type="uint64" offset="0"/>
+        <field name="extra" id="2" type="uint64" offset="8" sinceVersion="2"/>
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="12">
+            <field name="legId" id="11" type="uint64" offset="0"/>
+            <field name="ratio" id="12" type="uint32" offset="8" sinceVersion="2"/>
+        </group>
+        <data name="memo" id="3" type="varStringEncoding"/>
+    </sbe:message>
+
+    <!-- Versioned entry field next to entry var data: the entry reader must
+         carry the version and block length to gate the field -->
+    <sbe:message name="TaggedLegs" id="2" blockLength="8">
+        <field name="ts" id="1" type="uint64" offset="0"/>
+        <group name="legs" id="10" dimensionType="groupSizeEncoding" blockLength="12">
+            <field name="legId" id="11" type="uint64" offset="0"/>
+            <field name="ratio" id="12" type="uint32" offset="8" sinceVersion="2"/>
+            <data name="tag" id="13" type="varStringEncoding"/>
+        </group>
+    </sbe:message>
+
+    <!-- Field names colliding with the generator's own methods -->
+    <sbe:message name="Collide" id="3" blockLength="12">
+        <field name="actingBlockLength" id="1" type="uint32" offset="0"/>
+        <field name="actingVersion" id="2" type="uint32" offset="4"/>
+        <field name="wrapActing" id="3" type="uint32" offset="8"/>
+        <data name="note" id="4" type="varStringEncoding"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    let code = ironsbe_codegen::generate_from_xml(VERSIONED_SCHEMA)
+        .expect("codegen failed for the versioned schema");
+    fs::write(out_dir.join("versioned_schema.rs"), code)
+        .expect("failed to write generated versioned codecs");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
     let code = ironsbe_codegen::generate_from_xml(VAR_DATA_SCHEMA)

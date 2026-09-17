@@ -4,11 +4,13 @@
 //! message-scoped module holding the codecs of its repeating groups. Field,
 //! var data and group emission live in sibling modules.
 
-use ironsbe_schema::ir::{ResolvedMessage, SchemaIr, to_snake_case};
+use ironsbe_schema::ir::{
+    ResolvedField, ResolvedMessage, SchemaIr, required_block_length, to_snake_case,
+};
 
 use crate::error::CodegenError;
 use crate::options::GeneratorOptions;
-use crate::rust::fields::{generate_field_getter, generate_field_setter};
+use crate::rust::fields::{PresenceGate, generate_field_getter, generate_field_setter};
 use crate::rust::groups::{
     GroupLayout, generate_group_accessor, generate_group_decoder, generate_group_encoder,
     generate_group_encoder_accessor, generate_group_offset_walker, group_encoder_accessor_name,
@@ -22,7 +24,7 @@ use crate::rust::var_data::{
 use crate::rust::var_parts::{collect_var_parts, generate_encoder_parts_guard};
 
 /// Byte offset just past the root block, as seen from a message decoder.
-const MESSAGE_BLOCK_END: &str = "self.offset + Self::BLOCK_LENGTH as usize";
+const MESSAGE_BLOCK_END: &str = "self.offset + self.block_length as usize";
 
 /// Generator for message encoders and decoders.
 pub struct MessageGenerator<'a> {
@@ -117,6 +119,10 @@ impl<'a> MessageGenerator<'a> {
         output.push_str("    buffer: &'a [u8],\n");
         output.push_str("    offset: usize,\n");
         output.push_str("    acting_version: u16,\n");
+        output.push_str(
+            "    /// Fixed block length the header declared; variable parts start after it.\n",
+        );
+        output.push_str("    block_length: u16,\n");
         output.push_str("}\n\n");
 
         // Implementation
@@ -146,12 +152,33 @@ impl<'a> MessageGenerator<'a> {
         output.push_str(
             "    pub fn wrap(buffer: &'a [u8], offset: usize, acting_version: u16) -> Self {\n",
         );
-        output.push_str("        Self { buffer, offset, acting_version }\n");
+        output.push_str(
+            "        Self { buffer, offset, acting_version, block_length: Self::BLOCK_LENGTH }\n",
+        );
+        output.push_str("    }\n\n");
+
+        output.push_str("    /// Schema version the message was encoded with.\n");
+        output.push_str("    #[inline]\n");
+        output.push_str("    #[must_use]\n");
+        output.push_str("    pub const fn acting_version(&self) -> u16 {\n");
+        output.push_str("        self.acting_version\n");
+        output.push_str("    }\n\n");
+
+        output.push_str("    /// Fixed block length the message header declared.\n");
+        output.push_str("    #[inline]\n");
+        output.push_str("    #[must_use]\n");
+        output.push_str("    pub const fn acting_block_length(&self) -> u16 {\n");
+        output.push_str("        self.block_length\n");
         output.push_str("    }\n\n");
 
         // Field getters
         for field in &msg.fields {
-            output.push_str(&generate_field_getter(self.ir, field, MESSAGE_RESERVED));
+            output.push_str(&generate_field_getter(
+                self.ir,
+                field,
+                MESSAGE_RESERVED,
+                PresenceGate::Message,
+            ));
         }
 
         // Group accessors. Groups follow the fixed block back to back, so the
@@ -201,10 +228,23 @@ impl<'a> MessageGenerator<'a> {
             msg.block_length
         ));
 
+        output.push_str(&Self::generate_required_block_length(&msg.fields));
+
         output.push_str(
             "    fn wrap(buffer: &'a [u8], offset: usize, acting_version: u16) -> Self {\n",
         );
         output.push_str("        Self::wrap(buffer, offset, acting_version)\n");
+        output.push_str("    }\n\n");
+
+        output.push_str("    fn wrap_acting(\n");
+        output.push_str("        buffer: &'a [u8],\n");
+        output.push_str("        offset: usize,\n");
+        output.push_str("        acting_version: u16,\n");
+        output.push_str("        acting_block_length: u16,\n");
+        output.push_str("    ) -> Self {\n");
+        output.push_str(
+            "        Self { buffer, offset, acting_version, block_length: acting_block_length }\n",
+        );
         output.push_str("    }\n\n");
 
         output.push_str(&Self::generate_decoder_encoded_length(
@@ -213,6 +253,43 @@ impl<'a> MessageGenerator<'a> {
         ));
         output.push_str("}\n\n");
 
+        output
+    }
+
+    /// Generates `SbeDecoder::required_block_length`: the block a message of a
+    /// given version must carry, so `decode` rejects a header that declares a
+    /// block shorter than the fields of its own version while still accepting
+    /// the shorter blocks older versions legitimately send.
+    ///
+    /// Emitted as a descending `if` chain over the distinct `sinceVersion`
+    /// values, with version 0 as the fallthrough.
+    fn generate_required_block_length(fields: &[ResolvedField]) -> String {
+        let mut versions: Vec<u16> = fields
+            .iter()
+            .map(|f| f.since_version)
+            .filter(|&v| v > 0)
+            .collect();
+        versions.sort_unstable_by(|a, b| b.cmp(a));
+        versions.dedup();
+
+        let mut output = String::new();
+        let param = if versions.is_empty() {
+            "_acting_version"
+        } else {
+            "acting_version"
+        };
+        output.push_str(&format!(
+            "    fn required_block_length({param}: u16) -> u16 {{\n"
+        ));
+        for v in versions {
+            output.push_str(&format!(
+                "        if acting_version >= {} {{\n            return {};\n        }}\n",
+                v,
+                required_block_length(fields, v)
+            ));
+        }
+        output.push_str(&format!("        {}\n", required_block_length(fields, 0)));
+        output.push_str("    }\n\n");
         output
     }
 
@@ -225,8 +302,7 @@ impl<'a> MessageGenerator<'a> {
 
         output.push_str("    fn encoded_length(&self) -> usize {\n");
         if var_data.is_empty() && group_count == 0 {
-            output
-                .push_str("        MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize\n");
+            output.push_str("        MessageHeader::ENCODED_LENGTH + self.block_length as usize\n");
         } else {
             let (prelude, end_expr) = end_offset_parts(var_data, group_count, MESSAGE_BLOCK_END);
             output.push_str(&prelude);
@@ -1067,7 +1143,7 @@ mod tests {
             "/// Var data field: rawData",
         );
 
-        assert!(offset.contains("self.offset + Self::BLOCK_LENGTH as usize"));
+        assert!(offset.contains("self.offset + self.block_length as usize"));
         assert!(
             !code.contains("fn sbe_group_offset("),
             "no groups, no walker"
@@ -1084,16 +1160,16 @@ mod tests {
             "walker must go through per-group end_offset, not GroupHeader::group_size"
         );
         assert!(code.contains(
-            "pos = list_orders::OrdersGroupDecoder::wrap(self.buffer, pos).end_offset();"
+            "pos = list_orders::OrdersGroupDecoder::wrap(self.buffer, pos, self.acting_version).end_offset();"
         ));
         assert!(code.contains(
-            "pos = list_orders::FillsGroupDecoder::wrap(self.buffer, pos).end_offset();"
+            "pos = list_orders::FillsGroupDecoder::wrap(self.buffer, pos, self.acting_version).end_offset();"
         ));
         assert!(code.contains(
-            "list_orders::OrdersGroupDecoder::wrap(self.buffer, self.sbe_group_offset(0))"
+            "list_orders::OrdersGroupDecoder::wrap(self.buffer, self.sbe_group_offset(0), self.acting_version)"
         ));
         assert!(code.contains(
-            "list_orders::FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1))"
+            "list_orders::FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1), self.acting_version)"
         ));
 
         // Encoder lends its cursor to each group encoder instead of pre-advancing it.
@@ -1266,7 +1342,7 @@ mod tests {
             "/// Ping Encoder",
         );
         assert!(
-            decoder_impl.contains("MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize")
+            decoder_impl.contains("MessageHeader::ENCODED_LENGTH + self.block_length as usize")
         );
         assert!(
             !code.contains("_offset(&self)"),
@@ -1331,7 +1407,9 @@ mod tests {
             "impl<'a> OrdersEntryDecoder<'a>",
             "/// fills Group Decoder",
         );
-        assert!(entry.contains("fn wrap(buffer: &'a [u8], offset: usize, block_length: u16)"));
+        assert!(entry.contains(
+            "fn wrap(buffer: &'a [u8], offset: usize, block_length: u16, acting_version: u16)"
+        ));
         assert!(entry.contains(
             "pub fn end_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"
         ));
@@ -1382,7 +1460,7 @@ mod tests {
         );
 
         assert!(group.contains(
-            "let entry = LegsEntryDecoder::wrap(self.buffer, self.offset, self.block_length);"
+            "let entry = LegsEntryDecoder::wrap(self.buffer, self.offset, self.block_length, self.acting_version);"
         ));
         assert!(group.contains("self.offset = entry.end_offset();"));
         assert!(!group.contains("self.offset += self.block_length as usize;"));
@@ -1400,7 +1478,7 @@ mod tests {
         let decoder = section(&code, "impl<'a> QuoteDecoder<'a>", "impl<'a> SbeDecoder");
 
         assert!(
-            decoder.contains("pos = quote::LegsGroupDecoder::wrap(self.buffer, pos).end_offset();")
+            decoder.contains("pos = quote::LegsGroupDecoder::wrap(self.buffer, pos, self.acting_version).end_offset();")
         );
         assert!(decoder.contains(
             "fn sbe_comment_offset(&self) -> usize {\n        self.sbe_group_offset(1)\n"
@@ -1420,10 +1498,14 @@ mod tests {
         // walker over the nested groups, based on the entry's wire block length
         assert!(entry.contains("fn sbe_group_offset(&self, index: usize) -> usize"));
         assert!(entry.contains("let mut pos = self.offset + self.block_length as usize;"));
-        assert!(entry.contains("pos = FillsGroupDecoder::wrap(self.buffer, pos).end_offset();"));
+        assert!(entry.contains(
+            "pos = FillsGroupDecoder::wrap(self.buffer, pos, self.acting_version).end_offset();"
+        ));
         // nested accessor, unqualified (same module)
         assert!(entry.contains("pub fn fills(&self) -> FillsGroupDecoder<'a> {"));
-        assert!(entry.contains("FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(0))"));
+        assert!(entry.contains(
+            "FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(0), self.acting_version)"
+        ));
         // var data after the nested group
         assert!(
             entry.contains(
@@ -1447,11 +1529,11 @@ mod tests {
         let decoder = section(&code, "impl<'a> NestedDecoder<'a>", "impl<'a> SbeDecoder");
         assert!(
             decoder
-                .contains("pos = nested::OrdersGroupDecoder::wrap(self.buffer, pos).end_offset();")
+                .contains("pos = nested::OrdersGroupDecoder::wrap(self.buffer, pos, self.acting_version).end_offset();")
         );
         assert!(
             decoder
-                .contains("nested::FlagsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1))")
+                .contains("nested::FlagsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1), self.acting_version)")
         );
         assert!(decoder.contains(
             "fn sbe_trailer_offset(&self) -> usize {\n        self.sbe_group_offset(2)\n"
@@ -1667,18 +1749,19 @@ mod tests {
         let code = generate_ok(MSG_GROUP_AND_VAR_DATA);
         let reader = section(&code, "impl<'a> QuoteReader<'a> {", "\n}\n\n");
 
-        assert!(reader.contains("pos: offset + Self::BLOCK_LENGTH as usize,"));
+        assert!(reader.contains("pos: offset + acting_block_length as usize,"));
         assert!(reader.contains("let decoder = QuoteDecoder::decode(buffer)?;"));
-        assert!(reader.contains("decoder.acting_version,"));
+        assert!(reader.contains("decoder.acting_version(),"));
+        assert!(reader.contains("decoder.acting_block_length(),"));
         // same fixed-field getter as the decoder
         assert!(reader.contains(
             "pub fn qty(&self) -> u64 {\n        self.buffer.get_u64_le(self.offset + 0)"
         ));
         // flat group: existing decoder, cursor stepped in O(1)
         assert!(reader.contains("pub fn legs(&mut self) -> quote::LegsGroupDecoder<'a> {"));
-        assert!(
-            reader.contains("let group = quote::LegsGroupDecoder::wrap(self.buffer, self.pos);")
-        );
+        assert!(reader.contains(
+            "let group = quote::LegsGroupDecoder::wrap(self.buffer, self.pos, self.acting_version);"
+        ));
         assert!(reader.contains(
             "self.pos = self.sbe_bounded(Some(group.end_offset()), \"repeating group 'legs'\");"
         ));
@@ -1697,7 +1780,9 @@ mod tests {
 
         let reader = section(&code, "impl<'a> NestedReader<'a> {", "\n}\n\n");
         assert!(reader.contains("pub fn orders(&mut self) -> nested::OrdersGroupReader<'_, 'a> {"));
-        assert!(reader.contains("nested::OrdersGroupReader::wrap(self.buffer, &mut self.pos)"));
+        assert!(reader.contains(
+            "nested::OrdersGroupReader::wrap(self.buffer, &mut self.pos, self.acting_version)"
+        ));
         assert!(reader.contains("pub fn flags(&mut self) -> nested::FlagsGroupDecoder<'a> {"));
         assert!(reader.contains("pub fn trailer(&mut self) -> &'a [u8] {"));
 
@@ -1713,7 +1798,7 @@ mod tests {
         );
         assert!(drop.contains("if std::thread::panicking() {"));
         assert!(drop.contains(
-            "let end = OrdersEntryDecoder::wrap(self.buffer, *self.pos, self.block_length).end_offset();"
+            "let end = OrdersEntryDecoder::wrap(self.buffer, *self.pos, self.block_length, self.acting_version).end_offset();"
         ));
         assert!(drop.contains("end <= self.buffer.len(),"));
         assert!(drop.contains("*self.pos = end;"));
@@ -1721,11 +1806,15 @@ mod tests {
         // entry reader: nested variable group then var data, borrowed cursor
         let entry = section(&code, "impl<'e, 'a> OrdersEntryReader<'e, 'a> {", "\n}\n\n");
         assert!(entry.contains("pub fn fills(&mut self) -> FillsGroupReader<'_, 'a> {"));
-        assert!(entry.contains("FillsGroupReader::wrap(self.buffer, &mut *self.pos)"));
+        assert!(
+            entry.contains(
+                "FillsGroupReader::wrap(self.buffer, &mut *self.pos, self.acting_version)"
+            )
+        );
         assert!(entry.contains("self.sbe_advance_to(1, \"var data field 'memo'\");"));
         assert!(
             entry.contains(
-                "let end = FillsGroupDecoder::wrap(self.buffer, *self.pos).end_offset();"
+                "let end = FillsGroupDecoder::wrap(self.buffer, *self.pos, self.acting_version).end_offset();"
             )
         );
         assert!(entry.contains("const SBE_VAR_PARTS: u16 = 2;"));

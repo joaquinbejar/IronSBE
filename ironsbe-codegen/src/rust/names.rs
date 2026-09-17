@@ -17,6 +17,8 @@ pub(crate) const MESSAGE_RESERVED: &[&str] = &[
     "validate_header",
     "encoded_length",
     "acting_version",
+    "acting_block_length",
+    "wrap_acting",
     "finish",
 ];
 

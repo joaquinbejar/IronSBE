@@ -19,7 +19,7 @@
 
 use ironsbe_schema::ir::{ResolvedMessage, SchemaIr, to_snake_case};
 
-use crate::rust::fields::generate_field_getter;
+use crate::rust::fields::{PresenceGate, generate_field_getter};
 use crate::rust::groups::GroupLayout;
 use crate::rust::names::{ENTRY_RESERVED, MESSAGE_RESERVED, accessor_name, renamed_note};
 use crate::rust::var_data::VarDataInfo;
@@ -103,11 +103,27 @@ pub(crate) fn generate_message_reader(
     output.push_str(
         "    pub fn wrap(buffer: &'a [u8], offset: usize, acting_version: u16) -> Self {\n",
     );
+    output.push_str(
+        "        Self::wrap_acting(buffer, offset, acting_version, Self::BLOCK_LENGTH)\n",
+    );
+    output.push_str("    }\n\n");
+
+    output.push_str("    /// Wraps a buffer whose header declared `acting_block_length` for the\n");
+    output.push_str("    /// root block: variable parts start after it, not after the current\n");
+    output.push_str("    /// schema's block, so older messages walk where the wire says.\n");
+    output.push_str("    #[inline]\n");
+    output.push_str("    #[must_use]\n");
+    output.push_str("    pub fn wrap_acting(\n");
+    output.push_str("        buffer: &'a [u8],\n");
+    output.push_str("        offset: usize,\n");
+    output.push_str("        acting_version: u16,\n");
+    output.push_str("        acting_block_length: u16,\n");
+    output.push_str("    ) -> Self {\n");
     output.push_str("        Self {\n");
     output.push_str("            buffer,\n");
     output.push_str("            offset,\n");
     output.push_str("            acting_version,\n");
-    output.push_str("            pos: offset + Self::BLOCK_LENGTH as usize,\n");
+    output.push_str("            pos: offset + acting_block_length as usize,\n");
     output.push_str("            part: 0,\n");
     output.push_str("        }\n");
     output.push_str("    }\n\n");
@@ -122,10 +138,11 @@ pub(crate) fn generate_message_reader(
     output.push_str(&format!(
         "        let decoder = {decoder_name}::decode(buffer)?;\n"
     ));
-    output.push_str("        Ok(Self::wrap(\n");
+    output.push_str("        Ok(Self::wrap_acting(\n");
     output.push_str("            buffer,\n");
     output.push_str("            MessageHeader::ENCODED_LENGTH,\n");
-    output.push_str("            decoder.acting_version,\n");
+    output.push_str("            decoder.acting_version(),\n");
+    output.push_str("            decoder.acting_block_length(),\n");
     output.push_str("        ))\n");
     output.push_str("    }\n\n");
 
@@ -138,7 +155,12 @@ pub(crate) fn generate_message_reader(
 
     // Fixed field getters: same emitter as the decoder (`buffer` + `offset`)
     for field in &msg.fields {
-        output.push_str(&generate_field_getter(ir, field, MESSAGE_RESERVED));
+        output.push_str(&generate_field_getter(
+            ir,
+            field,
+            MESSAGE_RESERVED,
+            PresenceGate::Message,
+        ));
     }
 
     // Variable parts, in schema order
@@ -196,6 +218,7 @@ pub(crate) fn generate_group_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> 
     output.push_str("    buffer: &'a [u8],\n");
     output.push_str("    pos: &'r mut usize,\n");
     output.push_str("    block_length: u16,\n");
+    output.push_str("    acting_version: u16,\n");
     output.push_str("    count: u16,\n");
     output.push_str("    index: u16,\n");
     output.push_str("}\n\n");
@@ -206,13 +229,16 @@ pub(crate) fn generate_group_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> 
     output.push_str("    /// # Panics\n");
     output.push_str("    /// Panics if the buffer is shorter than the group header.\n");
     output.push_str("    #[must_use]\n");
-    output.push_str("    pub fn wrap(buffer: &'a [u8], pos: &'r mut usize) -> Self {\n");
+    output.push_str(
+        "    pub fn wrap(buffer: &'a [u8], pos: &'r mut usize, acting_version: u16) -> Self {\n",
+    );
     output.push_str("        let header = GroupHeader::wrap(buffer, *pos);\n");
     output.push_str("        *pos += GroupHeader::ENCODED_LENGTH;\n");
     output.push_str("        Self {\n");
     output.push_str("            buffer,\n");
     output.push_str("            pos,\n");
     output.push_str("            block_length: header.block_length,\n");
+    output.push_str("            acting_version,\n");
     output.push_str("            count: header.num_in_group,\n");
     output.push_str("            index: 0,\n");
     output.push_str("        }\n");
@@ -253,7 +279,7 @@ pub(crate) fn generate_group_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> 
     output.push_str("        *self.pos = offset + self.block_length as usize;\n");
     output.push_str("        self.index += 1;\n");
     output.push_str(&format!(
-        "        Some({entry_name}::wrap(self.buffer, offset, &mut *self.pos))\n"
+        "        Some({entry_name}::wrap(self.buffer, offset, &mut *self.pos, self.block_length, self.acting_version))\n"
     ));
     output.push_str("    }\n");
     output.push_str("}\n\n");
@@ -270,7 +296,7 @@ pub(crate) fn generate_group_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> 
     output.push_str("        }\n");
     output.push_str("        while self.index < self.count {\n");
     output.push_str(&format!(
-        "            let end = {entry_decoder}::wrap(self.buffer, *self.pos, self.block_length).end_offset();\n"
+        "            let end = {entry_decoder}::wrap(self.buffer, *self.pos, self.block_length, self.acting_version).end_offset();\n"
     ));
     output.push_str("            assert!(\n");
     output.push_str("                end <= self.buffer.len(),\n");
@@ -317,15 +343,29 @@ fn generate_entry_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     output.push_str("    offset: usize,\n");
     output.push_str("    pos: &'e mut usize,\n");
     output.push_str("    part: u16,\n");
+    output.push_str("    block_length: u16,\n");
+    output.push_str("    acting_version: u16,\n");
     output.push_str("}\n\n");
 
     output.push_str(&format!("impl<'e, 'a> {entry_name}<'e, 'a> {{\n"));
-    output.push_str("    fn wrap(buffer: &'a [u8], offset: usize, pos: &'e mut usize) -> Self {\n");
-    output.push_str("        Self { buffer, offset, pos, part: 0 }\n");
+    output.push_str("    fn wrap(\n");
+    output.push_str("        buffer: &'a [u8],\n");
+    output.push_str("        offset: usize,\n");
+    output.push_str("        pos: &'e mut usize,\n");
+    output.push_str("        block_length: u16,\n");
+    output.push_str("        acting_version: u16,\n");
+    output.push_str("    ) -> Self {\n");
+    output
+        .push_str("        Self { buffer, offset, pos, part: 0, block_length, acting_version }\n");
     output.push_str("    }\n\n");
 
     for field in &group.fields {
-        output.push_str(&generate_field_getter(ir, field, ENTRY_RESERVED));
+        output.push_str(&generate_field_getter(
+            ir,
+            field,
+            ENTRY_RESERVED,
+            PresenceGate::Entry,
+        ));
     }
 
     output.push_str(&generate_reader_part_accessors(
@@ -441,7 +481,7 @@ fn generate_fixed_group_accessor(
         "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\");\n"
     ));
     output.push_str(&format!(
-        "        let group = {decoder_type}::wrap(self.buffer, {cursor});\n"
+        "        let group = {decoder_type}::wrap(self.buffer, {cursor}, self.acting_version);\n"
     ));
     output.push_str(&format!(
         "        {cursor} = self.sbe_bounded(Some(group.end_offset()), \"repeating group '{group_name}'\");\n"
@@ -488,7 +528,7 @@ fn generate_variable_group_accessor(
     ));
     output.push_str(&format!("        self.part = {};\n", part_index + 1));
     output.push_str(&format!(
-        "        {reader_type}::wrap(self.buffer, {cursor_ref})\n"
+        "        {reader_type}::wrap(self.buffer, {cursor_ref}, self.acting_version)\n"
     ));
     output.push_str("    }\n\n");
 
@@ -596,7 +636,7 @@ mod tests {
         assert!(code.contains("pub fn notes(&mut self) -> example::NotesGroupDecoder<'a> {"));
         assert!(code.contains("self.sbe_advance_to(1, \"repeating group 'notes'\");"));
         assert!(
-            code.contains("let group = example::NotesGroupDecoder::wrap(self.buffer, self.pos);")
+            code.contains("let group = example::NotesGroupDecoder::wrap(self.buffer, self.pos, self.acting_version);")
         );
         assert!(code.contains(
             "self.pos = self.sbe_bounded(Some(group.end_offset()), \"repeating group 'notes'\");"
@@ -616,7 +656,11 @@ mod tests {
         assert!(code.contains("pub fn fills(&mut self) -> FillsGroupReader<'_, 'a> {"));
         assert!(code.contains("self.sbe_advance_to(0, \"repeating group 'fills'\");"));
         assert!(code.contains("self.part = 1;"));
-        assert!(code.contains("FillsGroupReader::wrap(self.buffer, &mut *self.pos)"));
+        assert!(
+            code.contains(
+                "FillsGroupReader::wrap(self.buffer, &mut *self.pos, self.acting_version)"
+            )
+        );
     }
 
     #[test]

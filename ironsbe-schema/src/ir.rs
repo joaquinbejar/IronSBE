@@ -344,9 +344,20 @@ pub struct ResolvedField {
     pub array_length: Option<usize>,
     /// Primitive type (if applicable).
     pub primitive_type: Option<PrimitiveType>,
+    /// Schema version that introduced the field (`sinceVersion`, 0 if absent).
+    ///
+    /// A field with `since_version > 0` is absent from messages encoded by an
+    /// older version, so generated getters for it return `Option`.
+    pub since_version: u16,
 }
 
 impl ResolvedField {
+    /// End of the field inside the fixed block (`offset + encoded_length`).
+    #[must_use]
+    pub fn end_offset(&self) -> usize {
+        self.offset + self.encoded_length
+    }
+
     /// Creates a resolved field from a field definition.
     #[must_use]
     pub fn from_field_def(
@@ -386,8 +397,25 @@ impl ResolvedField {
             is_array,
             array_length,
             primitive_type,
+            since_version: field.since_version.unwrap_or(0),
         }
     }
+}
+
+/// Smallest block length a message or entry of `acting_version` can carry:
+/// the end of the last fixed field introduced at or before that version.
+///
+/// This is what the decoder validates the header's declared block length
+/// against, so an older message with a shorter block still decodes while a
+/// truncated block claiming the current version is rejected.
+#[must_use]
+pub fn required_block_length(fields: &[ResolvedField], acting_version: u16) -> usize {
+    fields
+        .iter()
+        .filter(|f| f.since_version <= acting_version)
+        .map(ResolvedField::end_offset)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Resolved group information.
