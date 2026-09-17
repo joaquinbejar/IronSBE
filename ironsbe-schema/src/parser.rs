@@ -32,8 +32,8 @@ pub fn parse_schema(xml: &str) -> Result<Schema, ParseError> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let name = std::str::from_utf8(&name_bytes)?;
+                let name_owned = e.name().as_ref().to_owned();
+                let name = name_owned.as_str();
                 match name {
                     "messageSchema" | "sbe:messageSchema" => {
                         schema = Some(parse_message_schema(e)?);
@@ -71,8 +71,8 @@ fn parse_message_schema(e: &BytesStart<'_>) -> Result<Schema, ParseError> {
     let mut header_type = "messageHeader".to_string();
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "package" => package = value.to_string(),
@@ -115,8 +115,8 @@ fn parse_types(reader: &mut Reader<&[u8]>, schema: &mut Schema) -> Result<(), Pa
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 depth += 1;
-                let name_bytes = e.name().as_ref().to_vec();
-                let name = std::str::from_utf8(&name_bytes)?;
+                let name_owned = e.name().as_ref().to_owned();
+                let name = name_owned.as_str();
                 match name {
                     "type" => {
                         let type_def = parse_primitive_type(reader, e)?;
@@ -142,8 +142,8 @@ fn parse_types(reader: &mut Reader<&[u8]>, schema: &mut Schema) -> Result<(), Pa
                 }
             }
             Ok(Event::Empty(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let name = std::str::from_utf8(&name_bytes)?;
+                let name_owned = e.name().as_ref().to_owned();
+                let name = name_owned.as_str();
                 if name == "type" {
                     let type_def = parse_primitive_type_empty(e)?;
                     schema.add_type(TypeDef::Primitive(type_def));
@@ -177,7 +177,8 @@ fn parse_primitive_type(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Text(ref t)) => {
-                let text = std::str::from_utf8(t.as_ref())?.trim();
+                let text: &str = t.as_ref();
+                let text = text.trim();
                 if !text.is_empty() {
                     type_def.constant_value = Some(text.to_string());
                 }
@@ -206,8 +207,8 @@ fn parse_primitive_type_empty(e: &BytesStart<'_>) -> Result<PrimitiveDef, ParseE
     let mut description = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -259,8 +260,8 @@ fn parse_composite(
     let mut semantic_type = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -280,8 +281,8 @@ fn parse_composite(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let tag_name = std::str::from_utf8(&name_bytes)?;
+                let name_owned = e.name().as_ref().to_owned();
+                let tag_name = name_owned.as_str();
                 if tag_name == "type" {
                     let field = parse_composite_field(e, current_offset)?;
                     current_offset += field.encoded_length;
@@ -312,8 +313,8 @@ fn parse_composite_field(
     let constant_value = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -359,8 +360,8 @@ fn parse_enum(reader: &mut Reader<&[u8]>, e: &BytesStart<'_>) -> Result<EnumDef,
     let mut description = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -388,8 +389,8 @@ fn parse_enum(reader: &mut Reader<&[u8]>, e: &BytesStart<'_>) -> Result<EnumDef,
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let tag_name = std::str::from_utf8(&name_bytes)?;
+                let name_owned = e.name().as_ref().to_owned();
+                let tag_name = name_owned.as_str();
                 if tag_name == "validValue" {
                     let value = parse_enum_value(reader, e)?;
                     enum_def.add_value(value);
@@ -417,8 +418,8 @@ fn parse_enum_value(
     let mut deprecated = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -436,7 +437,8 @@ fn parse_enum_value(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Text(ref t)) => {
-                value_str = std::str::from_utf8(t.as_ref())?.trim().to_string();
+                let text: &str = t.as_ref();
+                value_str = text.trim().to_string();
             }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
@@ -461,8 +463,8 @@ fn parse_set(reader: &mut Reader<&[u8]>, e: &BytesStart<'_>) -> Result<SetDef, P
     let mut description = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -488,8 +490,8 @@ fn parse_set(reader: &mut Reader<&[u8]>, e: &BytesStart<'_>) -> Result<SetDef, P
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let tag_name = std::str::from_utf8(&name_bytes)?;
+                let name_owned = e.name().as_ref().to_owned();
+                let tag_name = name_owned.as_str();
                 if tag_name == "choice" {
                     let choice = parse_set_choice(reader, e)?;
                     set_def.add_choice(choice);
@@ -517,8 +519,8 @@ fn parse_set_choice(
     let mut deprecated = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -536,7 +538,8 @@ fn parse_set_choice(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Text(ref t)) => {
-                let text = std::str::from_utf8(t.as_ref())?.trim();
+                let text: &str = t.as_ref();
+                let text = text.trim();
                 bit_position = text
                     .parse()
                     .map_err(|_| ParseError::invalid_attr("choice", "value", text))?;
@@ -572,8 +575,8 @@ fn parse_message(
     let mut deprecated = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -606,8 +609,8 @@ fn parse_message(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let tag_name = std::str::from_utf8(&name_bytes)?;
+                let name_owned = e.name().as_ref().to_owned();
+                let tag_name = name_owned.as_str();
 
                 match tag_name {
                     "field" => {
@@ -652,8 +655,8 @@ fn parse_field(e: &BytesStart<'_>, schema: &Schema) -> Result<FieldDef, ParseErr
     let mut value_ref = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -712,8 +715,8 @@ fn parse_group(
     let mut deprecated = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
@@ -746,8 +749,8 @@ fn parse_group(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let tag_name = std::str::from_utf8(&name_bytes)?;
+                let name_owned = e.name().as_ref().to_owned();
+                let tag_name = name_owned.as_str();
                 match tag_name {
                     "field" => {
                         let field = parse_field(e, schema)?;
@@ -803,8 +806,8 @@ fn parse_data_field(e: &BytesStart<'_>) -> Result<DataFieldDef, ParseError> {
     let mut deprecated = None;
 
     for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = std::str::from_utf8(&attr.value)?;
+        let key: &str = attr.key.as_ref();
+        let value: &str = attr.value.as_ref();
 
         match key {
             "name" => name = value.to_string(),
