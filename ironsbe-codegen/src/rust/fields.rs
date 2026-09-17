@@ -9,133 +9,198 @@ use ironsbe_schema::types::PrimitiveType;
 
 use crate::rust::names::{accessor_name, renamed_note};
 
-/// Generates a field getter method.
+/// How a host struct knows whether a versioned field (`sinceVersion > 0`) is
+/// present in the message it wraps.
+///
+/// Presence is a property of the *version*: an older encoder may have reserved
+/// padding where a later field now lives (SBE 1.0 §5.4.3), so a field that
+/// fits inside the block is still absent when the acting version predates
+/// it. Bounds are checked in addition to the version where the block length
+/// comes from the wire (group entries), so a group header that under-declares
+/// its block never lets a getter read past the entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PresenceGate {
+    /// Message host: `acting_version: u16`; the root block was validated
+    /// against that version by `decode`.
+    Message,
+    /// Group entry host: `acting_version: u16` and the wire `block_length: u16`.
+    Entry,
+}
+
+impl PresenceGate {
+    fn condition(self, field: &ResolvedField) -> String {
+        match self {
+            Self::Message => format!("self.acting_version >= {}", field.since_version),
+            Self::Entry => format!(
+                "self.acting_version >= {} && usize::from(self.block_length) >= {}",
+                field.since_version,
+                field.end_offset()
+            ),
+        }
+    }
+}
+
+/// One emitted getter: a doc line, a name, a return type, optional `let`
+/// bindings and the value expression. Emitting from this shape lets versioned
+/// fields wrap the value in `Some` and add the presence check without
+/// re-parsing generated text.
+struct Getter {
+    doc: String,
+    name: String,
+    ret: String,
+    bindings: Vec<String>,
+    value: String,
+}
+
+impl Getter {
+    fn emit(&self, gate: Option<(PresenceGate, &ResolvedField)>) -> String {
+        let mut out = String::new();
+        out.push_str(&self.doc);
+        out.push_str("    #[inline(always)]\n");
+        out.push_str("    #[must_use]\n");
+        match gate {
+            Some((gate, field)) if field.since_version > 0 => {
+                out.push_str(&format!(
+                    "    /// Present since schema version {}; `None` when the message was\n",
+                    field.since_version
+                ));
+                out.push_str("    /// encoded by an older version.\n");
+                out.push_str(&format!(
+                    "    pub fn {}(&self) -> Option<{}> {{\n",
+                    self.name, self.ret
+                ));
+                out.push_str(&format!("        if !({}) {{\n", gate.condition(field)));
+                out.push_str("            return None;\n");
+                out.push_str("        }\n");
+                for b in &self.bindings {
+                    out.push_str(&format!("        {b}\n"));
+                }
+                out.push_str(&format!("        Some({})\n", self.value));
+            }
+            _ => {
+                out.push_str(&format!(
+                    "    pub fn {}(&self) -> {} {{\n",
+                    self.name, self.ret
+                ));
+                for b in &self.bindings {
+                    out.push_str(&format!("        {b}\n"));
+                }
+                out.push_str(&format!("        {}\n", self.value));
+            }
+        }
+        out.push_str("    }\n\n");
+        out
+    }
+}
+
+/// Generates the getter method(s) for a fixed-length field.
 ///
 /// Emitted inside an `impl` block whose `self` has `buffer: &'a [u8]` and
 /// `offset: usize` (start of the fixed block). `reserved` lists the methods
 /// the host defines itself; a field named like one of them gets a trailing
-/// underscore (see `names`).
+/// underscore (see `names`). `gate` says how the host detects a field that a
+/// message encoded by an older schema version does not carry; such fields
+/// (`sinceVersion > 0`) get `Option` getters.
 pub(crate) fn generate_field_getter(
     ir: &SchemaIr,
     field: &ResolvedField,
     reserved: &[&str],
+    gate: PresenceGate,
 ) -> String {
-    let mut output = String::new();
-    let getter = accessor_name(&field.getter_name, reserved);
+    field_getters(ir, field, reserved)
+        .iter()
+        .map(|g| g.emit(Some((gate, field))))
+        .collect()
+}
 
-    output.push_str(&format!(
+fn field_getters(ir: &SchemaIr, field: &ResolvedField, reserved: &[&str]) -> Vec<Getter> {
+    let getter = accessor_name(&field.getter_name, reserved);
+    let mut doc = format!(
         "    /// Field: {} (id={}, offset={}).\n",
         field.name, field.id, field.offset
-    ));
-    output.push_str(&renamed_note(&field.getter_name, &getter));
-    output.push_str("    #[inline(always)]\n");
-    output.push_str("    #[must_use]\n");
+    );
+    doc.push_str(&renamed_note(&field.getter_name, &getter));
+    let range = format!(
+        "self.offset + {}..self.offset + {}",
+        field.offset,
+        field.end_offset()
+    );
 
     if field.is_array {
-        // Array field - return slice
         let elem_type = field.primitive_type.map(|p| p.rust_type()).unwrap_or("u8");
-        let len = field.array_length.unwrap_or(1);
-
+        let mut getters = vec![Getter {
+            doc,
+            name: getter.clone(),
+            ret: "&'a [u8]".to_owned(),
+            bindings: Vec::new(),
+            value: format!("&self.buffer[{range}]"),
+        }];
         if elem_type == "u8" {
-            // Byte array - return &[u8]
-            output.push_str(&format!("    pub fn {}(&self) -> &'a [u8] {{\n", getter));
-            output.push_str(&format!(
-                "        &self.buffer[self.offset + {}..self.offset + {} + {}]\n",
-                field.offset, field.offset, len
-            ));
-            output.push_str("    }\n\n");
-
             // Also generate a string accessor for char arrays
-            output.push_str(&format!(
-                "    /// Field {} as string (trimmed).\n",
-                field.name
-            ));
-            output.push_str("    #[inline]\n");
-            output.push_str("    #[must_use]\n");
-            output.push_str(&format!(
-                "    pub fn {}_as_str(&self) -> &'a str {{\n",
-                getter
-            ));
-            output.push_str(&format!(
-                "        let bytes = &self.buffer[self.offset + {}..self.offset + {} + {}];\n",
-                field.offset, field.offset, len
-            ));
-            output.push_str(
-                "        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());\n",
-            );
-            output.push_str("        std::str::from_utf8(&bytes[..end]).unwrap_or(\"\")\n");
-            output.push_str("    }\n\n");
-        } else {
-            // Other array types
-            output.push_str(&format!("    pub fn {}(&self) -> &'a [u8] {{\n", getter));
-            output.push_str(&format!(
-                "        &self.buffer[self.offset + {}..self.offset + {}]\n",
-                field.offset,
-                field.offset + field.encoded_length
-            ));
-            output.push_str("    }\n\n");
+            getters.push(Getter {
+                doc: format!("    /// Field {} as string (trimmed).\n", field.name),
+                name: format!("{getter}_as_str"),
+                ret: "&'a str".to_owned(),
+                bindings: vec![
+                    format!("let bytes = &self.buffer[{range}];"),
+                    "let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());"
+                        .to_owned(),
+                ],
+                value: "std::str::from_utf8(&bytes[..end]).unwrap_or(\"\")".to_owned(),
+            });
         }
-    } else {
-        // Scalar field - check if it's an enum/set type
-        let rust_type = &field.rust_type;
-        let resolved_type = ir.get_type(&field.type_name);
-
-        match resolved_type.map(|t| &t.kind) {
-            Some(TypeKind::Enum { encoding, .. }) => {
-                // Enum field - use encoding primitive and wrap with From
-                let read_method = get_read_method(Some(*encoding));
-                output.push_str(&format!(
-                    "    pub fn {}(&self) -> {} {{\n",
-                    getter, rust_type
-                ));
-                output.push_str(&format!(
-                    "        {}::from(self.buffer.{}(self.offset + {}))\n",
-                    rust_type, read_method, field.offset
-                ));
-                output.push_str("    }\n\n");
-            }
-            Some(TypeKind::Set { encoding, .. }) => {
-                // Set field - use encoding primitive and wrap with from_raw
-                let read_method = get_read_method(Some(*encoding));
-                output.push_str(&format!(
-                    "    pub fn {}(&self) -> {} {{\n",
-                    getter, rust_type
-                ));
-                output.push_str(&format!(
-                    "        {}::from_raw(self.buffer.{}(self.offset + {}))\n",
-                    rust_type, read_method, field.offset
-                ));
-                output.push_str("    }\n\n");
-            }
-            Some(TypeKind::Composite { .. }) => {
-                // Composite field - return wrapper struct
-                output.push_str(&format!(
-                    "    pub fn {}(&self) -> {}<'a> {{\n",
-                    getter, rust_type
-                ));
-                output.push_str(&format!(
-                    "        {}::wrap(self.buffer, self.offset + {})\n",
-                    rust_type, field.offset
-                ));
-                output.push_str("    }\n\n");
-            }
-            _ => {
-                // Primitive field
-                let read_method = get_read_method(field.primitive_type);
-                output.push_str(&format!(
-                    "    pub fn {}(&self) -> {} {{\n",
-                    getter, rust_type
-                ));
-                output.push_str(&format!(
-                    "        self.buffer.{}(self.offset + {})\n",
-                    read_method, field.offset
-                ));
-                output.push_str("    }\n\n");
-            }
-        }
+        return getters;
     }
 
-    output
+    // Scalar field - check if it's an enum/set type
+    let rust_type = field.rust_type.clone();
+    let resolved_type = ir.get_type(&field.type_name);
+    let (ret, value) = match resolved_type.map(|t| &t.kind) {
+        Some(TypeKind::Enum { encoding, .. }) => {
+            let read_method = get_read_method(Some(*encoding));
+            (
+                rust_type.clone(),
+                format!(
+                    "{}::from(self.buffer.{}(self.offset + {}))",
+                    rust_type, read_method, field.offset
+                ),
+            )
+        }
+        Some(TypeKind::Set { encoding, .. }) => {
+            let read_method = get_read_method(Some(*encoding));
+            (
+                rust_type.clone(),
+                format!(
+                    "{}::from_raw(self.buffer.{}(self.offset + {}))",
+                    rust_type, read_method, field.offset
+                ),
+            )
+        }
+        Some(TypeKind::Composite { .. }) => (
+            format!("{rust_type}<'a>"),
+            format!(
+                "{}::wrap(self.buffer, self.offset + {})",
+                rust_type, field.offset
+            ),
+        ),
+        _ => {
+            let read_method = get_read_method(field.primitive_type);
+            (
+                rust_type,
+                format!(
+                    "self.buffer.{}(self.offset + {})",
+                    read_method, field.offset
+                ),
+            )
+        }
+    };
+    vec![Getter {
+        doc,
+        name: getter,
+        ret,
+        bindings: Vec::new(),
+        value,
+    }]
 }
 
 /// Generates a field setter for a message encoder.

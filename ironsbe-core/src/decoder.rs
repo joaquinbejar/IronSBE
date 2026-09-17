@@ -47,6 +47,19 @@ pub enum DecodeError {
         /// Minimum supported version.
         min_supported: u16,
     },
+    /// The header declares a block shorter than the fields of its own version.
+    ///
+    /// The declared block length is untrusted input; accepting it would let a
+    /// field accessor read past the block. Older versions legitimately declare
+    /// shorter blocks, which is why the requirement depends on the version.
+    BlockLengthTooSmall {
+        /// Block length the message version requires.
+        required: u16,
+        /// Block length the header declared.
+        declared: u16,
+        /// Version the header declared (clamped to the decoder's schema version).
+        version: u16,
+    },
 }
 
 impl std::fmt::Display for DecodeError {
@@ -92,6 +105,17 @@ impl std::fmt::Display for DecodeError {
                     version, min_supported
                 )
             }
+            Self::BlockLengthTooSmall {
+                required,
+                declared,
+                version,
+            } => {
+                write!(
+                    f,
+                    "block length too small: version {} requires {} bytes, header declares {}",
+                    version, required, declared
+                )
+            }
         }
     }
 }
@@ -123,8 +147,22 @@ pub trait SbeDecoder<'a>: Sized {
     /// Schema version.
     const SCHEMA_VERSION: u16;
 
-    /// Block length (fixed portion size in bytes).
+    /// Block length (fixed portion size in bytes) of the current schema version.
     const BLOCK_LENGTH: u16;
+
+    /// Smallest block length a message of `acting_version` can carry: the end
+    /// of the last fixed field whose `sinceVersion` is at most that version.
+    ///
+    /// Generated decoders override this from the schema so that a message
+    /// encoded by an older version (shorter block) still decodes, while a
+    /// header claiming the current version with a truncated block is rejected
+    /// before any accessor can read past it. The default is the conservative
+    /// answer for hand-written decoders: the whole current block.
+    #[must_use]
+    fn required_block_length(acting_version: u16) -> u16 {
+        let _ = acting_version;
+        Self::BLOCK_LENGTH
+    }
 
     /// Wraps a buffer to decode a message (zero-copy).
     ///
@@ -136,6 +174,25 @@ pub trait SbeDecoder<'a>: Sized {
     /// # Returns
     /// A decoder instance wrapping the buffer.
     fn wrap(buffer: &'a [u8], offset: usize, acting_version: u16) -> Self;
+
+    /// Wraps a buffer whose header declared `acting_block_length` for the
+    /// fixed block.
+    ///
+    /// Generated decoders store the value and start repeating groups and var
+    /// data after it, so a message encoded by an older version (shorter
+    /// block) is walked where the wire says, not where the current schema
+    /// would put it. The default ignores the value; hand-written decoders
+    /// that only read fixed fields need nothing more.
+    #[must_use]
+    fn wrap_acting(
+        buffer: &'a [u8],
+        offset: usize,
+        acting_version: u16,
+        acting_block_length: u16,
+    ) -> Self {
+        let _ = acting_block_length;
+        Self::wrap(buffer, offset, acting_version)
+    }
 
     /// Returns the encoded length of the message in bytes.
     ///
@@ -170,8 +227,17 @@ pub trait SbeDecoder<'a>: Sized {
     /// # Arguments
     /// * `buffer` - Byte buffer containing the message (starting with header)
     ///
+    /// # Guarantee
+    /// A successful `decode` guarantees the header and the **root block** are
+    /// present and consistent with the message's version, so every fixed
+    /// field accessor is in bounds. Repeating groups and var data are read
+    /// lazily and their lengths come from the wire: a frame truncated inside
+    /// a group or var data is not detected here and panics on access. A
+    /// checked walk of the variable parts is pending.
+    ///
     /// # Errors
-    /// Returns an error if the header is invalid or buffer is too short.
+    /// Returns an error if the header is invalid, the declared block is shorter
+    /// than the fields its version requires, or the buffer is too short.
     fn decode(buffer: &'a [u8]) -> Result<Self, DecodeError> {
         if buffer.len() < MessageHeader::ENCODED_LENGTH {
             return Err(DecodeError::BufferTooShort {
@@ -183,6 +249,18 @@ pub trait SbeDecoder<'a>: Sized {
         let header = MessageHeader::wrap(buffer, 0);
         Self::validate_header(&header)?;
 
+        // A newer schema version only appends fields, so its block covers ours;
+        // validate against the newest version this decoder knows.
+        let acting_version = header.version.min(Self::SCHEMA_VERSION);
+        let required_block = Self::required_block_length(acting_version);
+        if header.block_length < required_block {
+            return Err(DecodeError::BlockLengthTooSmall {
+                required: required_block,
+                declared: header.block_length,
+                version: acting_version,
+            });
+        }
+
         let required_len = MessageHeader::ENCODED_LENGTH + header.block_length as usize;
         if buffer.len() < required_len {
             return Err(DecodeError::BufferTooShort {
@@ -191,10 +269,11 @@ pub trait SbeDecoder<'a>: Sized {
             });
         }
 
-        Ok(Self::wrap(
+        Ok(Self::wrap_acting(
             buffer,
             MessageHeader::ENCODED_LENGTH,
             header.version,
+            header.block_length,
         ))
     }
 }
@@ -346,6 +425,101 @@ mod tests {
         fn encoded_length(&self) -> usize {
             MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize
         }
+    }
+
+    /// Decoder with a versioned layout: v1 has one 8-byte field, v2 appends another.
+    struct VersionedDecoder<'a> {
+        #[allow(dead_code)]
+        buffer: &'a [u8],
+    }
+
+    impl<'a> SbeDecoder<'a> for VersionedDecoder<'a> {
+        const TEMPLATE_ID: u16 = 1;
+        const SCHEMA_ID: u16 = 100;
+        const SCHEMA_VERSION: u16 = 2;
+        const BLOCK_LENGTH: u16 = 16;
+
+        fn required_block_length(acting_version: u16) -> u16 {
+            if acting_version >= 2 { 16 } else { 8 }
+        }
+
+        fn wrap(buffer: &'a [u8], _offset: usize, _acting_version: u16) -> Self {
+            Self { buffer }
+        }
+
+        fn encoded_length(&self) -> usize {
+            MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize
+        }
+    }
+
+    fn header_bytes(block_length: u16, version: u16) -> Vec<u8> {
+        let mut h = vec![0u8; MessageHeader::ENCODED_LENGTH];
+        h[0..2].copy_from_slice(&block_length.to_le_bytes());
+        h[2..4].copy_from_slice(&1u16.to_le_bytes());
+        h[4..6].copy_from_slice(&100u16.to_le_bytes());
+        h[6..8].copy_from_slice(&version.to_le_bytes());
+        h
+    }
+
+    #[test]
+    fn test_decode_truncated_block_for_current_version_is_rejected() {
+        // Header only: block_length = 0, version = current. Previously accepted,
+        // and the first accessor then read out of bounds.
+        let bytes = header_bytes(0, 1);
+        assert_eq!(
+            TestDecoder::decode(&bytes).err(),
+            Some(DecodeError::BlockLengthTooSmall {
+                required: 16,
+                declared: 0,
+                version: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn test_decode_older_version_with_its_own_block_is_accepted() {
+        let mut bytes = header_bytes(8, 1);
+        bytes.extend_from_slice(&[0u8; 8]);
+        assert!(VersionedDecoder::decode(&bytes).is_ok());
+    }
+
+    #[test]
+    fn test_decode_current_version_with_older_block_is_rejected() {
+        let mut bytes = header_bytes(8, 2);
+        bytes.extend_from_slice(&[0u8; 8]);
+        assert_eq!(
+            VersionedDecoder::decode(&bytes).err(),
+            Some(DecodeError::BlockLengthTooSmall {
+                required: 16,
+                declared: 8,
+                version: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn test_decode_newer_version_is_validated_against_known_schema() {
+        // Version 3 is unknown to the decoder; its block must at least cover v2.
+        let mut bytes = header_bytes(24, 3);
+        bytes.extend_from_slice(&[0u8; 24]);
+        assert!(VersionedDecoder::decode(&bytes).is_ok());
+        let short = header_bytes(8, 3);
+        assert!(matches!(
+            VersionedDecoder::decode(&short),
+            Err(DecodeError::BlockLengthTooSmall { version: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn test_decode_declared_block_beyond_buffer_is_too_short() {
+        let bytes = header_bytes(16, 1);
+        assert_eq!(
+            TestDecoder::decode(&bytes).err(),
+            Some(DecodeError::BufferTooShort {
+                required: 24,
+                available: 8,
+            })
+        );
     }
 
     #[test]

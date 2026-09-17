@@ -278,7 +278,7 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
                     "                // {name}: walk the repeating group\n"
                 ));
                 output.push_str(&format!(
-                    "                let end = {decoder_type}::wrap(self.buffer, {cursor}).end_offset();\n"
+                    "                let end = {decoder_type}::wrap(self.buffer, {cursor}, self.acting_version).end_offset();\n"
                 ));
                 output.push_str(&format!(
                     "                {cursor} = self.sbe_bounded(Some(end), \"repeating group '{name}'\");\n"
@@ -413,14 +413,14 @@ mod tests {
         );
         assert!(code.contains("extends past the end of the buffer"));
         assert!(code.contains(
-            "let end = m::OrdersGroupDecoder::wrap(self.buffer, self.pos).end_offset();"
+            "let end = m::OrdersGroupDecoder::wrap(self.buffer, self.pos, self.acting_version).end_offset();"
         ));
         assert!(
             code.contains("self.pos = self.sbe_bounded(Some(end), \"repeating group 'Orders'\");")
         );
         assert!(
             code.contains(
-                "let end = m::FlagsGroupDecoder::wrap(self.buffer, self.pos).end_offset();"
+                "let end = m::FlagsGroupDecoder::wrap(self.buffer, self.pos, self.acting_version).end_offset();"
             )
         );
         assert!(code.contains("let len = self.buffer.get_u32_le(self.pos) as usize;"));

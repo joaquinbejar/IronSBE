@@ -14,7 +14,7 @@ use ironsbe_schema::ir::{ResolvedGroup, SchemaIr, to_snake_case};
 
 use crate::error::CodegenError;
 use crate::options::GeneratorOptions;
-use crate::rust::fields::{generate_entry_field_setter, generate_field_getter};
+use crate::rust::fields::{PresenceGate, generate_entry_field_setter, generate_field_getter};
 use crate::rust::names::{ENTRY_RESERVED, accessor_name, renamed_note};
 use crate::rust::var_data::{
     VarDataInfo, end_offset_parts, generate_var_data_getter, generate_var_data_setter,
@@ -124,7 +124,7 @@ pub(crate) fn generate_group_offset_walker(base_expr: &str, decoders: &[String])
         output.push_str("            return pos;\n");
         output.push_str("        }\n");
         output.push_str(&format!(
-            "        pos = {decoder}::wrap(self.buffer, pos).end_offset();\n"
+            "        pos = {decoder}::wrap(self.buffer, pos, self.acting_version).end_offset();\n"
         ));
     }
     output.push_str("        pos\n");
@@ -166,7 +166,7 @@ pub(crate) fn generate_group_accessor(
         "    pub fn {accessor}(&self) -> {decoder_type}<'a> {{\n"
     ));
     output.push_str(&format!(
-        "        {decoder_type}::wrap(self.buffer, self.sbe_group_offset({index}))\n"
+        "        {decoder_type}::wrap(self.buffer, self.sbe_group_offset({index}), self.acting_version)\n"
     ));
     output.push_str("    }\n\n");
 
@@ -190,13 +190,19 @@ pub(crate) fn generate_group_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     output.push_str("    count: u16,\n");
     output.push_str("    index: u16,\n");
     output.push_str("    offset: usize,\n");
+    output.push_str("    acting_version: u16,\n");
     output.push_str("}\n\n");
 
     // Group decoder implementation
     output.push_str(&format!("impl<'a> {}<'a> {{\n", decoder_name));
     output.push_str("    /// Wraps a buffer at the group header position.\n");
+    output.push_str("    ///\n");
+    output.push_str("    /// `acting_version` is the schema version the message was encoded\n");
+    output.push_str("    /// with; entry fields added in a later version read as `None`.\n");
     output.push_str("    #[must_use]\n");
-    output.push_str("    pub fn wrap(buffer: &'a [u8], offset: usize) -> Self {\n");
+    output.push_str(
+        "    pub fn wrap(buffer: &'a [u8], offset: usize, acting_version: u16) -> Self {\n",
+    );
     output.push_str("        let header = GroupHeader::wrap(buffer, offset);\n");
     output.push_str("        Self {\n");
     output.push_str("            buffer,\n");
@@ -204,6 +210,7 @@ pub(crate) fn generate_group_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     output.push_str("            count: header.num_in_group,\n");
     output.push_str("            index: 0,\n");
     output.push_str("            offset: offset + GroupHeader::ENCODED_LENGTH,\n");
+    output.push_str("            acting_version,\n");
     output.push_str("        }\n");
     output.push_str("    }\n\n");
 
@@ -256,7 +263,7 @@ pub(crate) fn generate_group_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     output.push_str("            return None;\n");
     output.push_str("        }\n");
     output.push_str(&format!(
-        "        let entry = {}::wrap(self.buffer, self.offset, self.block_length);\n",
+        "        let entry = {}::wrap(self.buffer, self.offset, self.block_length, self.acting_version);\n",
         entry_name
     ));
     if layout.is_fixed_stride() {
@@ -302,16 +309,22 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     output.push_str("    buffer: &'a [u8],\n");
     output.push_str("    offset: usize,\n");
     output.push_str("    block_length: u16,\n");
+    output.push_str("    acting_version: u16,\n");
     output.push_str("}\n\n");
 
     output.push_str(&format!("impl<'a> {}<'a> {{\n", entry_name));
-    output.push_str("    fn wrap(buffer: &'a [u8], offset: usize, block_length: u16) -> Self {\n");
-    output.push_str("        Self { buffer, offset, block_length }\n");
+    output.push_str("    fn wrap(buffer: &'a [u8], offset: usize, block_length: u16, acting_version: u16) -> Self {\n");
+    output.push_str("        Self { buffer, offset, block_length, acting_version }\n");
     output.push_str("    }\n\n");
 
     // Field getters
     for field in &group.fields {
-        output.push_str(&generate_field_getter(ir, field, ENTRY_RESERVED));
+        output.push_str(&generate_field_getter(
+            ir,
+            field,
+            ENTRY_RESERVED,
+            PresenceGate::Entry,
+        ));
     }
 
     // Nested group accessors
@@ -718,9 +731,13 @@ mod tests {
         );
         assert!(code.contains("let mut pos = self.offset + 8;"));
         assert!(code.contains("if index == 0 {\n            return pos;\n        }"));
-        assert!(code.contains("pos = a::LegsGroupDecoder::wrap(self.buffer, pos).end_offset();"));
+        assert!(code.contains(
+            "pos = a::LegsGroupDecoder::wrap(self.buffer, pos, self.acting_version).end_offset();"
+        ));
         assert!(code.contains("if index == 1 {\n            return pos;\n        }"));
-        assert!(code.contains("pos = a::NotesGroupDecoder::wrap(self.buffer, pos).end_offset();"));
+        assert!(code.contains(
+            "pos = a::NotesGroupDecoder::wrap(self.buffer, pos, self.acting_version).end_offset();"
+        ));
         assert!(!code.contains("group_size()"));
     }
 
@@ -728,7 +745,9 @@ mod tests {
     fn test_group_accessor_uses_walker_index() {
         let code = generate_group_accessor("fills", "FillsGroupDecoder", 1, ENTRY_RESERVED);
         assert!(code.contains("pub fn fills(&self) -> FillsGroupDecoder<'a> {"));
-        assert!(code.contains("FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1))"));
+        assert!(code.contains(
+            "FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1), self.acting_version)"
+        ));
     }
 
     #[test]

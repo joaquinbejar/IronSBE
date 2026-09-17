@@ -24,3 +24,9 @@ pub mod var_data {
 pub mod var_data_no_panic {
     include!(concat!(env!("OUT_DIR"), "/var_data_schema_no_panic.rs"));
 }
+
+/// Codecs generated at build time from the versioned schema in `build.rs`.
+#[allow(dead_code, unused_imports, missing_docs, clippy::all)]
+pub mod versioned {
+    include!(concat!(env!("OUT_DIR"), "/versioned_schema.rs"));
+}
