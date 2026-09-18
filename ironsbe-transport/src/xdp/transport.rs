@@ -134,6 +134,24 @@ pub struct XdpListener<S: XdpStack> {
     pending_conns: std::collections::VecDeque<S::Connection>,
 }
 
+// `Datapath` is `UnwindSafe` / `RefUnwindSafe` by explicit impl (see
+// `datapath.rs`); the remaining fields are plain data, so the listener is
+// unwind safe exactly when the stack and its connections are.  This matches
+// the auto-trait impls the type had before the xsk-rs 0.11 bump.
+impl<S> std::panic::UnwindSafe for XdpListener<S>
+where
+    S: XdpStack + std::panic::UnwindSafe,
+    S::Connection: std::panic::UnwindSafe,
+{
+}
+
+impl<S> std::panic::RefUnwindSafe for XdpListener<S>
+where
+    S: XdpStack + std::panic::RefUnwindSafe,
+    S::Connection: std::panic::RefUnwindSafe,
+{
+}
+
 impl<S> LocalListener for XdpListener<S>
 where
     S: XdpStack + 'static,
