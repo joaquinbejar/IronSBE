@@ -505,6 +505,13 @@ pub(crate) fn generate_group_encoder(
     output
 }
 
+/// Name of the encoder method that begins repeating group `group_name`
+/// (`<group>_count`), as emitted by [`generate_group_encoder_accessor`].
+#[must_use]
+pub(crate) fn group_encoder_accessor_name(group_name: &str) -> String {
+    format!("{}_count", to_snake_case(group_name))
+}
+
 /// Generates a group encoder accessor (`<group>_count(count)`) on a parent
 /// encoder: a message encoder or an entry encoder with nested groups.
 ///
@@ -548,8 +555,8 @@ pub(crate) fn generate_group_encoder_accessor(
         .push_str("    /// Panics if this group or a later part was already written, or if the\n");
     output.push_str("    /// buffer is too short for the group header.\n");
     output.push_str(&format!(
-        "    pub fn {}_count(&mut self, count: u16) -> {encoder_type}<'_> {{\n",
-        to_snake_case(group_name)
+        "    pub fn {}(&mut self, count: u16) -> {encoder_type}<'_> {{\n",
+        group_encoder_accessor_name(group_name)
     ));
     output.push_str(&format!(
         "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\");\n"
@@ -632,12 +639,18 @@ fn generate_entry_encoder(
     }
 
     // Var data setters (append at the shared cursor, after the nested groups)
+    let group_accessors: Vec<String> = layout
+        .nested
+        .iter()
+        .map(|nested| group_encoder_accessor_name(&nested.group.name))
+        .collect();
     for (index, info) in layout.var_data.iter().enumerate() {
         output.push_str(&generate_var_data_setter(
             info,
             "*self.limit",
             layout.nested.len() + index,
             options,
+            &group_accessors,
         ));
     }
 

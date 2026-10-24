@@ -11,7 +11,7 @@ use crate::options::GeneratorOptions;
 use crate::rust::fields::{generate_field_getter, generate_field_setter};
 use crate::rust::groups::{
     GroupLayout, generate_group_accessor, generate_group_decoder, generate_group_encoder,
-    generate_group_encoder_accessor, generate_group_offset_walker,
+    generate_group_encoder_accessor, generate_group_offset_walker, group_encoder_accessor_name,
 };
 use crate::rust::names::MESSAGE_RESERVED;
 use crate::rust::readers::{generate_group_reader, generate_message_reader, message_needs_reader};
@@ -353,12 +353,17 @@ impl<'a> MessageGenerator<'a> {
         }
 
         // Var data setters (append at the write cursor, after all groups)
+        let group_accessors: Vec<String> = groups
+            .iter()
+            .map(|layout| group_encoder_accessor_name(&layout.group.name))
+            .collect();
         for (index, info) in var_data.iter().enumerate() {
             output.push_str(&generate_var_data_setter(
                 info,
                 "self.limit",
                 groups.len() + index,
                 self.options,
+                &group_accessors,
             ));
         }
 

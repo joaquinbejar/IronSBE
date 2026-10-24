@@ -276,16 +276,26 @@ pub(crate) fn end_offset_parts(
 /// * `part_index` - Position of the field among the owner's variable parts
 ///   (repeating groups first, then var data fields)
 /// * `options` - Generator options; decides whether `set_<name>` is emitted
+/// * `encoder_methods` - Methods the owner's encoder already defines (its
+///   group accessors, `<group>_count`); a `try_set_<name>` that would
+///   duplicate one gets a trailing underscore instead
 pub(crate) fn generate_var_data_setter(
     info: &VarDataInfo,
     cursor: &str,
     part_index: usize,
     options: GeneratorOptions,
+    encoder_methods: &[String],
 ) -> String {
     let mut output = String::new();
     let name = &info.name;
     let accessor = &info.accessor;
     let len_type = info.length_rust_type;
+    let plain_try_setter = format!("try_set_{accessor}");
+    let try_setter = if encoder_methods.contains(&plain_try_setter) {
+        format!("{plain_try_setter}_")
+    } else {
+        plain_try_setter.clone()
+    };
 
     output.push_str(&format!(
         "    /// Set var data field: {} (id={}, length header: {}).\n",
@@ -310,8 +320,14 @@ pub(crate) fn generate_var_data_setter(
     output.push_str("    /// Parts after it that are never written get an empty header on\n");
     output.push_str("    /// `finish()` or drop, which also needs buffer space; a buffer too\n");
     output.push_str("    /// short for those headers panics there.\n");
+    if try_setter != plain_try_setter {
+        output.push_str("    ///\n");
+        output.push_str(&format!(
+            "    /// Renamed from `{plain_try_setter}` to avoid the generated `{plain_try_setter}()` group accessor.\n"
+        ));
+    }
     output.push_str(&format!(
-        "    pub fn try_set_{accessor}(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::VarDataError> {{\n"
+        "    pub fn {try_setter}(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::VarDataError> {{\n"
     ));
     output.push_str(&format!("        if self.written > {part_index} {{\n"));
     output.push_str("            return Err(ironsbe_core::error::VarDataError::OutOfOrder {\n");
@@ -378,7 +394,7 @@ pub(crate) fn generate_var_data_setter(
         ));
         output.push_str("    ///\n");
         output.push_str(&format!(
-            "    /// Panicking form of [`Self::try_set_{accessor}`]; see it for the\n"
+            "    /// Panicking form of [`Self::{try_setter}`]; see it for the\n"
         ));
         output.push_str("    /// write rules.\n");
         output.push_str("    ///\n");
@@ -395,7 +411,7 @@ pub(crate) fn generate_var_data_setter(
             "    pub fn set_{accessor}(&mut self, value: &[u8]) -> &mut Self {{\n"
         ));
         output.push_str(&format!(
-            "        if let Err(err) = self.try_set_{accessor}(value) {{\n"
+            "        if let Err(err) = self.{try_setter}(value) {{\n"
         ));
         output.push_str("            panic!(\"{err}\");\n");
         output.push_str("        }\n");
@@ -473,6 +489,7 @@ mod tests {
             "*self.limit",
             0,
             GeneratorOptions::default(),
+            &[],
         );
         assert!(code.contains("pub fn set_leg_tag(&mut self, value: &[u8]) -> &mut Self"));
         assert!(code.contains("self.buffer.put_u16_le(*self.limit, len);"));
@@ -487,6 +504,7 @@ mod tests {
             "self.limit",
             3,
             GeneratorOptions::default(),
+            &[],
         );
         assert!(code.contains("self.sbe_advance_to(3, \"var data field 'comment'\");"));
         assert!(code.contains("self.written = 4;"));
@@ -503,6 +521,7 @@ mod tests {
             "*self.limit",
             2,
             GeneratorOptions::default(),
+            &[],
         );
         assert!(code.contains(
             "pub fn try_set_note(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::VarDataError>"
@@ -529,6 +548,7 @@ mod tests {
             "self.limit",
             0,
             GeneratorOptions::default(),
+            &[],
         );
         assert!(code.contains("pub fn set_note(&mut self, value: &[u8]) -> &mut Self"));
         assert!(code.contains("if let Err(err) = self.try_set_note(value) {"));
@@ -538,10 +558,29 @@ mod tests {
     #[test]
     fn test_var_data_setter_without_panicking_setters_has_no_panic() {
         let options = GeneratorOptions::default().with_panicking_setters(false);
-        let code = generate_var_data_setter(&info("note", 2), "self.limit", 0, options);
+        let code = generate_var_data_setter(&info("note", 2), "self.limit", 0, options, &[]);
         assert!(code.contains("pub fn try_set_note("));
         assert!(!code.contains("pub fn set_note("));
         assert!(!code.contains("panic!"));
+    }
+
+    #[test]
+    fn test_var_data_setter_try_set_renamed_when_group_accessor_collides() {
+        let taken = vec!["try_set_order_count".to_string()];
+        let code = generate_var_data_setter(
+            &info("orderCount", 2),
+            "self.limit",
+            1,
+            GeneratorOptions::default(),
+            &taken,
+        );
+        assert!(code.contains("pub fn try_set_order_count_(&mut self, value: &[u8])"));
+        assert!(!code.contains("pub fn try_set_order_count(&mut self"));
+        assert!(code.contains("if let Err(err) = self.try_set_order_count_(value) {"));
+        assert!(code.contains("[`Self::try_set_order_count_`]"));
+        assert!(code.contains("Renamed from `try_set_order_count`"));
+        // the panicking setter keeps its historical name
+        assert!(code.contains("pub fn set_order_count(&mut self, value: &[u8]) -> &mut Self"));
     }
 
     #[test]

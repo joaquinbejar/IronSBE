@@ -181,3 +181,54 @@ fn test_try_set_exact_fit_succeeds() {
     };
     assert_eq!(len, 30);
 }
+
+/// Encodes a `SetterCollision` message with the generator that emits
+/// `set_*`: the group accessors keep their names and the colliding
+/// `try_set_*` var data setters get a trailing underscore.
+fn encode_setter_collision(buf: &mut [u8]) -> usize {
+    use ironsbe_codegen_tests::var_data::SetterCollisionEncoder;
+
+    let mut encoder = SetterCollisionEncoder::wrap(buf, 0);
+    {
+        let mut orders = encoder.try_set_order_count(1);
+        let mut entry = orders.next_entry().expect("order entry");
+        entry.set_order_id(5);
+        {
+            let mut fills = entry.try_set_fill_count(1);
+            fills.next_entry().expect("fill entry").set_fill_id(6);
+        }
+        entry.try_set_fill_count_(b"f").expect("fill note fits");
+    }
+    encoder.try_set_order_count_(b"o").expect("order note fits");
+    encoder.encoded_length()
+}
+
+#[test]
+fn test_try_set_colliding_with_group_accessor_keeps_both() {
+    use ironsbe_codegen_tests::var_data::SetterCollisionDecoder;
+
+    let mut buf = [0u8; 128];
+    let len = encode_setter_collision(&mut buf);
+
+    let decoder = SetterCollisionDecoder::decode(&buf[..len]).expect("decode SetterCollision");
+    let orders: Vec<(u64, Vec<u64>, Vec<u8>)> = decoder
+        .try_set_order()
+        .map(|entry| {
+            let fills = entry.try_set_fill().map(|fill| fill.fill_id()).collect();
+            (entry.order_id(), fills, entry.fill_count().to_vec())
+        })
+        .collect();
+    assert_eq!(orders, vec![(5, vec![6], b"f".to_vec())]);
+    assert_eq!(decoder.order_count(), b"o");
+}
+
+#[test]
+fn test_try_set_colliding_without_panicking_setters_compiles() {
+    use ironsbe_codegen_tests::var_data_no_panic::SetterCollisionEncoder;
+
+    let mut buf = [0u8; 128];
+    let mut encoder = SetterCollisionEncoder::wrap(&mut buf, 0);
+    let _orders = encoder.try_set_order_count(0);
+    encoder.try_set_order_count_(b"o").expect("order note fits");
+    assert!(encoder.encoded_length() > 0);
+}

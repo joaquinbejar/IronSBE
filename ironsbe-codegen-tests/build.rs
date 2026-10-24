@@ -79,6 +79,19 @@ const VAR_DATA_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
         <data name="comment" id="2" type="varStringEncoding"/>
     </sbe:message>
 
+    <!-- #73 review: a group whose accessor is `try_set_order_count` next to
+         var data `orderCount`, at message level and inside a group entry -->
+    <sbe:message name="SetterCollision" id="6" blockLength="0">
+        <group name="trySetOrder" id="10" dimensionType="groupSizeEncoding" blockLength="8">
+            <field name="orderId" id="11" type="uint64" offset="0"/>
+            <group name="trySetFill" id="20" dimensionType="groupSizeEncoding" blockLength="8">
+                <field name="fillId" id="21" type="uint64" offset="0"/>
+            </group>
+            <data name="fillCount" id="12" type="varStringEncoding"/>
+        </group>
+        <data name="orderCount" id="2" type="varStringEncoding"/>
+    </sbe:message>
+
     <!-- Nested group whose inner entries carry var data, var data on the outer
          entry, a flat group after the variable one, and message-level var data -->
     <sbe:message name="Nested" id="5" blockLength="0">
