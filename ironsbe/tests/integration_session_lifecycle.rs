@@ -269,10 +269,11 @@ impl MessageHandler for ReplyThenCloseHandler {
             });
             let _ = closer.join();
         }
-        // Give the run loop time to process the close and cancel the
-        // session token before the session loop polls `out_rx` again,
-        // so both `select!` arms are ready at once. Without the drain
-        // this loses the reply about half the time. Blocking here is
+        // Race provocation, not a wait: blocking here lets the run loop
+        // cancel the session token before the session loop polls
+        // `out_rx` again, so both `select!` arms are ready at once.
+        // Without the drain this loses the reply about half the time;
+        // with it the test passes regardless of timing. Blocking is
         // acceptable: the test runs on a multi-threaded runtime.
         std::thread::sleep(CLOSE_SETTLE);
     }
@@ -363,6 +364,56 @@ async fn test_shutdown_after_reply_delivers_reply_before_eof() {
             assert_reply(outcome, iteration);
             let _ = timeout(DEFAULT_WAIT, server_task).await;
         }
+    })
+    .await;
+    assert!(outer.is_ok(), "test exceeded its deadline");
+}
+
+/// Handler that never replies; the stalled-peer test pushes frames with
+/// `ServerHandle::send_to` instead.
+struct SilentHandler;
+
+impl MessageHandler for SilentHandler {
+    fn on_message(
+        &self,
+        _session_id: u64,
+        _header: &MessageHeader,
+        _buffer: &[u8],
+        _responder: &dyn Responder,
+    ) {
+    }
+}
+
+#[tokio::test]
+async fn test_close_session_with_stalled_peer_closes_within_deadline() {
+    let outer = timeout(Duration::from_secs(20), async {
+        let (handle, addr, server_task) = build_and_start_server(SilentHandler, 16).await;
+
+        // A raw peer that connects and never reads, so the server's
+        // writes back up once the socket buffers are full.
+        let _stalled = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect stalled peer");
+        let session_id = wait_for_session_created(&handle, Instant::now() + DEFAULT_WAIT)
+            .await
+            .expect("session created");
+
+        // Far more than loopback socket buffers hold.
+        let frame = build_sbe_message(9, &vec![0xAB; 32 * 1024]);
+        for _ in 0..400 {
+            handle.send_to(session_id, frame.clone());
+        }
+        handle.close_session(session_id);
+
+        // The drain is bounded (about 1 s), so the session must close
+        // well within the deadline even though the peer never reads.
+        assert!(
+            wait_for_session_closed(&handle, session_id, Instant::now() + DEFAULT_WAIT).await,
+            "stalled peer pinned the closing session open"
+        );
+
+        handle.shutdown();
+        let _ = timeout(DEFAULT_WAIT, server_task).await;
     })
     .await;
     assert!(outer.is_ok(), "test exceeded its deadline");

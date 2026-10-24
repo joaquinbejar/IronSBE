@@ -461,7 +461,8 @@ impl ServerHandle {
     ///
     /// Every session first writes the messages already queued for it
     /// (for example replies sent through [`Responder::send`]), then
-    /// closes its connection.
+    /// closes its connection. The flush is bounded by about one second
+    /// per session, so a peer that stops reading cannot stall shutdown.
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.try_send(ServerCommand::Shutdown);
         self.cmd_notify.notify_one();
@@ -472,7 +473,9 @@ impl ServerHandle {
     /// Messages already queued for the session when the close is
     /// processed are written before the connection closes, so a reply
     /// sent through [`Responder::send`] followed by `close_session`
-    /// reaches the peer. Messages queued after that are dropped.
+    /// reaches the peer. Messages queued after that are dropped, as is
+    /// anything still unsent after about one second (a peer that stops
+    /// reading cannot hold the session open).
     pub fn close_session(&self, session_id: u64) {
         let _ = self
             .cmd_tx
@@ -584,9 +587,9 @@ impl Responder for SessionResponder {
 /// [`drain_queued`]), returns `Ok(())`, and the spawned task drops
 /// `conn`, closing the underlying socket so the peer observes EOF.
 ///
-/// The drain and any in-flight send are not bounded by a deadline: a
-/// peer that stops reading holds the session open until TCP
-/// backpressure releases or the write fails.
+/// The in-flight send and the drain together are bounded by
+/// [`CLOSE_DRAIN_TIMEOUT`]: a peer that stops reading cannot hold a
+/// closing session open; whatever is unsent at the deadline is dropped.
 ///
 /// `out_tx` / `out_rx` are the two halves of the per-session
 /// outbound channel, created in [`Server::handle_connection`] so the
@@ -637,15 +640,45 @@ where
                 }
             }
 
-            // Send outgoing messages.  An in-flight send is not raced
-            // against cancellation: dropping it mid-write could cut a
-            // frame short, and the message was queued before the close.
-            // Cancellation is observed on the next loop iteration, which
-            // then drains the rest of the queue (#71).
+            // Send outgoing messages.  The send is raced against
+            // `session_token.cancelled()`: on cancellation the in-flight
+            // message (queued before the close) is still finished, then
+            // the rest of the queue is drained, all within
+            // `CLOSE_DRAIN_TIMEOUT` so a stalled peer (TCP backpressure)
+            // cannot pin the session task open after Shutdown /
+            // CloseSession (#71).
             Some(msg) = out_rx.recv() => {
-                if let Err(e) = conn.send(&msg).await {
-                    tracing::error!(error = %e, "write error");
-                    return Err(std::io::Error::other(e));
+                // `Some(deadline)` once cancelled with the in-flight send
+                // finished; the pinned send borrows `conn` until then.
+                let cancelled_at = {
+                    let send = conn.send(&msg);
+                    tokio::pin!(send);
+                    tokio::select! {
+                        send_result = &mut send => {
+                            if let Err(e) = send_result {
+                                tracing::error!(error = %e, "write error");
+                                return Err(std::io::Error::other(e));
+                            }
+                            None
+                        }
+                        _ = session_token.cancelled() => {
+                            let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
+                            match tokio::time::timeout_at(deadline, send).await {
+                                Ok(Ok(())) => Some(deadline),
+                                Ok(Err(e)) => {
+                                    tracing::error!(error = %e, "write error");
+                                    return Err(std::io::Error::other(e));
+                                }
+                                Err(_) => {
+                                    tracing::warn!(session_id, "in-flight send timed out after cancellation");
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                };
+                if let Some(deadline) = cancelled_at {
+                    return flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await;
                 }
             }
 
@@ -655,12 +688,49 @@ where
             // (on_session_end + ServerEvent::SessionClosed) runs in
             // the spawned task closure once we return.
             _ = session_token.cancelled() => {
-                let drained = drain_queued(&mut conn, &mut out_rx).await?;
-                tracing::debug!(session_id, drained, "session cancelled after draining queued messages");
-                return Ok(());
+                let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
+                return flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await;
             }
         }
     }
+}
+
+/// Upper bound on how long a closing session spends writing the
+/// messages queued before the close (in-flight send plus drain).
+pub(crate) const CLOSE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Drains the queued messages (see [`drain_queued`]) until `deadline`,
+/// then lets the session close.
+///
+/// A drain that misses the deadline is logged and abandoned; the
+/// session still closes cleanly.
+///
+/// # Errors
+/// Returns the first write error hit while draining.
+async fn flush_on_close<C: Connection>(
+    session_id: u64,
+    conn: &mut C,
+    out_rx: &mut tokio_mpsc::UnboundedReceiver<Vec<u8>>,
+    deadline: tokio::time::Instant,
+) -> Result<(), std::io::Error> {
+    match tokio::time::timeout_at(deadline, drain_queued(conn, out_rx)).await {
+        Ok(drained) => {
+            let drained = drained?;
+            tracing::debug!(
+                session_id,
+                drained,
+                "session closed after draining queued messages"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id,
+                timeout_ms = CLOSE_DRAIN_TIMEOUT.as_millis(),
+                "drain of queued messages timed out; dropping the rest"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Writes the messages queued on `out_rx` at the time of the call, in
