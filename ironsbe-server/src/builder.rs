@@ -1185,27 +1185,19 @@ mod tests {
     impl Connection for RecordingConn {
         type Error = std::io::Error;
 
-        fn recv(
-            &mut self,
-        ) -> impl Future<Output = Result<Option<bytes::BytesMut>, Self::Error>> + Send + '_
-        {
-            async { Ok(None) }
+        async fn recv(&mut self) -> Result<Option<bytes::BytesMut>, Self::Error> {
+            Ok(None)
         }
 
-        fn send<'a>(
-            &'a mut self,
-            msg: &'a [u8],
-        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a {
-            async move {
-                if self.fail_after == Some(self.sent.len()) {
-                    return Err(std::io::Error::other("injected write failure"));
-                }
-                self.sent.push(msg.to_vec());
-                if let Some(tx) = &self.late_tx {
-                    let _ = tx.send(vec![0xFF]);
-                }
-                Ok(())
+        async fn send(&mut self, msg: &[u8]) -> Result<(), Self::Error> {
+            if self.fail_after == Some(self.sent.len()) {
+                return Err(std::io::Error::other("injected write failure"));
             }
+            self.sent.push(msg.to_vec());
+            if let Some(tx) = &self.late_tx {
+                let _ = tx.send(vec![0xFF]);
+            }
+            Ok(())
         }
 
         fn peer_addr(&self) -> std::io::Result<SocketAddr> {
