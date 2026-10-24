@@ -620,7 +620,10 @@ where
         tokio::select! {
             // Arms are polled in order: once the session is closing,
             // cancellation wins over a ready read (EOF, error or more
-            // input), so the drain always runs first (#71).
+            // input), so the drain always runs first (#71). Queued
+            // output is written before more input is read, so a peer
+            // that keeps the socket readable cannot starve replies, and
+            // the outbound queue stays bounded under inbound load.
             biased;
 
             // Cooperative cancellation from the run loop. Messages the
@@ -631,40 +634,6 @@ where
             _ = session_token.cancelled() => {
                 let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
                 return flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await;
-            }
-
-            // Read incoming messages
-            result = conn.recv() => {
-                match result {
-                    Ok(Some(data)) => {
-                        // Decode header and dispatch to handler
-                        if data.len() >= MessageHeader::ENCODED_LENGTH {
-                            let header = MessageHeader::wrap(data.as_ref(), 0);
-                            handler.on_message(session_id, &header, data.as_ref(), &responder);
-                        } else {
-                            handler.on_error(session_id, "Message too short for header");
-                        }
-                    }
-                    // The close may not have reached this session yet
-                    // when the peer's EOF or a read error arrives, so
-                    // flush what the handler already queued (bounded
-                    // like a close) before ending the session (#71).
-                    Ok(None) => {
-                        let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
-                        if let Err(e) = flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await {
-                            tracing::debug!(error = %e, "flush after peer EOF failed");
-                        }
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "read error");
-                        let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
-                        if let Err(flush_err) = flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await {
-                            tracing::debug!(error = %flush_err, "flush after read error failed");
-                        }
-                        return Err(std::io::Error::other(e));
-                    }
-                }
             }
 
             // Send outgoing messages.  The send is raced against
@@ -709,6 +678,39 @@ where
                 }
             }
 
+            // Read incoming messages
+            result = conn.recv() => {
+                match result {
+                    Ok(Some(data)) => {
+                        // Decode header and dispatch to handler
+                        if data.len() >= MessageHeader::ENCODED_LENGTH {
+                            let header = MessageHeader::wrap(data.as_ref(), 0);
+                            handler.on_message(session_id, &header, data.as_ref(), &responder);
+                        } else {
+                            handler.on_error(session_id, "Message too short for header");
+                        }
+                    }
+                    // The close may not have reached this session yet
+                    // when the peer's EOF or a read error arrives, so
+                    // flush what the handler already queued (bounded
+                    // like a close) before ending the session (#71).
+                    Ok(None) => {
+                        let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
+                        if let Err(e) = flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await {
+                            tracing::debug!(error = %e, "flush after peer EOF failed");
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "read error");
+                        let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
+                        if let Err(flush_err) = flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await {
+                            tracing::debug!(error = %flush_err, "flush after read error failed");
+                        }
+                        return Err(std::io::Error::other(e));
+                    }
+                }
+            }
         }
     }
 }
@@ -1448,5 +1450,66 @@ mod tests {
         let (result, sent) = run_session_with_queued_reply(RecvOutcome::Eof, false).await;
         assert!(result.is_ok());
         assert_eq!(sent, vec![b"rejected".to_vec()]);
+    }
+
+    /// Calls to [`BusyConn::recv`] that return a frame before EOF.
+    const BUSY_RECV_FRAMES: usize = 1000;
+
+    /// [`Connection`] that is always readable: `recv` returns a frame on
+    /// every call for [`BUSY_RECV_FRAMES`] calls, then EOF. Each send
+    /// records how many frames had been read when it happened.
+    struct BusyConn {
+        recv_calls: usize,
+        sent_after_recv_calls: Arc<parking_lot::Mutex<Vec<usize>>>,
+    }
+
+    impl Connection for BusyConn {
+        type Error = std::io::Error;
+
+        async fn recv(&mut self) -> Result<Option<bytes::BytesMut>, Self::Error> {
+            if self.recv_calls >= BUSY_RECV_FRAMES {
+                return Ok(None);
+            }
+            self.recv_calls += 1;
+            Ok(Some(bytes::BytesMut::from(
+                &[0u8; MessageHeader::ENCODED_LENGTH][..],
+            )))
+        }
+
+        async fn send(&mut self, _msg: &[u8]) -> Result<(), Self::Error> {
+            self.sent_after_recv_calls.lock().push(self.recv_calls);
+            Ok(())
+        }
+
+        fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 0)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_busy_reader_does_not_starve_queued_reply() {
+        let sent = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let conn = BusyConn {
+            recv_calls: 0,
+            sent_after_recv_calls: Arc::clone(&sent),
+        };
+        let (out_tx, out_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        out_tx.send(b"reply".to_vec()).unwrap();
+        let senders: SessionSenderMap = Arc::new(RwLock::new(HashMap::new()));
+
+        let result = handle_session(
+            1,
+            conn,
+            &TestHandler,
+            CancellationToken::new(),
+            out_tx,
+            out_rx,
+            senders,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let sent = sent.lock().clone();
+        assert_eq!(sent, vec![0], "queued reply is written before any read");
     }
 }
