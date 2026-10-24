@@ -19,5 +19,5 @@ pub mod types;
 pub use buffer::{AlignedBuffer, BufferPool, ReadBuffer, WriteBuffer};
 pub use decoder::{DecodeError, SbeDecoder};
 pub use encoder::SbeEncoder;
-pub use error::{Error, Result};
+pub use error::{Error, Result, VarDataError};
 pub use header::{GroupHeader, MessageHeader, VarDataHeader};

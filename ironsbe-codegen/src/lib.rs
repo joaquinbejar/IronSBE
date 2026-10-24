@@ -10,10 +10,12 @@
 
 pub mod error;
 pub mod generator;
+pub mod options;
 pub mod rust;
 
 pub use error::CodegenError;
 pub use generator::Generator;
+pub use options::GeneratorOptions;
 
 /// Generates Rust code from an SBE XML schema string.
 ///
@@ -28,9 +30,37 @@ pub use generator::Generator;
 /// unknown type from a `<data>` element, or if it uses a construct the
 /// generator does not support yet (see [`CodegenError::Unsupported`]).
 pub fn generate_from_xml(xml: &str) -> Result<String, CodegenError> {
+    generate_from_xml_with_options(xml, GeneratorOptions::default())
+}
+
+/// Generates Rust code from SBE XML schema content with explicit options.
+///
+/// # Arguments
+/// * `xml` - SBE XML schema content
+/// * `options` - What to emit; see [`GeneratorOptions`]
+///
+/// # Errors
+/// Same as [`generate_from_xml`].
+///
+/// # Examples
+/// ```no_run
+/// use ironsbe_codegen::{GeneratorOptions, generate_from_xml_with_options};
+///
+/// # fn main() -> Result<(), ironsbe_codegen::CodegenError> {
+/// let xml = std::fs::read_to_string("schema.xml")?;
+/// let options = GeneratorOptions::default().with_panicking_setters(false);
+/// let code = generate_from_xml_with_options(&xml, options)?;
+/// # let _ = code;
+/// # Ok(())
+/// # }
+/// ```
+pub fn generate_from_xml_with_options(
+    xml: &str,
+    options: GeneratorOptions,
+) -> Result<String, CodegenError> {
     let schema = ironsbe_schema::parse_schema(xml)?;
     let ir = ironsbe_schema::SchemaIr::from_schema(&schema);
-    let generator = Generator::new(&ir);
+    let generator = Generator::with_options(&ir, options);
     generator.generate()
 }
 
@@ -45,8 +75,23 @@ pub fn generate_from_xml(xml: &str) -> Result<String, CodegenError> {
 /// # Errors
 /// Returns `CodegenError` if reading, parsing, or generation fails.
 pub fn generate_from_file(path: &std::path::Path) -> Result<String, CodegenError> {
+    generate_from_file_with_options(path, GeneratorOptions::default())
+}
+
+/// Generates Rust code from an SBE XML schema file with explicit options.
+///
+/// # Arguments
+/// * `path` - Path to the SBE XML schema file
+/// * `options` - What to emit; see [`GeneratorOptions`]
+///
+/// # Errors
+/// Returns `CodegenError` if reading, parsing, or generation fails.
+pub fn generate_from_file_with_options(
+    path: &std::path::Path,
+    options: GeneratorOptions,
+) -> Result<String, CodegenError> {
     let xml = std::fs::read_to_string(path)?;
-    generate_from_xml(&xml)
+    generate_from_xml_with_options(&xml, options)
 }
 
 #[cfg(test)]

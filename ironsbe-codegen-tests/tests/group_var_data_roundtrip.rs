@@ -374,7 +374,7 @@ fn test_wire_layout_second_group_follows_variable_group_end() {
 }
 
 #[test]
-#[should_panic(expected = "exceeds u8::MAX")]
+#[should_panic(expected = "exceeds the length header maximum 255")]
 fn test_entry_var_data_over_u8_max_panics() {
     let too_long = [0u8; 256];
     let fills: [Fill<'_>; 1] = [(1, &too_long)];

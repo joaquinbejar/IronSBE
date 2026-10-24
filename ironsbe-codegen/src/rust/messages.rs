@@ -7,10 +7,11 @@
 use ironsbe_schema::ir::{ResolvedMessage, SchemaIr, to_snake_case};
 
 use crate::error::CodegenError;
+use crate::options::GeneratorOptions;
 use crate::rust::fields::{generate_field_getter, generate_field_setter};
 use crate::rust::groups::{
     GroupLayout, generate_group_accessor, generate_group_decoder, generate_group_encoder,
-    generate_group_encoder_accessor, generate_group_offset_walker,
+    generate_group_encoder_accessor, generate_group_offset_walker, group_encoder_accessor_name,
 };
 use crate::rust::names::MESSAGE_RESERVED;
 use crate::rust::readers::{generate_group_reader, generate_message_reader, message_needs_reader};
@@ -26,13 +27,21 @@ const MESSAGE_BLOCK_END: &str = "self.offset + Self::BLOCK_LENGTH as usize";
 /// Generator for message encoders and decoders.
 pub struct MessageGenerator<'a> {
     ir: &'a SchemaIr,
+    options: GeneratorOptions,
 }
 
 impl<'a> MessageGenerator<'a> {
     /// Creates a new message generator.
     #[must_use]
     pub fn new(ir: &'a SchemaIr) -> Self {
-        Self { ir }
+        Self::with_options(ir, GeneratorOptions::default())
+    }
+
+    /// Creates a new message generator with explicit options; see
+    /// [`GeneratorOptions`].
+    #[must_use]
+    pub fn with_options(ir: &'a SchemaIr, options: GeneratorOptions) -> Self {
+        Self { ir, options }
     }
 
     /// Generates all message definitions.
@@ -78,7 +87,7 @@ impl<'a> MessageGenerator<'a> {
                 output.push_str("    use super::*;\n\n");
                 for layout in &groups {
                     output.push_str(&generate_group_decoder(self.ir, layout));
-                    output.push_str(&generate_group_encoder(self.ir, layout));
+                    output.push_str(&generate_group_encoder(self.ir, layout, self.options));
                     if needs_reader {
                         output.push_str(&generate_group_reader(self.ir, layout));
                     }
@@ -344,11 +353,17 @@ impl<'a> MessageGenerator<'a> {
         }
 
         // Var data setters (append at the write cursor, after all groups)
+        let group_accessors: Vec<String> = groups
+            .iter()
+            .map(|layout| group_encoder_accessor_name(&layout.group.name))
+            .collect();
         for (index, info) in var_data.iter().enumerate() {
             output.push_str(&generate_var_data_setter(
                 info,
                 "self.limit",
                 groups.len() + index,
+                self.options,
+                &group_accessors,
             ));
         }
 
@@ -977,7 +992,11 @@ mod tests {
         ));
         assert!(encoder.contains("pub fn set_label(&mut self, value: &[u8]) -> &mut Self"));
         assert!(encoder.contains("let Ok(len) = u16::try_from(value.len()) else {"));
-        assert!(encoder.contains("exceeds u16::MAX"));
+        assert!(encoder.contains("max: u64::from(u16::MAX),"));
+        // the guard emits the empty-header sizes for the capacity check
+        assert!(encoder.contains(
+            "const SBE_EMPTY_PART_LEN: [usize; 3] = [GroupHeader::ENCODED_LENGTH, 2, 1];"
+        ));
         assert!(encoder.contains("self.buffer.put_u16_le(self.limit, len);"));
         assert!(encoder.contains("let start = self.limit + 2;"));
         assert!(encoder.contains("self.buffer.put_bytes(start, value);"));

@@ -3,18 +3,27 @@
 use ironsbe_schema::ir::SchemaIr;
 
 use crate::error::CodegenError;
+use crate::options::GeneratorOptions;
 use crate::rust::{EnumGenerator, MessageGenerator, TypeGenerator};
 
 /// Main code generator for SBE schemas.
 pub struct Generator<'a> {
     ir: &'a SchemaIr,
+    options: GeneratorOptions,
 }
 
 impl<'a> Generator<'a> {
     /// Creates a new generator for the given schema IR.
     #[must_use]
     pub fn new(ir: &'a SchemaIr) -> Self {
-        Self { ir }
+        Self::with_options(ir, GeneratorOptions::default())
+    }
+
+    /// Creates a new generator for the given schema IR with explicit
+    /// options; see [`GeneratorOptions`].
+    #[must_use]
+    pub fn with_options(ir: &'a SchemaIr, options: GeneratorOptions) -> Self {
+        Self { ir, options }
     }
 
     /// Generates the complete Rust code for the schema.
@@ -42,7 +51,7 @@ impl<'a> Generator<'a> {
         output.push_str(&enum_gen.generate());
 
         // Messages
-        let msg_gen = MessageGenerator::new(self.ir);
+        let msg_gen = MessageGenerator::with_options(self.ir, self.options);
         output.push_str(&msg_gen.generate()?);
 
         Ok(output)

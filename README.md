@@ -217,6 +217,19 @@ fn encode(buffer: &mut [u8]) -> usize {
 }
 ```
 
+Every var data field also gets a fallible `try_set_<field>` that returns
+`Result<&mut Self, ironsbe_core::VarDataError>` instead of panicking when
+the value is too long for its length header, the buffer is too short, or
+the field is written out of order; nothing is written on error. Crates that
+deny `clippy::panic` can drop the panicking `set_<field>` setters:
+
+```rust
+use ironsbe_codegen::{GeneratorOptions, generate_from_xml_with_options};
+
+let options = GeneratorOptions::default().with_panicking_setters(false);
+let code = generate_from_xml_with_options(&schema_xml, options)?;
+```
+
 The random-access decoder positions each group and var data field by
 walking the preceding groups on the wire, on every accessor call. For hot
 paths, messages with var data or variable-stride groups also get a

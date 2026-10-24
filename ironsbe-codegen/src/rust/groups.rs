@@ -13,6 +13,7 @@
 use ironsbe_schema::ir::{ResolvedGroup, SchemaIr, to_snake_case};
 
 use crate::error::CodegenError;
+use crate::options::GeneratorOptions;
 use crate::rust::fields::{generate_entry_field_setter, generate_field_getter};
 use crate::rust::names::{ENTRY_RESERVED, accessor_name, renamed_note};
 use crate::rust::var_data::{
@@ -362,7 +363,11 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
 
 /// Generates a group encoder, its entry encoder, and the encoders of every
 /// nested group.
-pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
+pub(crate) fn generate_group_encoder(
+    ir: &SchemaIr,
+    layout: &GroupLayout<'_>,
+    options: GeneratorOptions,
+) -> String {
     let mut output = String::new();
     let group = layout.group;
     let encoder_name = group.encoder_name();
@@ -490,14 +495,21 @@ pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     output.push_str("}\n\n");
 
     // Entry encoder
-    output.push_str(&generate_entry_encoder(ir, layout));
+    output.push_str(&generate_entry_encoder(ir, layout, options));
 
     // Nested group encoders
     for nested in &layout.nested {
-        output.push_str(&generate_group_encoder(ir, nested));
+        output.push_str(&generate_group_encoder(ir, nested, options));
     }
 
     output
+}
+
+/// Name of the encoder method that begins repeating group `group_name`
+/// (`<group>_count`), as emitted by [`generate_group_encoder_accessor`].
+#[must_use]
+pub(crate) fn group_encoder_accessor_name(group_name: &str) -> String {
+    format!("{}_count", to_snake_case(group_name))
 }
 
 /// Generates a group encoder accessor (`<group>_count(count)`) on a parent
@@ -543,8 +555,8 @@ pub(crate) fn generate_group_encoder_accessor(
         .push_str("    /// Panics if this group or a later part was already written, or if the\n");
     output.push_str("    /// buffer is too short for the group header.\n");
     output.push_str(&format!(
-        "    pub fn {}_count(&mut self, count: u16) -> {encoder_type}<'_> {{\n",
-        to_snake_case(group_name)
+        "    pub fn {}(&mut self, count: u16) -> {encoder_type}<'_> {{\n",
+        group_encoder_accessor_name(group_name)
     ));
     output.push_str(&format!(
         "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\");\n"
@@ -565,7 +577,11 @@ pub(crate) fn generate_group_encoder_accessor(
 /// or var data also borrow the group's write cursor so those parts can be
 /// appended after the fixed block, track the parts written so far, and fill
 /// the missing ones with empty headers on drop (issue #63).
-fn generate_entry_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
+fn generate_entry_encoder(
+    ir: &SchemaIr,
+    layout: &GroupLayout<'_>,
+    options: GeneratorOptions,
+) -> String {
     let mut output = String::new();
     let group = layout.group;
     let entry_name = group.entry_encoder_name();
@@ -623,11 +639,18 @@ fn generate_entry_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     }
 
     // Var data setters (append at the shared cursor, after the nested groups)
+    let group_accessors: Vec<String> = layout
+        .nested
+        .iter()
+        .map(|nested| group_encoder_accessor_name(&nested.group.name))
+        .collect();
     for (index, info) in layout.var_data.iter().enumerate() {
         output.push_str(&generate_var_data_setter(
             info,
             "*self.limit",
             layout.nested.len() + index,
+            options,
+            &group_accessors,
         ));
     }
 
