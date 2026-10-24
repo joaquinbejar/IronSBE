@@ -78,3 +78,92 @@ pub enum Error {
 
 /// Result type alias for IronSBE core operations.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Error returned by the generated `try_set_<field>` var data setters.
+///
+/// Every check runs before anything is written, so on error the buffer
+/// and the encoder's write cursor are left unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum VarDataError {
+    /// The value is longer than the field's length header can encode.
+    #[error(
+        "var data field '{field}': length {length} bytes exceeds the length header maximum {max}"
+    )]
+    LengthOverflow {
+        /// Schema name of the var data field.
+        field: &'static str,
+        /// Length of the rejected value in bytes.
+        length: usize,
+        /// Largest length the header can encode, in bytes.
+        max: u64,
+    },
+
+    /// The field, or a part after it, was already written.
+    #[error(
+        "var data field '{field}' written out of schema order (parts already written: {written})"
+    )]
+    OutOfOrder {
+        /// Schema name of the var data field.
+        field: &'static str,
+        /// Number of variable parts already written on the owner.
+        written: u16,
+    },
+
+    /// The buffer cannot hold the empty headers of skipped parts plus
+    /// this field's header and value.
+    #[error(
+        "var data field '{field}': buffer too short, required {required} bytes, available {available} bytes"
+    )]
+    BufferTooShort {
+        /// Schema name of the var data field.
+        field: &'static str,
+        /// Buffer size the write needs, in bytes (`usize::MAX` when the
+        /// size itself overflows).
+        required: usize,
+        /// Buffer size in bytes.
+        available: usize,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_var_data_error_length_overflow_display_includes_values() {
+        let err = VarDataError::LengthOverflow {
+            field: "note",
+            length: 256,
+            max: 255,
+        };
+        assert_eq!(
+            err.to_string(),
+            "var data field 'note': length 256 bytes exceeds the length header maximum 255"
+        );
+    }
+
+    #[test]
+    fn test_var_data_error_out_of_order_display_includes_values() {
+        let err = VarDataError::OutOfOrder {
+            field: "note",
+            written: 3,
+        };
+        assert_eq!(
+            err.to_string(),
+            "var data field 'note' written out of schema order (parts already written: 3)"
+        );
+    }
+
+    #[test]
+    fn test_var_data_error_buffer_too_short_display_includes_values() {
+        let err = VarDataError::BufferTooShort {
+            field: "note",
+            required: 40,
+            available: 32,
+        };
+        assert_eq!(
+            err.to_string(),
+            "var data field 'note': buffer too short, required 40 bytes, available 32 bytes"
+        );
+    }
+}

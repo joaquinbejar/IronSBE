@@ -194,7 +194,7 @@ fn test_roundtrip_groups_only_encoded_length_includes_entries() {
 }
 
 #[test]
-#[should_panic(expected = "exceeds u8::MAX")]
+#[should_panic(expected = "exceeds the length header maximum 255")]
 fn test_encoder_var_data_u8_header_over_255_bytes_panics() {
     let mut buf = [0u8; 512];
     let too_long = [0u8; 256];

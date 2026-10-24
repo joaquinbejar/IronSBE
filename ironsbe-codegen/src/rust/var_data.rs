@@ -17,6 +17,7 @@ use ironsbe_schema::ir::{ResolvedVarData, SchemaIr, TypeKind, to_snake_case};
 use ironsbe_schema::types::PrimitiveType;
 
 use crate::error::CodegenError;
+use crate::options::GeneratorOptions;
 use crate::rust::names::{accessor_name, renamed_note};
 
 /// Resolved wire layout of one `<data>` (variable-length) field.
@@ -259,11 +260,14 @@ pub(crate) fn end_offset_parts(
     }
 }
 
-/// Generates `set_<name>` for one var data field on an encoder.
+/// Generates `try_set_<name>` and, when `options` enable panicking
+/// setters, `set_<name>` for one var data field on an encoder.
 ///
 /// The host carries the variable-part guard (see `var_parts`): the setter
 /// first fills every part skipped since the last write with an empty header,
-/// then appends its own header and payload.
+/// then appends its own header and payload. `try_set_<name>` checks the
+/// write order, the length header range and the buffer capacity before
+/// writing anything; `set_<name>` wraps it and panics on error.
 ///
 /// # Arguments
 /// * `info` - Resolved field layout
@@ -271,16 +275,21 @@ pub(crate) fn end_offset_parts(
 ///   message encoder or `*self.limit` on an entry encoder
 /// * `part_index` - Position of the field among the owner's variable parts
 ///   (repeating groups first, then var data fields)
+/// * `options` - Generator options; decides whether `set_<name>` is emitted
 pub(crate) fn generate_var_data_setter(
     info: &VarDataInfo,
     cursor: &str,
     part_index: usize,
+    options: GeneratorOptions,
 ) -> String {
     let mut output = String::new();
+    let name = &info.name;
+    let accessor = &info.accessor;
+    let len_type = info.length_rust_type;
 
     output.push_str(&format!(
         "    /// Set var data field: {} (id={}, length header: {}).\n",
-        info.name, info.id, info.length_type
+        name, info.id, info.length_type
     ));
     output.push_str("    ///\n");
     output.push_str("    /// Appends the length header followed by `value` at the write cursor.\n");
@@ -289,28 +298,61 @@ pub(crate) fn generate_var_data_setter(
     output.push_str("    /// one is written as empty first; a field never written encodes as\n");
     output.push_str("    /// empty when the entry is dropped or the message is finished.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if `value.len()` does not fit in the length header, if the\n");
-    output.push_str("    /// buffer is too short, or if this field or a later part was already\n");
-    output.push_str("    /// written (out-of-schema-order write).\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`ironsbe_core::error::VarDataError`] if this field or a later\n",
+    );
+    output.push_str("    /// part was already written, if `value.len()` does not fit in the\n");
+    output.push_str("    /// length header, or if the buffer is too short. Nothing is written\n");
+    output.push_str("    /// on error.\n");
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
-        "    pub fn set_{}(&mut self, value: &[u8]) -> &mut Self {{\n",
-        info.accessor
+        "    pub fn try_set_{accessor}(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::VarDataError> {{\n"
     ));
+    output.push_str(&format!("        if self.written > {part_index} {{\n"));
+    output.push_str("            return Err(ironsbe_core::error::VarDataError::OutOfOrder {\n");
+    output.push_str(&format!("                field: \"{name}\",\n"));
+    output.push_str("                written: self.written,\n");
+    output.push_str("            });\n");
+    output.push_str("        }\n");
     output.push_str(&format!(
-        "        self.sbe_advance_to({part_index}, \"var data field '{}'\");\n",
-        info.name
+        "        let Ok(len) = {len_type}::try_from(value.len()) else {{\n"
     ));
+    output.push_str("            return Err(ironsbe_core::error::VarDataError::LengthOverflow {\n");
+    output.push_str(&format!("                field: \"{name}\",\n"));
+    output.push_str("                length: value.len(),\n");
     output.push_str(&format!(
-        "        let Ok(len) = {}::try_from(value.len()) else {{\n",
-        info.length_rust_type
+        "                max: u64::from({len_type}::MAX),\n"
     ));
-    output.push_str(&format!(
-        "            panic!(\"var data field '{}': length {{}} exceeds {}::MAX\", value.len());\n",
-        info.name, info.length_rust_type
-    ));
+    output.push_str("            });\n");
     output.push_str("        };\n");
+    output.push_str(&format!(
+        "        let required = self.sbe_fill_len({part_index})\n"
+    ));
+    output.push_str(&format!(
+        "            .and_then(|fill| ({cursor}).checked_add(fill))\n"
+    ));
+    output.push_str(&format!(
+        "            .and_then(|end| end.checked_add({}))\n",
+        info.header_length
+    ));
+    output.push_str("            .and_then(|end| end.checked_add(value.len()));\n");
+    output.push_str("        let available = self.buffer.len();\n");
+    output.push_str("        match required {\n");
+    output.push_str("            Some(required) if required <= available => {}\n");
+    output.push_str("            _ => {\n");
+    output.push_str(
+        "                return Err(ironsbe_core::error::VarDataError::BufferTooShort {\n",
+    );
+    output.push_str(&format!("                    field: \"{name}\",\n"));
+    output.push_str("                    required: required.unwrap_or(usize::MAX),\n");
+    output.push_str("                    available,\n");
+    output.push_str("                });\n");
+    output.push_str("            }\n");
+    output.push_str("        }\n");
+    output.push_str(&format!(
+        "        self.sbe_advance_to({part_index}, \"var data field '{name}'\");\n"
+    ));
     output.push_str(&format!(
         "        self.buffer.{}({cursor}, len);\n",
         info.write_method
@@ -322,8 +364,40 @@ pub(crate) fn generate_var_data_setter(
     output.push_str("        self.buffer.put_bytes(start, value);\n");
     output.push_str(&format!("        {cursor} = start + value.len();\n"));
     output.push_str(&format!("        self.written = {};\n", part_index + 1));
-    output.push_str("        self\n");
+    output.push_str("        Ok(self)\n");
     output.push_str("    }\n\n");
+
+    if options.panicking_setters() {
+        output.push_str(&format!(
+            "    /// Set var data field: {} (id={}, length header: {}).\n",
+            name, info.id, info.length_type
+        ));
+        output.push_str("    ///\n");
+        output.push_str(&format!(
+            "    /// Panicking form of [`Self::try_set_{accessor}`]; see it for the\n"
+        ));
+        output.push_str("    /// write rules.\n");
+        output.push_str("    ///\n");
+        output.push_str("    /// # Panics\n");
+        output.push_str(
+            "    /// Panics if `value.len()` does not fit in the length header, if the\n",
+        );
+        output.push_str(
+            "    /// buffer is too short, or if this field or a later part was already\n",
+        );
+        output.push_str("    /// written (out-of-schema-order write).\n");
+        output.push_str("    #[inline]\n");
+        output.push_str(&format!(
+            "    pub fn set_{accessor}(&mut self, value: &[u8]) -> &mut Self {{\n"
+        ));
+        output.push_str(&format!(
+            "        if let Err(err) = self.try_set_{accessor}(value) {{\n"
+        ));
+        output.push_str("            panic!(\"{err}\");\n");
+        output.push_str("        }\n");
+        output.push_str("        self\n");
+        output.push_str("    }\n\n");
+    }
 
     output
 }
@@ -390,7 +464,12 @@ mod tests {
 
     #[test]
     fn test_var_data_setter_uses_cursor_expression() {
-        let code = generate_var_data_setter(&info("legTag", 2), "*self.limit", 0);
+        let code = generate_var_data_setter(
+            &info("legTag", 2),
+            "*self.limit",
+            0,
+            GeneratorOptions::default(),
+        );
         assert!(code.contains("pub fn set_leg_tag(&mut self, value: &[u8]) -> &mut Self"));
         assert!(code.contains("self.buffer.put_u16_le(*self.limit, len);"));
         assert!(code.contains("let start = *self.limit + 2;"));
@@ -399,13 +478,66 @@ mod tests {
 
     #[test]
     fn test_var_data_setter_guards_its_part_index() {
-        let code = generate_var_data_setter(&info("comment", 2), "self.limit", 3);
+        let code = generate_var_data_setter(
+            &info("comment", 2),
+            "self.limit",
+            3,
+            GeneratorOptions::default(),
+        );
         assert!(code.contains("self.sbe_advance_to(3, \"var data field 'comment'\");"));
         assert!(code.contains("self.written = 4;"));
         // the guard runs before anything is written
         let guard = code.find("sbe_advance_to").expect("guard call");
         let write = code.find("put_u16_le").expect("header write");
         assert!(guard < write);
+    }
+
+    #[test]
+    fn test_var_data_setter_try_set_checks_before_writing() {
+        let code = generate_var_data_setter(
+            &info("note", 1),
+            "*self.limit",
+            2,
+            GeneratorOptions::default(),
+        );
+        assert!(code.contains(
+            "pub fn try_set_note(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::VarDataError>"
+        ));
+        assert!(code.contains("if self.written > 2 {"));
+        assert!(code.contains("let Ok(len) = u8::try_from(value.len()) else {"));
+        assert!(code.contains("max: u64::from(u8::MAX),"));
+        assert!(code.contains(".and_then(|fill| (*self.limit).checked_add(fill))"));
+        assert!(code.contains(".and_then(|end| end.checked_add(1))"));
+        // every check returns before the first write
+        let try_set = code.find("pub fn try_set_note").expect("try_set");
+        let last_check = code[try_set..]
+            .find("BufferTooShort")
+            .expect("capacity check")
+            + try_set;
+        let write = code[try_set..].find("put_u8").expect("header write") + try_set;
+        assert!(last_check < write);
+    }
+
+    #[test]
+    fn test_var_data_setter_default_set_wraps_try_set() {
+        let code = generate_var_data_setter(
+            &info("note", 2),
+            "self.limit",
+            0,
+            GeneratorOptions::default(),
+        );
+        assert!(code.contains("pub fn set_note(&mut self, value: &[u8]) -> &mut Self"));
+        assert!(code.contains("if let Err(err) = self.try_set_note(value) {"));
+        assert!(code.contains("panic!(\"{err}\");"));
+    }
+
+    #[test]
+    fn test_var_data_setter_without_panicking_setters_has_no_panic() {
+        let options = GeneratorOptions::default().with_panicking_setters(false);
+        let code = generate_var_data_setter(&info("note", 2), "self.limit", 0, options);
+        assert!(code.contains("pub fn try_set_note("));
+        assert!(!code.contains("pub fn set_note("));
+        assert!(!code.contains("panic!"));
     }
 
     #[test]

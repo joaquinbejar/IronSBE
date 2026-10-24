@@ -99,6 +99,35 @@ pub(crate) fn generate_encoder_parts_guard(parts: &[VarPart<'_>], cursor: &str) 
     output.push_str("        }\n");
     output.push_str("    }\n\n");
 
+    if parts.iter().any(|part| matches!(part, VarPart::Data(_))) {
+        output.push_str("    /// Encoded size in bytes of each variable part's empty header.\n");
+        output.push_str(&format!(
+            "    const SBE_EMPTY_PART_LEN: [usize; {}] = [",
+            parts.len()
+        ));
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                output.push_str(", ");
+            }
+            match part {
+                VarPart::Group { .. } => output.push_str("GroupHeader::ENCODED_LENGTH"),
+                VarPart::Data(info) => output.push_str(&info.header_length.to_string()),
+            }
+        }
+        output.push_str("];\n\n");
+
+        output.push_str("    /// Bytes `sbe_fill_to(target)` writes: the empty headers of every\n");
+        output.push_str("    /// part in `written..target`, or `None` if the sum overflows.\n");
+        output.push_str("    #[inline]\n");
+        output.push_str("    fn sbe_fill_len(&self, target: u16) -> Option<usize> {\n");
+        output.push_str("        Self::SBE_EMPTY_PART_LEN\n");
+        output.push_str("            .get(usize::from(self.written)..usize::from(target))\n");
+        output.push_str("            .unwrap_or(&[])\n");
+        output.push_str("            .iter()\n");
+        output.push_str("            .try_fold(0usize, |acc, len| acc.checked_add(*len))\n");
+        output.push_str("    }\n\n");
+    }
+
     output
         .push_str("    /// Checks that part `target` comes after every part written so far and\n");
     output.push_str("    /// fills the parts in between with empty headers.\n");
@@ -223,13 +252,13 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
     output.push_str("    #[inline]\n");
     output
         .push_str("    fn sbe_bounded(&self, end: Option<usize>, what: &'static str) -> usize {\n");
-    output.push_str("        match end {\n");
-    output.push_str("            Some(end) if end <= self.buffer.len() => end,\n");
-    output.push_str("            _ => panic!(\n");
-    output.push_str("                \"{what} extends past the end of the buffer ({} bytes)\",\n");
-    output.push_str("                self.buffer.len()\n");
-    output.push_str("            ),\n");
-    output.push_str("        }\n");
+    output.push_str("        let end = end.unwrap_or(usize::MAX);\n");
+    output.push_str("        assert!(\n");
+    output.push_str("            end <= self.buffer.len(),\n");
+    output.push_str("            \"{what} extends past the end of the buffer ({} bytes)\",\n");
+    output.push_str("            self.buffer.len()\n");
+    output.push_str("        );\n");
+    output.push_str("        end\n");
     output.push_str("    }\n\n");
 
     output.push_str("    /// Advances the cursor past variable part `index`, reading its header\n");

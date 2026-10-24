@@ -13,6 +13,7 @@
 use ironsbe_schema::ir::{ResolvedGroup, SchemaIr, to_snake_case};
 
 use crate::error::CodegenError;
+use crate::options::GeneratorOptions;
 use crate::rust::fields::{generate_entry_field_setter, generate_field_getter};
 use crate::rust::names::{ENTRY_RESERVED, accessor_name, renamed_note};
 use crate::rust::var_data::{
@@ -362,7 +363,11 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
 
 /// Generates a group encoder, its entry encoder, and the encoders of every
 /// nested group.
-pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
+pub(crate) fn generate_group_encoder(
+    ir: &SchemaIr,
+    layout: &GroupLayout<'_>,
+    options: GeneratorOptions,
+) -> String {
     let mut output = String::new();
     let group = layout.group;
     let encoder_name = group.encoder_name();
@@ -490,11 +495,11 @@ pub(crate) fn generate_group_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     output.push_str("}\n\n");
 
     // Entry encoder
-    output.push_str(&generate_entry_encoder(ir, layout));
+    output.push_str(&generate_entry_encoder(ir, layout, options));
 
     // Nested group encoders
     for nested in &layout.nested {
-        output.push_str(&generate_group_encoder(ir, nested));
+        output.push_str(&generate_group_encoder(ir, nested, options));
     }
 
     output
@@ -565,7 +570,11 @@ pub(crate) fn generate_group_encoder_accessor(
 /// or var data also borrow the group's write cursor so those parts can be
 /// appended after the fixed block, track the parts written so far, and fill
 /// the missing ones with empty headers on drop (issue #63).
-fn generate_entry_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
+fn generate_entry_encoder(
+    ir: &SchemaIr,
+    layout: &GroupLayout<'_>,
+    options: GeneratorOptions,
+) -> String {
     let mut output = String::new();
     let group = layout.group;
     let entry_name = group.entry_encoder_name();
@@ -628,6 +637,7 @@ fn generate_entry_encoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
             info,
             "*self.limit",
             layout.nested.len() + index,
+            options,
         ));
     }
 

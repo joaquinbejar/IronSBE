@@ -12,3 +12,14 @@
 pub mod var_data {
     include!(concat!(env!("OUT_DIR"), "/var_data_schema.rs"));
 }
+
+/// Codecs generated from the same schema with
+/// `GeneratorOptions::with_panicking_setters(false)` (#70).
+///
+/// `clippy::panic` is denied here so `cargo clippy` fails if the generator
+/// ever emits a `panic!` in this mode.
+#[allow(dead_code, unused_imports, missing_docs, clippy::all)]
+#[deny(clippy::panic)]
+pub mod var_data_no_panic {
+    include!(concat!(env!("OUT_DIR"), "/var_data_schema_no_panic.rs"));
+}

@@ -121,4 +121,12 @@ fn main() {
         .expect("codegen failed for the var data schema");
     fs::write(out_dir.join("var_data_schema.rs"), code)
         .expect("failed to write generated var data codecs");
+
+    // Same schema without the panicking `set_*` var data setters (#70):
+    // `src/lib.rs` includes it under `#[deny(clippy::panic)]`.
+    let options = ironsbe_codegen::GeneratorOptions::default().with_panicking_setters(false);
+    let code = ironsbe_codegen::generate_from_xml_with_options(VAR_DATA_SCHEMA, options)
+        .expect("codegen failed for the var data schema without panicking setters");
+    fs::write(out_dir.join("var_data_schema_no_panic.rs"), code)
+        .expect("failed to write generated var data codecs without panicking setters");
 }
