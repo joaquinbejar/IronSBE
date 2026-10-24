@@ -305,7 +305,11 @@ pub(crate) fn generate_var_data_setter(
     output.push_str("    /// part was already written, if `value.len()` does not fit in the\n");
     output.push_str("    /// length header, or if the buffer is too short. Nothing is written\n");
     output.push_str("    /// on error.\n");
-    output.push_str("    #[inline]\n");
+    output.push_str("    ///\n");
+    output.push_str("    /// The capacity check covers this field and the parts before it.\n");
+    output.push_str("    /// Parts after it that are never written get an empty header on\n");
+    output.push_str("    /// `finish()` or drop, which also needs buffer space; a buffer too\n");
+    output.push_str("    /// short for those headers panics there.\n");
     output.push_str(&format!(
         "    pub fn try_set_{accessor}(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::VarDataError> {{\n"
     ));

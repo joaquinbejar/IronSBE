@@ -24,7 +24,11 @@ impl GeneratorOptions {
     /// emitted next to the fallible `try_set_<field>` ones.
     ///
     /// Defaults to `true`. Pass `false` for crates that deny
-    /// `clippy::panic`: generated encoders then contain no `panic!`.
+    /// `clippy::panic`: the generated code then contains no `panic!`
+    /// call. It can still panic at runtime through `assert!` (the
+    /// out-of-order write guard on group accessors, reader bounds checks)
+    /// and through out-of-bounds slice writes, for example when the empty
+    /// headers written by `finish()` or on drop do not fit the buffer.
     #[must_use = "builders do nothing unless the options are passed to the generator"]
     pub const fn with_panicking_setters(mut self, enabled: bool) -> Self {
         self.panicking_setters = enabled;

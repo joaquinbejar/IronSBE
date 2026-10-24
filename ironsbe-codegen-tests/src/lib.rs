@@ -17,7 +17,8 @@ pub mod var_data {
 /// `GeneratorOptions::with_panicking_setters(false)` (#70).
 ///
 /// `clippy::panic` is denied here so `cargo clippy` fails if the generator
-/// ever emits a `panic!` in this mode.
+/// ever emits a `panic!` call in this mode. The code can still panic at
+/// runtime through `assert!` and slice bounds; see `GeneratorOptions`.
 #[allow(dead_code, unused_imports, missing_docs, clippy::all)]
 #[deny(clippy::panic)]
 pub mod var_data_no_panic {
