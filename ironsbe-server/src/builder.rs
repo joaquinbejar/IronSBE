@@ -618,6 +618,21 @@ where
 
     loop {
         tokio::select! {
+            // Arms are polled in order: once the session is closing,
+            // cancellation wins over a ready read (EOF, error or more
+            // input), so the drain always runs first (#71).
+            biased;
+
+            // Cooperative cancellation from the run loop. Messages the
+            // handler queued before the close are written first, so
+            // "reply, then close" is reliable (#71). Cleanup
+            // (on_session_end + ServerEvent::SessionClosed) runs in
+            // the spawned task closure once we return.
+            _ = session_token.cancelled() => {
+                let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
+                return flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await;
+            }
+
             // Read incoming messages
             result = conn.recv() => {
                 match result {
@@ -630,11 +645,23 @@ where
                             handler.on_error(session_id, "Message too short for header");
                         }
                     }
+                    // The close may not have reached this session yet
+                    // when the peer's EOF or a read error arrives, so
+                    // flush what the handler already queued (bounded
+                    // like a close) before ending the session (#71).
                     Ok(None) => {
+                        let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
+                        if let Err(e) = flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await {
+                            tracing::debug!(error = %e, "flush after peer EOF failed");
+                        }
                         return Ok(());
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "read error");
+                        let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
+                        if let Err(flush_err) = flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await {
+                            tracing::debug!(error = %flush_err, "flush after read error failed");
+                        }
                         return Err(std::io::Error::other(e));
                     }
                 }
@@ -682,15 +709,6 @@ where
                 }
             }
 
-            // Cooperative cancellation from the run loop. Messages the
-            // handler queued before the close are written first, so
-            // "reply, then close" is reliable (#71). Cleanup
-            // (on_session_end + ServerEvent::SessionClosed) runs in
-            // the spawned task closure once we return.
-            _ = session_token.cancelled() => {
-                let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_TIMEOUT;
-                return flush_on_close(session_id, &mut conn, &mut out_rx, deadline).await;
-            }
         }
     }
 }
@@ -1340,5 +1358,95 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(conn.sent, vec![vec![1]]);
+    }
+
+    /// What [`ClosingConn::recv`] returns, immediately, on every call.
+    #[derive(Clone, Copy)]
+    enum RecvOutcome {
+        Eof,
+        Error,
+    }
+
+    /// [`Connection`] whose `recv` is always ready with EOF or an error,
+    /// and whose sent frames stay observable after `handle_session`
+    /// consumes it.
+    struct ClosingConn {
+        recv: RecvOutcome,
+        sent: Arc<parking_lot::Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl Connection for ClosingConn {
+        type Error = std::io::Error;
+
+        async fn recv(&mut self) -> Result<Option<bytes::BytesMut>, Self::Error> {
+            match self.recv {
+                RecvOutcome::Eof => Ok(None),
+                RecvOutcome::Error => Err(std::io::Error::other("oversized frame")),
+            }
+        }
+
+        async fn send(&mut self, msg: &[u8]) -> Result<(), Self::Error> {
+            self.sent.lock().push(msg.to_vec());
+            Ok(())
+        }
+
+        fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 0)))
+        }
+    }
+
+    /// Runs `handle_session` over a [`ClosingConn`] with one reply already
+    /// queued, and returns the session result plus the frames written.
+    async fn run_session_with_queued_reply(
+        recv: RecvOutcome,
+        cancelled: bool,
+    ) -> (Result<(), std::io::Error>, Vec<Vec<u8>>) {
+        let sent = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let conn = ClosingConn {
+            recv,
+            sent: Arc::clone(&sent),
+        };
+        let (out_tx, out_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        out_tx.send(b"rejected".to_vec()).unwrap();
+        let token = CancellationToken::new();
+        if cancelled {
+            token.cancel();
+        }
+        let senders: SessionSenderMap = Arc::new(RwLock::new(HashMap::new()));
+
+        let result = handle_session(1, conn, &TestHandler, token, out_tx, out_rx, senders).await;
+        let frames = sent.lock().clone();
+        (result, frames)
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_cancelled_with_ready_read_error_flushes_reply() {
+        let (result, sent) = run_session_with_queued_reply(RecvOutcome::Error, true).await;
+        assert!(
+            result.is_ok(),
+            "cancellation wins over the ready read error"
+        );
+        assert_eq!(sent, vec![b"rejected".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_cancelled_with_ready_eof_flushes_reply() {
+        let (result, sent) = run_session_with_queued_reply(RecvOutcome::Eof, true).await;
+        assert!(result.is_ok());
+        assert_eq!(sent, vec![b"rejected".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_read_error_before_close_flushes_reply() {
+        let (result, sent) = run_session_with_queued_reply(RecvOutcome::Error, false).await;
+        assert!(result.is_err(), "the read error is still reported");
+        assert_eq!(sent, vec![b"rejected".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_eof_before_close_flushes_reply() {
+        let (result, sent) = run_session_with_queued_reply(RecvOutcome::Eof, false).await;
+        assert!(result.is_ok());
+        assert_eq!(sent, vec![b"rejected".to_vec()]);
     }
 }
