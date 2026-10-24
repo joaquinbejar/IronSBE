@@ -458,12 +458,21 @@ impl ServerHandle {
     }
 
     /// Requests server shutdown.
+    ///
+    /// Every session first writes the messages already queued for it
+    /// (for example replies sent through [`Responder::send`]), then
+    /// closes its connection.
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.try_send(ServerCommand::Shutdown);
         self.cmd_notify.notify_one();
     }
 
     /// Closes a specific session.
+    ///
+    /// Messages already queued for the session when the close is
+    /// processed are written before the connection closes, so a reply
+    /// sent through [`Responder::send`] followed by `close_session`
+    /// reaches the peer. Messages queued after that are dropped.
     pub fn close_session(&self, session_id: u64) {
         let _ = self
             .cmd_tx
@@ -571,8 +580,13 @@ impl Responder for SessionResponder {
 /// of `Server::session_tokens`. When the run loop fires
 /// `ServerCommand::Shutdown` (cancels the parent) or
 /// `ServerCommand::CloseSession(id)` (cancels just this child), this
-/// function returns `Ok(())` and the spawned task drops `conn`,
-/// closing the underlying socket so the peer observes EOF.
+/// function writes the messages already queued on `out_rx` (see
+/// [`drain_queued`]), returns `Ok(())`, and the spawned task drops
+/// `conn`, closing the underlying socket so the peer observes EOF.
+///
+/// The drain and any in-flight send are not bounded by a deadline: a
+/// peer that stops reading holds the session open until TCP
+/// backpressure releases or the write fails.
 ///
 /// `out_tx` / `out_rx` are the two halves of the per-session
 /// outbound channel, created in [`Server::handle_connection`] so the
@@ -623,37 +637,58 @@ where
                 }
             }
 
-            // Send outgoing messages.  The send is itself raced
-            // against `session_token.cancelled()` so that an in-flight
-            // write to a stalled peer (TCP backpressure) cannot pin
-            // the session task open after Shutdown / CloseSession —
-            // the outer `select!` only races at the future level, so
-            // once we enter this arm we are committed until the inner
-            // `await` resolves.
+            // Send outgoing messages.  An in-flight send is not raced
+            // against cancellation: dropping it mid-write could cut a
+            // frame short, and the message was queued before the close.
+            // Cancellation is observed on the next loop iteration, which
+            // then drains the rest of the queue (#71).
             Some(msg) = out_rx.recv() => {
-                tokio::select! {
-                    send_result = conn.send(&msg) => {
-                        if let Err(e) = send_result {
-                            tracing::error!(error = %e, "write error");
-                            return Err(std::io::Error::other(e));
-                        }
-                    }
-                    _ = session_token.cancelled() => {
-                        tracing::debug!("session cancelled mid-send");
-                        return Ok(());
-                    }
+                if let Err(e) = conn.send(&msg).await {
+                    tracing::error!(error = %e, "write error");
+                    return Err(std::io::Error::other(e));
                 }
             }
 
-            // Cooperative cancellation from the run loop. Cleanup
+            // Cooperative cancellation from the run loop. Messages the
+            // handler queued before the close are written first, so
+            // "reply, then close" is reliable (#71). Cleanup
             // (on_session_end + ServerEvent::SessionClosed) runs in
             // the spawned task closure once we return.
             _ = session_token.cancelled() => {
-                tracing::debug!("session cancelled");
+                let drained = drain_queued(&mut conn, &mut out_rx).await?;
+                tracing::debug!(session_id, drained, "session cancelled after draining queued messages");
                 return Ok(());
             }
         }
     }
+}
+
+/// Writes the messages queued on `out_rx` at the time of the call, in
+/// order, then returns how many were written.
+///
+/// Only the messages already in the channel when the drain starts are
+/// sent; anything queued afterwards is dropped with the session. The
+/// drain stops early if the channel reports empty or disconnected.
+///
+/// # Errors
+/// Returns the first write error; the remaining messages are dropped.
+async fn drain_queued<C: Connection>(
+    conn: &mut C,
+    out_rx: &mut tokio_mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Result<usize, std::io::Error> {
+    let queued = out_rx.len();
+    let mut drained = 0;
+    while drained < queued {
+        let Ok(msg) = out_rx.try_recv() else {
+            break;
+        };
+        if let Err(e) = conn.send(&msg).await {
+            tracing::error!(error = %e, drained, queued, "write error while draining");
+            return Err(std::io::Error::other(e));
+        }
+        drained += 1;
+    }
+    Ok(drained)
 }
 
 #[cfg(all(test, feature = "tcp-tokio"))]
@@ -1125,5 +1160,123 @@ mod tests {
             ),
             Ok(()) => panic!("send_to on closed channel must fail"),
         }
+    }
+
+    /// In-memory [`Connection`] that records sent frames and can fail
+    /// the send after `fail_after` successful writes. When `late_tx` is
+    /// set, every successful send queues one more message on it, which
+    /// models a handler that keeps replying while the drain runs.
+    struct RecordingConn {
+        sent: Vec<Vec<u8>>,
+        fail_after: Option<usize>,
+        late_tx: Option<tokio_mpsc::UnboundedSender<Vec<u8>>>,
+    }
+
+    impl RecordingConn {
+        fn new(fail_after: Option<usize>) -> Self {
+            Self {
+                sent: Vec::new(),
+                fail_after,
+                late_tx: None,
+            }
+        }
+    }
+
+    impl Connection for RecordingConn {
+        type Error = std::io::Error;
+
+        fn recv(
+            &mut self,
+        ) -> impl Future<Output = Result<Option<bytes::BytesMut>, Self::Error>> + Send + '_
+        {
+            async { Ok(None) }
+        }
+
+        fn send<'a>(
+            &'a mut self,
+            msg: &'a [u8],
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a {
+            async move {
+                if self.fail_after == Some(self.sent.len()) {
+                    return Err(std::io::Error::other("injected write failure"));
+                }
+                self.sent.push(msg.to_vec());
+                if let Some(tx) = &self.late_tx {
+                    let _ = tx.send(vec![0xFF]);
+                }
+                Ok(())
+            }
+        }
+
+        fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 0)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drain_queued_writes_queued_messages_in_order() {
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        tx.send(vec![1]).unwrap();
+        tx.send(vec![2]).unwrap();
+        tx.send(vec![3]).unwrap();
+        let mut conn = RecordingConn::new(None);
+
+        let drained = drain_queued(&mut conn, &mut rx).await.unwrap();
+
+        assert_eq!(drained, 3);
+        assert_eq!(conn.sent, vec![vec![1], vec![2], vec![3]]);
+    }
+
+    #[tokio::test]
+    async fn test_drain_queued_ignores_messages_queued_during_drain() {
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        tx.send(vec![1]).unwrap();
+        tx.send(vec![2]).unwrap();
+        let mut conn = RecordingConn::new(None);
+        conn.late_tx = Some(tx);
+
+        let drained = drain_queued(&mut conn, &mut rx).await.unwrap();
+
+        assert_eq!(drained, 2);
+        assert_eq!(conn.sent, vec![vec![1], vec![2]]);
+        assert_eq!(rx.len(), 2, "late messages stay queued, unsent");
+    }
+
+    #[tokio::test]
+    async fn test_drain_queued_empty_queue_is_noop() {
+        let (_tx, mut rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let mut conn = RecordingConn::new(None);
+
+        let drained = drain_queued(&mut conn, &mut rx).await.unwrap();
+
+        assert_eq!(drained, 0);
+        assert!(conn.sent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_drain_queued_disconnected_channel_drains_remaining() {
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        tx.send(vec![7]).unwrap();
+        drop(tx);
+        let mut conn = RecordingConn::new(None);
+
+        let drained = drain_queued(&mut conn, &mut rx).await.unwrap();
+
+        assert_eq!(drained, 1);
+        assert_eq!(conn.sent, vec![vec![7]]);
+    }
+
+    #[tokio::test]
+    async fn test_drain_queued_write_error_returns_err() {
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        tx.send(vec![1]).unwrap();
+        tx.send(vec![2]).unwrap();
+        tx.send(vec![3]).unwrap();
+        let mut conn = RecordingConn::new(Some(1));
+
+        let result = drain_queued(&mut conn, &mut rx).await;
+
+        assert!(result.is_err());
+        assert_eq!(conn.sent, vec![vec![1]]);
     }
 }
