@@ -430,3 +430,101 @@ fn test_panic_free_group_block_shorter_than_fields_returns_err() {
         })
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Regressions from the PR #76 review: no `finish()` may succeed on a frame
+// that a failed or skipped operation left incomplete.
+// ---------------------------------------------------------------------------
+
+/// Encodes a `TaggedLegs` message (ends with a variable-stride group) with
+/// one leg whose tag is `hello`.
+fn tagged_legs_frame() -> Vec<u8> {
+    use ironsbe_codegen_tests::versioned::TaggedLegsEncoder;
+
+    let mut buf = vec![0u8; 128];
+    let len = {
+        let mut encoder = TaggedLegsEncoder::wrap(&mut buf, 0).expect("header fits");
+        encoder.set_ts(1);
+        {
+            let mut legs = encoder.legs_count(1).expect("group header fits");
+            let mut leg = legs.next_entry().expect("entry fits").expect("one leg");
+            leg.set_leg_id(7).set_ratio(3);
+            leg.try_set_tag(b"hello").expect("tag fits");
+        }
+        encoder.finish().expect("frame fits")
+    };
+    buf.truncate(len);
+    buf
+}
+
+#[test]
+fn test_reader_finish_after_entry_drop_fails_on_truncated_last_group_returns_err() {
+    use ironsbe_codegen_tests::versioned::TaggedLegsReader;
+
+    let mut frame = tagged_legs_frame();
+    frame.pop();
+    let mut reader = TaggedLegsReader::decode(&frame).expect("root block intact");
+    {
+        let mut legs = reader.legs().expect("group header intact");
+        // Acquire the leg and drop it without reading its tag: the drop walk
+        // hits the truncated payload and poisons the cursor.
+        let _leg = legs.next_entry().expect("entry block intact");
+    }
+    assert!(matches!(
+        reader.finish(),
+        Err(DecodeError::VarPartOutOfBounds { .. })
+    ));
+}
+
+#[test]
+fn test_reader_finish_after_rejected_group_returns_err() {
+    use ironsbe_codegen_tests::versioned::TaggedLegsReader;
+
+    let frame = tagged_legs_frame();
+    // Message header (8) and root block (8) only: the group header is gone.
+    let truncated = frame.get(..16).expect("frame is longer");
+    let mut reader = TaggedLegsReader::decode(truncated).expect("root block intact");
+    assert!(matches!(
+        reader.legs().map(|_| ()),
+        Err(DecodeError::VarPartOutOfBounds { .. })
+    ));
+    assert!(matches!(
+        reader.finish(),
+        Err(DecodeError::VarPartOutOfBounds { .. })
+    ));
+}
+
+#[test]
+fn test_encoder_finish_after_failed_next_entry_returns_err() {
+    // Header (8) + root block (4) + group header (4): no room for the entry.
+    let mut buf = vec![0u8; 16];
+    let mut encoder = GroupsOnlyEncoder::wrap(&mut buf, 0).expect("header fits");
+    {
+        let mut items = encoder.items_count(1).expect("group header fits");
+        assert!(matches!(
+            items.next_entry().map(|_| ()),
+            Err(EncodeError::BufferTooShort { required: 24, .. })
+        ));
+    }
+    assert!(matches!(
+        encoder.finish(),
+        Err(EncodeError::BufferTooShort { .. })
+    ));
+}
+
+#[test]
+fn test_encoder_finish_after_group_with_missing_entries_returns_err() {
+    let mut buf = vec![0u8; FULL_BUFFER];
+    let mut encoder = GroupsOnlyEncoder::wrap(&mut buf, 0).expect("header fits");
+    {
+        let mut items = encoder.items_count(3).expect("group header fits");
+        if let Some(mut entry) = items.next_entry().expect("entry fits") {
+            entry.set_item_id(1);
+        }
+        // two declared entries never written
+    }
+    assert!(matches!(
+        encoder.finish(),
+        Err(EncodeError::BufferTooShort { .. })
+    ));
+}

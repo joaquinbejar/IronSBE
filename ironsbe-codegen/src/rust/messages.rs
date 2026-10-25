@@ -1829,7 +1829,10 @@ mod tests {
         // var data read once at the cursor, in schema order
         assert!(reader.contains("self.sbe_advance_to(1, \"var data field 'label'\")?;"));
         assert!(reader.contains("self.sbe_advance_to(2, \"var data field 'payload'\")?;"));
-        assert!(reader.contains("pub fn finish(mut self) -> Result<usize, DecodeError> {\n        self.sbe_skip_to(Self::SBE_VAR_PARTS)?;\n        Ok(MessageHeader::ENCODED_LENGTH + (self.pos - self.offset))"));
+        assert!(reader.contains("pub fn finish(mut self) -> Result<usize, DecodeError> {\n        self.sbe_skip_to(Self::SBE_VAR_PARTS)?;\n"));
+        // a cursor a failed drop left past the buffer is reported
+        assert!(reader.contains("ironsbe_core::bounds::span_end(self.buffer.len(), self.pos, 0, "));
+        assert!(reader.contains("Ok(MessageHeader::ENCODED_LENGTH + (self.pos - self.offset))"));
         assert!(reader.contains("const SBE_VAR_PARTS: u16 = 3;"));
         // no group readers for flat groups
         assert!(!code.contains("LegsGroupReader"));

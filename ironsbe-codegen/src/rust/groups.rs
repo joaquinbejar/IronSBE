@@ -643,6 +643,22 @@ pub(crate) fn generate_group_encoder(
     output.push_str("    }\n");
     output.push_str("}\n\n");
 
+    output.push_str(&format!("impl Drop for {encoder_name}<'_> {{\n"));
+    output.push_str("    /// The group header already declares `count` entries. If fewer were\n");
+    output.push_str("    /// written (for example after `next_entry` returned an error), the\n");
+    output.push_str("    /// shared cursor is moved past the end of the buffer, so the parent's\n");
+    output.push_str("    /// later writes and `finish()` return `EncodeError::BufferTooShort`\n");
+    output.push_str("    /// instead of completing a frame that announces missing entries.\n");
+    output.push_str("    fn drop(&mut self) {\n");
+    output.push_str("        if std::thread::panicking() {\n");
+    output.push_str("            return;\n");
+    output.push_str("        }\n");
+    output.push_str("        if self.index < self.count {\n");
+    output.push_str("            *self.limit = self.buffer.len() + 1;\n");
+    output.push_str("        }\n");
+    output.push_str("    }\n");
+    output.push_str("}\n\n");
+
     // Entry encoder
     output.push_str(&generate_entry_encoder(ir, layout, options));
 
