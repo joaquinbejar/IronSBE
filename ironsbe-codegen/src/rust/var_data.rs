@@ -37,10 +37,16 @@ pub(crate) struct VarDataInfo {
     pub(crate) length_rust_type: &'static str,
     /// Encoded width of the length header in bytes (1, 2 or 4).
     pub(crate) header_length: usize,
-    /// `ReadBuffer` method that reads the length header.
-    pub(crate) read_method: &'static str,
     /// `WriteBuffer` method that writes the length header.
     pub(crate) write_method: &'static str,
+}
+
+impl VarDataInfo {
+    /// Human-readable part name used in generated error values, e.g.
+    /// `var data field 'label'`.
+    pub(crate) fn part_name(&self) -> String {
+        format!("var data field '{}'", self.name)
+    }
 }
 
 /// Resolves the length-header layout of every `<data>` field of one owner
@@ -93,11 +99,11 @@ pub(crate) fn resolve_var_data(
                     )
                 })?;
 
-            let (header_length, read_method, write_method, length_rust_type, length_type) =
+            let (header_length, write_method, length_rust_type, length_type) =
                 match length_field.primitive_type {
-                    PrimitiveType::Uint8 => (1, "get_u8", "put_u8", "u8", "uint8"),
-                    PrimitiveType::Uint16 => (2, "get_u16_le", "put_u16_le", "u16", "uint16"),
-                    PrimitiveType::Uint32 => (4, "get_u32_le", "put_u32_le", "u32", "uint32"),
+                    PrimitiveType::Uint8 => (1, "put_u8", "u8", "uint8"),
+                    PrimitiveType::Uint16 => (2, "put_u16_le", "u16", "uint16"),
+                    PrimitiveType::Uint32 => (4, "put_u32_le", "u32", "uint32"),
                     other => {
                         return Err(CodegenError::unsupported(
                             format!("var data length encoding '{}'", other.sbe_name()),
@@ -115,7 +121,6 @@ pub(crate) fn resolve_var_data(
                 length_type,
                 length_rust_type,
                 header_length,
-                read_method,
                 write_method,
             })
         })
@@ -143,32 +148,31 @@ pub(crate) fn generate_var_data_getter(
 
     // Offset helper: first var data field starts after the last group
     // (or after the fixed block); each later field starts after the
-    // previous field's header + payload.
+    // previous field's header + payload, checked against the buffer.
     output.push_str(&format!(
         "    /// Byte offset of the length header of var data field `{}`.\n",
         info.name
     ));
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
-        "    fn sbe_{}_offset(&self) -> usize {{\n",
+        "    fn sbe_{}_offset(&self) -> Result<usize, DecodeError> {{\n",
         info.accessor
     ));
     match index.checked_sub(1).and_then(|i| var_data.get(i)) {
         Some(prev) => {
             output.push_str(&format!(
-                "        let pos = self.sbe_{}_offset();\n",
-                prev.accessor
+                "        let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_{}_offset()?, {}, \"{}\")?;\n",
+                prev.accessor,
+                prev.header_length,
+                prev.part_name()
             ));
-            output.push_str(&format!(
-                "        pos + {} + self.buffer.{}(pos) as usize\n",
-                prev.header_length, prev.read_method
-            ));
+            output.push_str("        Ok(end)\n");
         }
         None if group_count > 0 => {
             output.push_str(&format!("        self.sbe_group_offset({})\n", group_count));
         }
         None => {
-            output.push_str(&format!("        {block_end_expr}\n"));
+            output.push_str(&format!("        Ok({block_end_expr})\n"));
         }
     }
     output.push_str("    }\n\n");
@@ -188,29 +192,23 @@ pub(crate) fn generate_var_data_getter(
     output.push_str("    /// on hot paths read the field once and cache the slice.\n");
     output.push_str(&renamed_note(&info.accessor, &info.getter));
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
+    output.push_str("    /// # Errors\n");
     output.push_str(
-        "    /// Panics if the buffer is shorter than the encoded length header claims.\n",
+        "    /// Returns [`DecodeError::VarPartOutOfBounds`] if this field, or a group or\n",
     );
+    output.push_str("    /// var data field before it, extends past the end of the buffer.\n");
     output.push_str("    #[inline]\n");
-    output.push_str("    #[must_use]\n");
     output.push_str(&format!(
-        "    pub fn {}(&self) -> &'a [u8] {{\n",
+        "    pub fn {}(&self) -> Result<&'a [u8], DecodeError> {{\n",
         info.getter
     ));
     output.push_str(&format!(
-        "        let pos = self.sbe_{}_offset();\n",
-        info.accessor
+        "        let (value, _) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_{}_offset()?, {}, \"{}\")?;\n",
+        info.accessor,
+        info.header_length,
+        info.part_name()
     ));
-    output.push_str(&format!(
-        "        let len = self.buffer.{}(pos) as usize;\n",
-        info.read_method
-    ));
-    output.push_str(&format!(
-        "        let start = pos + {};\n",
-        info.header_length
-    ));
-    output.push_str("        &self.buffer[start..start + len]\n");
+    output.push_str("        Ok(value)\n");
     output.push_str("    }\n\n");
 
     // String accessor
@@ -218,14 +216,16 @@ pub(crate) fn generate_var_data_getter(
         "    /// Var data field `{}` as UTF-8 (empty string if not valid UTF-8).\n",
         info.name
     ));
+    output.push_str("    ///\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(&format!("    /// Same as [`Self::{}`].\n", info.getter));
     output.push_str("    #[inline]\n");
-    output.push_str("    #[must_use]\n");
     output.push_str(&format!(
-        "    pub fn {}_as_str(&self) -> &'a str {{\n",
+        "    pub fn {}_as_str(&self) -> Result<&'a str, DecodeError> {{\n",
         info.accessor
     ));
     output.push_str(&format!(
-        "        std::str::from_utf8(self.{}()).unwrap_or(\"\")\n",
+        "        Ok(std::str::from_utf8(self.{}()?).unwrap_or(\"\"))\n",
         info.getter
     ));
     output.push_str("    }\n\n");
@@ -246,15 +246,17 @@ pub(crate) fn end_offset_parts(
 ) -> (String, String) {
     match var_data.last() {
         Some(last) => (
-            format!("        let pos = self.sbe_{}_offset();\n", last.accessor),
             format!(
-                "pos + {} + self.buffer.{}(pos) as usize",
-                last.header_length, last.read_method
+                "        let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_{}_offset()?, {}, \"{}\")?;\n",
+                last.accessor,
+                last.header_length,
+                last.part_name()
             ),
+            "end".to_string(),
         ),
         None if group_count > 0 => (
-            String::new(),
-            format!("self.sbe_group_offset({group_count})"),
+            format!("        let end = self.sbe_group_offset({group_count})?;\n"),
+            "end".to_string(),
         ),
         None => (String::new(), block_end_expr.to_string()),
     }
@@ -310,7 +312,7 @@ pub(crate) fn generate_var_data_setter(
     output.push_str("    ///\n");
     output.push_str("    /// # Errors\n");
     output.push_str(
-        "    /// Returns [`ironsbe_core::error::VarDataError`] if this field or a later\n",
+        "    /// Returns [`ironsbe_core::error::EncodeError`] if this field or a later\n",
     );
     output.push_str("    /// part was already written, if `value.len()` does not fit in the\n");
     output.push_str("    /// length header, or if the buffer is too short. Nothing is written\n");
@@ -318,8 +320,8 @@ pub(crate) fn generate_var_data_setter(
     output.push_str("    ///\n");
     output.push_str("    /// The capacity check covers this field and the parts before it.\n");
     output.push_str("    /// Parts after it that are never written get an empty header on\n");
-    output.push_str("    /// `finish()` or drop, which also needs buffer space; a buffer too\n");
-    output.push_str("    /// short for those headers panics there.\n");
+    output.push_str("    /// `finish()` or drop, which also needs buffer space: `finish()`\n");
+    output.push_str("    /// returns an error if it does not fit.\n");
     if try_setter != plain_try_setter {
         output.push_str("    ///\n");
         output.push_str(&format!(
@@ -327,19 +329,14 @@ pub(crate) fn generate_var_data_setter(
         ));
     }
     output.push_str(&format!(
-        "    pub fn {try_setter}(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::VarDataError> {{\n"
+        "    pub fn {try_setter}(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::EncodeError> {{\n"
     ));
-    output.push_str(&format!("        if self.written > {part_index} {{\n"));
-    output.push_str("            return Err(ironsbe_core::error::VarDataError::OutOfOrder {\n");
-    output.push_str(&format!("                field: \"{name}\",\n"));
-    output.push_str("                written: self.written,\n");
-    output.push_str("            });\n");
-    output.push_str("        }\n");
+    let part = info.part_name();
     output.push_str(&format!(
         "        let Ok(len) = {len_type}::try_from(value.len()) else {{\n"
     ));
-    output.push_str("            return Err(ironsbe_core::error::VarDataError::LengthOverflow {\n");
-    output.push_str(&format!("                field: \"{name}\",\n"));
+    output.push_str("            return Err(ironsbe_core::error::EncodeError::LengthOverflow {\n");
+    output.push_str(&format!("                field: \"{part}\",\n"));
     output.push_str("                length: value.len(),\n");
     output.push_str(&format!(
         "                max: u64::from({len_type}::MAX),\n"
@@ -347,31 +344,11 @@ pub(crate) fn generate_var_data_setter(
     output.push_str("            });\n");
     output.push_str("        };\n");
     output.push_str(&format!(
-        "        let required = self.sbe_fill_len({part_index})\n"
-    ));
-    output.push_str(&format!(
-        "            .and_then(|fill| ({cursor}).checked_add(fill))\n"
-    ));
-    output.push_str(&format!(
-        "            .and_then(|end| end.checked_add({}))\n",
+        "        let extra = {}usize.checked_add(value.len()).unwrap_or(usize::MAX);\n",
         info.header_length
     ));
-    output.push_str("            .and_then(|end| end.checked_add(value.len()));\n");
-    output.push_str("        let available = self.buffer.len();\n");
-    output.push_str("        match required {\n");
-    output.push_str("            Some(required) if required <= available => {}\n");
-    output.push_str("            _ => {\n");
-    output.push_str(
-        "                return Err(ironsbe_core::error::VarDataError::BufferTooShort {\n",
-    );
-    output.push_str(&format!("                    field: \"{name}\",\n"));
-    output.push_str("                    required: required.unwrap_or(usize::MAX),\n");
-    output.push_str("                    available,\n");
-    output.push_str("                });\n");
-    output.push_str("            }\n");
-    output.push_str("        }\n");
     output.push_str(&format!(
-        "        self.sbe_advance_to({part_index}, \"var data field '{name}'\");\n"
+        "        self.sbe_advance_to({part_index}, \"{part}\", extra)?;\n"
     ));
     output.push_str(&format!(
         "        self.buffer.{}({cursor}, len);\n",
@@ -427,10 +404,10 @@ mod tests {
     use super::*;
 
     fn info(name: &str, header_length: usize) -> VarDataInfo {
-        let (length_type, length_rust_type, read_method, write_method) = match header_length {
-            1 => ("uint8", "u8", "get_u8", "put_u8"),
-            4 => ("uint32", "u32", "get_u32_le", "put_u32_le"),
-            _ => ("uint16", "u16", "get_u16_le", "put_u16_le"),
+        let (length_type, length_rust_type, write_method) = match header_length {
+            1 => ("uint8", "u8", "put_u8"),
+            4 => ("uint32", "u32", "put_u32_le"),
+            _ => ("uint16", "u16", "put_u16_le"),
         };
         VarDataInfo {
             name: name.to_string(),
@@ -440,7 +417,6 @@ mod tests {
             length_type,
             length_rust_type,
             header_length,
-            read_method,
             write_method,
         }
     }
@@ -449,15 +425,18 @@ mod tests {
     fn test_end_offset_parts_prefers_last_var_data() {
         let fields = [info("label", 2), info("payload", 1)];
         let (prelude, expr) = end_offset_parts(&fields, 3, "BLOCK_END");
-        assert_eq!(prelude, "        let pos = self.sbe_payload_offset();\n");
-        assert_eq!(expr, "pos + 1 + self.buffer.get_u8(pos) as usize");
+        assert_eq!(
+            prelude,
+            "        let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_payload_offset()?, 1, \"var data field 'payload'\")?;\n"
+        );
+        assert_eq!(expr, "end");
     }
 
     #[test]
     fn test_end_offset_parts_falls_back_to_last_group() {
         let (prelude, expr) = end_offset_parts(&[], 2, "BLOCK_END");
-        assert!(prelude.is_empty());
-        assert_eq!(expr, "self.sbe_group_offset(2)");
+        assert_eq!(prelude, "        let end = self.sbe_group_offset(2)?;\n");
+        assert_eq!(expr, "end");
     }
 
     #[test]
@@ -472,9 +451,11 @@ mod tests {
         let fields = [info("rawData", 4)];
         let code =
             generate_var_data_getter(0, &fields, 0, "self.offset + self.block_length as usize");
-        assert!(code.contains("fn sbe_raw_data_offset(&self) -> usize {\n        self.offset + self.block_length as usize\n"));
-        assert!(code.contains("pub fn raw_data(&self) -> &'a [u8]"));
-        assert!(code.contains("let len = self.buffer.get_u32_le(pos) as usize;"));
+        assert!(code.contains("fn sbe_raw_data_offset(&self) -> Result<usize, DecodeError> {\n        Ok(self.offset + self.block_length as usize)\n"));
+        assert!(code.contains("pub fn raw_data(&self) -> Result<&'a [u8], DecodeError>"));
+        assert!(code.contains(
+            "ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_raw_data_offset()?, 4, \"var data field 'rawData'\")?;"
+        ));
     }
 
     #[test]
@@ -506,7 +487,7 @@ mod tests {
             GeneratorOptions::default(),
             &[],
         );
-        assert!(code.contains("self.sbe_advance_to(3, \"var data field 'comment'\");"));
+        assert!(code.contains("self.sbe_advance_to(3, \"var data field 'comment'\", extra)?;"));
         assert!(code.contains("self.written = 4;"));
         // the guard runs before anything is written
         let guard = code.find("sbe_advance_to").expect("guard call");
@@ -524,18 +505,20 @@ mod tests {
             &[],
         );
         assert!(code.contains(
-            "pub fn try_set_note(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::VarDataError>"
+            "pub fn try_set_note(&mut self, value: &[u8]) -> Result<&mut Self, ironsbe_core::error::EncodeError>"
         ));
-        assert!(code.contains("if self.written > 2 {"));
         assert!(code.contains("let Ok(len) = u8::try_from(value.len()) else {"));
         assert!(code.contains("max: u64::from(u8::MAX),"));
-        assert!(code.contains(".and_then(|fill| (*self.limit).checked_add(fill))"));
-        assert!(code.contains(".and_then(|end| end.checked_add(1))"));
+        // order and capacity (header width 1 + value) go through the guard
+        assert!(
+            code.contains("let extra = 1usize.checked_add(value.len()).unwrap_or(usize::MAX);")
+        );
+        assert!(code.contains("self.sbe_advance_to(2, \"var data field 'note'\", extra)?;"));
         // every check returns before the first write
         let try_set = code.find("pub fn try_set_note").expect("try_set");
         let last_check = code[try_set..]
-            .find("BufferTooShort")
-            .expect("capacity check")
+            .find("sbe_advance_to")
+            .expect("order and capacity check")
             + try_set;
         let write = code[try_set..].find("put_u8").expect("header write") + try_set;
         assert!(last_check < write);
@@ -588,9 +571,9 @@ mod tests {
         let mut field = info("finish", 2);
         field.getter = "finish_".to_string();
         let code = generate_var_data_getter(0, std::slice::from_ref(&field), 0, "b");
-        assert!(code.contains("fn sbe_finish_offset(&self) -> usize"));
-        assert!(code.contains("pub fn finish_(&self) -> &'a [u8]"));
-        assert!(code.contains("pub fn finish_as_str(&self) -> &'a str"));
+        assert!(code.contains("fn sbe_finish_offset(&self) -> Result<usize, DecodeError>"));
+        assert!(code.contains("pub fn finish_(&self) -> Result<&'a [u8], DecodeError>"));
+        assert!(code.contains("pub fn finish_as_str(&self) -> Result<&'a str, DecodeError>"));
         assert!(code.contains("Renamed from `finish` to avoid the generated `finish()` method."));
         assert!(!code.contains("pub fn finish(&self)"));
     }

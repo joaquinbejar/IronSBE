@@ -99,51 +99,69 @@ pub(crate) fn generate_encoder_parts_guard(parts: &[VarPart<'_>], cursor: &str) 
     output.push_str("        }\n");
     output.push_str("    }\n\n");
 
-    if parts.iter().any(|part| matches!(part, VarPart::Data(_))) {
-        output.push_str("    /// Encoded size in bytes of each variable part's empty header.\n");
-        output.push_str(&format!(
-            "    const SBE_EMPTY_PART_LEN: [usize; {}] = [",
-            parts.len()
-        ));
-        for (index, part) in parts.iter().enumerate() {
-            if index > 0 {
-                output.push_str(", ");
-            }
-            match part {
-                VarPart::Group { .. } => output.push_str("GroupHeader::ENCODED_LENGTH"),
-                VarPart::Data(info) => output.push_str(&info.header_length.to_string()),
-            }
+    output.push_str("    /// Encoded size in bytes of each variable part's empty header.\n");
+    output.push_str(&format!(
+        "    const SBE_EMPTY_PART_LEN: [usize; {}] = [",
+        parts.len()
+    ));
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
         }
-        output.push_str("];\n\n");
-
-        output.push_str("    /// Bytes `sbe_fill_to(target)` writes: the empty headers of every\n");
-        output.push_str("    /// part in `written..target`, or `None` if the sum overflows.\n");
-        output.push_str("    #[inline]\n");
-        output.push_str("    fn sbe_fill_len(&self, target: u16) -> Option<usize> {\n");
-        output.push_str("        Self::SBE_EMPTY_PART_LEN\n");
-        output.push_str("            .get(usize::from(self.written)..usize::from(target))\n");
-        output.push_str("            .unwrap_or(&[])\n");
-        output.push_str("            .iter()\n");
-        output.push_str("            .try_fold(0usize, |acc, len| acc.checked_add(*len))\n");
-        output.push_str("    }\n\n");
+        match part {
+            VarPart::Group { .. } => output.push_str("GroupHeader::ENCODED_LENGTH"),
+            VarPart::Data(info) => output.push_str(&info.header_length.to_string()),
+        }
     }
+    output.push_str("];\n\n");
+
+    output.push_str("    /// Bytes `sbe_fill_to(target)` writes: the empty headers of every\n");
+    output.push_str("    /// part in `written..target`, or `None` if the sum overflows.\n");
+    output.push_str("    #[inline]\n");
+    output.push_str("    fn sbe_fill_len(&self, target: u16) -> Option<usize> {\n");
+    output.push_str("        Self::SBE_EMPTY_PART_LEN\n");
+    output.push_str("            .get(usize::from(self.written)..usize::from(target))\n");
+    output.push_str("            .unwrap_or(&[])\n");
+    output.push_str("            .iter()\n");
+    output.push_str("            .try_fold(0usize, |acc, len| acc.checked_add(*len))\n");
+    output.push_str("    }\n\n");
 
     output
         .push_str("    /// Checks that part `target` comes after every part written so far and\n");
-    output.push_str("    /// fills the parts in between with empty headers.\n");
+    output
+        .push_str("    /// that the buffer holds the empty headers of the parts in between plus\n");
+    output.push_str("    /// `extra` bytes, then writes those empty headers.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if part `target` (or a later one) was already written.\n");
-    output.push_str("    #[inline]\n");
-    output.push_str("    fn sbe_advance_to(&mut self, target: u16, what: &'static str) {\n");
-    output.push_str("        assert!(\n");
-    output.push_str("            self.written <= target,\n");
+    output.push_str("    /// Nothing is written when it returns an error.\n");
+    output.push_str("    ///\n");
+    output.push_str("    /// # Errors\n");
     output.push_str(
-        "            \"{what} written out of schema order (parts already written: {})\",\n",
+        "    /// Returns [`ironsbe_core::error::EncodeError::OutOfOrder`] if part `target`\n",
     );
-    output.push_str("            self.written\n");
-    output.push_str("        );\n");
+    output.push_str(
+        "    /// (or a later one) was already written, and\n    /// [`ironsbe_core::error::EncodeError::BufferTooShort`] if the buffer is too\n",
+    );
+    output.push_str("    /// short.\n");
+    output.push_str("    #[inline]\n");
+    output.push_str(
+        "    fn sbe_advance_to(&mut self, target: u16, what: &'static str, extra: usize) -> Result<(), ironsbe_core::error::EncodeError> {\n",
+    );
+    output.push_str("        if self.written > target {\n");
+    output.push_str(
+        "            return Err(ironsbe_core::error::EncodeError::OutOfOrder { field: what, written: self.written });\n",
+    );
+    output.push_str("        }\n");
+    output.push_str("        let required = self\n");
+    output.push_str("            .sbe_fill_len(target)\n");
+    output.push_str(&format!(
+        "            .and_then(|fill| ({cursor}).checked_add(fill))\n"
+    ));
+    output.push_str("            .and_then(|end| end.checked_add(extra));\n");
+    output.push_str(
+        "        ironsbe_core::bounds::ensure_capacity(self.buffer.len(), required, what)?;\n",
+    );
     output.push_str("        self.sbe_fill_to(target);\n");
+    output.push_str("        Ok(())\n");
     output.push_str("    }\n\n");
 
     output.push_str(
@@ -220,53 +238,49 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
         "    /// Walks every variable part in `part..target` on the wire, reading each\n",
     );
     output.push_str("    /// header once.\n");
-    output.push_str("    fn sbe_skip_to(&mut self, target: u16) {\n");
+    output.push_str("    ///\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`DecodeError::VarPartOutOfBounds`] if a part extends past the\n",
+    );
+    output.push_str("    /// end of the buffer; the parts walked so far stay consumed.\n");
+    output.push_str("    fn sbe_skip_to(&mut self, target: u16) -> Result<(), DecodeError> {\n");
     output.push_str("        while self.part < target {\n");
-    output.push_str("            self.sbe_skip_part(self.part);\n");
+    output.push_str("            self.sbe_skip_part(self.part)?;\n");
     output.push_str("            self.part += 1;\n");
     output.push_str("        }\n");
+    output.push_str("        Ok(())\n");
     output.push_str("    }\n\n");
 
     output.push_str("    /// Checks that part `target` comes after every part read so far and\n");
     output.push_str("    /// skips the parts in between.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if part `target` (or a later one) was already read.\n");
-    output.push_str("    #[inline]\n");
-    output.push_str("    fn sbe_advance_to(&mut self, target: u16, what: &'static str) {\n");
-    output.push_str("        assert!(\n");
-    output.push_str("            self.part <= target,\n");
-    output.push_str("            \"{what} read out of schema order (parts already read: {})\",\n");
-    output.push_str("            self.part\n");
-    output.push_str("        );\n");
-    output.push_str("        self.sbe_skip_to(target);\n");
-    output.push_str("    }\n\n");
-
+    output.push_str("    /// # Errors\n");
     output.push_str(
-        "    /// Returns `end` when it lies within the buffer, so a skipped part whose\n",
+        "    /// Returns [`DecodeError::OutOfOrder`] if part `target` (or a later one) was\n",
     );
-    output.push_str("    /// payload is missing is rejected like a read one.\n");
-    output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if `what` extends past the end of the buffer.\n");
+    output.push_str("    /// already read, and the `sbe_skip_to` errors.\n");
     output.push_str("    #[inline]\n");
-    output
-        .push_str("    fn sbe_bounded(&self, end: Option<usize>, what: &'static str) -> usize {\n");
-    output.push_str("        let end = end.unwrap_or(usize::MAX);\n");
-    output.push_str("        assert!(\n");
-    output.push_str("            end <= self.buffer.len(),\n");
-    output.push_str("            \"{what} extends past the end of the buffer ({} bytes)\",\n");
-    output.push_str("            self.buffer.len()\n");
-    output.push_str("        );\n");
-    output.push_str("        end\n");
+    output.push_str(
+        "    fn sbe_advance_to(&mut self, target: u16, what: &'static str) -> Result<(), DecodeError> {\n",
+    );
+    output.push_str("        if self.part > target {\n");
+    output.push_str(
+        "            return Err(DecodeError::OutOfOrder { part: what, read: self.part });\n",
+    );
+    output.push_str("        }\n");
+    output.push_str("        self.sbe_skip_to(target)\n");
     output.push_str("    }\n\n");
 
     output.push_str("    /// Advances the cursor past variable part `index`, reading its header\n");
     output.push_str("    /// once and checking that the part fits in the buffer.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if the buffer is shorter than the wire lengths claim.\n");
-    output.push_str("    fn sbe_skip_part(&mut self, index: u16) {\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`DecodeError::VarPartOutOfBounds`] if the part extends past the\n",
+    );
+    output.push_str("    /// end of the buffer.\n");
+    output.push_str("    fn sbe_skip_part(&mut self, index: u16) -> Result<(), DecodeError> {\n");
     output.push_str("        match index {\n");
     for (index, part) in parts.iter().enumerate() {
         output.push_str(&format!("            {index} => {{\n"));
@@ -278,10 +292,7 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
                     "                // {name}: walk the repeating group\n"
                 ));
                 output.push_str(&format!(
-                    "                let end = {decoder_type}::wrap(self.buffer, {cursor}, self.acting_version).end_offset();\n"
-                ));
-                output.push_str(&format!(
-                    "                {cursor} = self.sbe_bounded(Some(end), \"repeating group '{name}'\");\n"
+                    "                {cursor} = {decoder_type}::wrap(self.buffer, {cursor}, self.acting_version)?.end_offset()?;\n"
                 ));
             }
             VarPart::Data(info) => {
@@ -290,23 +301,18 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
                     info.name
                 ));
                 output.push_str(&format!(
-                    "                let len = self.buffer.{}({cursor}) as usize;\n",
-                    info.read_method
+                    "                let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, {cursor}, {}, \"{}\")?;\n",
+                    info.header_length,
+                    info.part_name()
                 ));
-                output.push_str(&format!(
-                    "                let end = ({cursor}).checked_add({}).and_then(|start| start.checked_add(len));\n",
-                    info.header_length
-                ));
-                output.push_str(&format!(
-                    "                {cursor} = self.sbe_bounded(end, \"var data field '{}'\");\n",
-                    info.name
-                ));
+                output.push_str(&format!("                {cursor} = end;\n"));
             }
         }
         output.push_str("            }\n");
     }
     output.push_str("            _ => {}\n");
     output.push_str("        }\n");
+    output.push_str("        Ok(())\n");
     output.push_str("    }\n\n");
 
     output
@@ -318,10 +324,10 @@ mod tests {
     use ironsbe_schema::ir::to_snake_case;
 
     fn info(name: &str, header_length: usize) -> VarDataInfo {
-        let (length_type, length_rust_type, read_method, write_method) = match header_length {
-            1 => ("uint8", "u8", "get_u8", "put_u8"),
-            4 => ("uint32", "u32", "get_u32_le", "put_u32_le"),
-            _ => ("uint16", "u16", "get_u16_le", "put_u16_le"),
+        let (length_type, length_rust_type, write_method) = match header_length {
+            1 => ("uint8", "u8", "put_u8"),
+            4 => ("uint32", "u32", "put_u32_le"),
+            _ => ("uint16", "u16", "put_u16_le"),
         };
         VarDataInfo {
             name: name.to_string(),
@@ -331,7 +337,6 @@ mod tests {
             length_type,
             length_rust_type,
             header_length,
-            read_method,
             write_method,
         }
     }
@@ -364,8 +369,21 @@ mod tests {
 
         assert!(code.contains("const SBE_VAR_PARTS: u16 = 3;"));
         assert!(code.contains("fn sbe_fill_to(&mut self, target: u16)"));
-        assert!(code.contains("fn sbe_advance_to(&mut self, target: u16, what: &'static str)"));
-        assert!(code.contains("written out of schema order"));
+        assert!(code.contains(
+            "fn sbe_advance_to(&mut self, target: u16, what: &'static str, extra: usize) -> Result<(), ironsbe_core::error::EncodeError>"
+        ));
+        assert!(code.contains(
+            "ironsbe_core::error::EncodeError::OutOfOrder { field: what, written: self.written }"
+        ));
+        assert!(code.contains(
+            "ironsbe_core::bounds::ensure_capacity(self.buffer.len(), required, what)?;"
+        ));
+        // capacity is checked before the empty headers are written
+        let check = code.find("ensure_capacity").expect("capacity check");
+        let fill = code
+            .find("        self.sbe_fill_to(target);")
+            .expect("fill");
+        assert!(check < fill);
 
         let legs = code.find("0 => {").expect("legs arm");
         let label = code.find("1 => {").expect("label arm");
@@ -405,31 +423,26 @@ mod tests {
         let code = generate_reader_parts_skip(&parts, "self.pos");
 
         assert!(code.contains("const SBE_VAR_PARTS: u16 = 3;"));
-        assert!(code.contains("fn sbe_skip_to(&mut self, target: u16)"));
-        assert!(code.contains("fn sbe_advance_to(&mut self, target: u16, what: &'static str)"));
-        assert!(code.contains("read out of schema order"));
-        assert!(
-            code.contains("fn sbe_bounded(&self, end: Option<usize>, what: &'static str) -> usize")
-        );
-        assert!(code.contains("extends past the end of the buffer"));
+        assert!(code.contains("fn sbe_skip_to(&mut self, target: u16) -> Result<(), DecodeError>"));
         assert!(code.contains(
-            "let end = m::OrdersGroupDecoder::wrap(self.buffer, self.pos, self.acting_version).end_offset();"
+            "fn sbe_advance_to(&mut self, target: u16, what: &'static str) -> Result<(), DecodeError>"
         ));
         assert!(
-            code.contains("self.pos = self.sbe_bounded(Some(end), \"repeating group 'Orders'\");")
+            code.contains("return Err(DecodeError::OutOfOrder { part: what, read: self.part });")
         );
-        assert!(
-            code.contains(
-                "let end = m::FlagsGroupDecoder::wrap(self.buffer, self.pos, self.acting_version).end_offset();"
-            )
-        );
-        assert!(code.contains("let len = self.buffer.get_u32_le(self.pos) as usize;"));
+        assert!(!code.contains("sbe_bounded"));
         assert!(code.contains(
-            "let end = (self.pos).checked_add(4).and_then(|start| start.checked_add(len));"
+            "self.pos = m::OrdersGroupDecoder::wrap(self.buffer, self.pos, self.acting_version)?.end_offset()?;"
         ));
-        assert!(code.contains("self.pos = self.sbe_bounded(end, \"var data field 'trailer'\");"));
+        assert!(code.contains(
+            "self.pos = m::FlagsGroupDecoder::wrap(self.buffer, self.pos, self.acting_version)?.end_offset()?;"
+        ));
+        assert!(code.contains(
+            "let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.pos, 4, \"var data field 'trailer'\")?;"
+        ));
+        assert!(code.contains("self.pos = end;"));
         // every header is read exactly once per skipped part
-        assert_eq!(code.matches("get_u32_le").count(), 1);
+        assert_eq!(code.matches("var_data_at").count(), 1);
     }
 
     #[test]
@@ -437,10 +450,9 @@ mod tests {
         let data = [info("note", 1)];
         let parts = [VarPart::Data(&data[0])];
         let code = generate_reader_parts_skip(&parts, "*self.pos");
-        assert!(code.contains("let len = self.buffer.get_u8(*self.pos) as usize;"));
         assert!(code.contains(
-            "let end = (*self.pos).checked_add(1).and_then(|start| start.checked_add(len));"
+            "let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, *self.pos, 1, \"var data field 'note'\")?;"
         ));
-        assert!(code.contains("*self.pos = self.sbe_bounded(end, \"var data field 'note'\");"));
+        assert!(code.contains("*self.pos = end;"));
     }
 }

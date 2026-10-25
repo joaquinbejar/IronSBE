@@ -117,17 +117,18 @@ pub(crate) fn generate_group_offset_walker(base_expr: &str, decoders: &[String])
     output
         .push_str("    /// O(entries) per group whose entries carry nested groups or var data.\n");
     output.push_str("    #[inline]\n");
-    output.push_str("    fn sbe_group_offset(&self, index: usize) -> usize {\n");
+    output
+        .push_str("    fn sbe_group_offset(&self, index: usize) -> Result<usize, DecodeError> {\n");
     output.push_str(&format!("        let mut pos = {base_expr};\n"));
     for (i, decoder) in decoders.iter().enumerate() {
         output.push_str(&format!("        if index == {i} {{\n"));
-        output.push_str("            return pos;\n");
+        output.push_str("            return Ok(pos);\n");
         output.push_str("        }\n");
         output.push_str(&format!(
-            "        pos = {decoder}::wrap(self.buffer, pos, self.acting_version).end_offset();\n"
+            "        pos = {decoder}::wrap(self.buffer, pos, self.acting_version)?.end_offset()?;\n"
         ));
     }
-    output.push_str("        pos\n");
+    output.push_str("        Ok(pos)\n");
     output.push_str("    }\n\n");
 
     output
@@ -160,13 +161,21 @@ pub(crate) fn generate_group_accessor(
     );
     output.push_str("    /// once per message and iterate the returned decoder.\n");
     output.push_str(&renamed_note(&snake, &accessor));
+    output.push_str("    ///\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`DecodeError::VarPartOutOfBounds`] if this group's header, or a\n",
+    );
+    output.push_str("    /// group before it, extends past the end of the buffer, and\n");
+    output
+        .push_str("    /// [`DecodeError::BlockLengthTooSmall`] if the header declares entries\n");
+    output.push_str("    /// shorter than their fields.\n");
     output.push_str("    #[inline]\n");
-    output.push_str("    #[must_use]\n");
     output.push_str(&format!(
-        "    pub fn {accessor}(&self) -> {decoder_type}<'a> {{\n"
+        "    pub fn {accessor}(&self) -> Result<{decoder_type}<'a>, DecodeError> {{\n"
     ));
     output.push_str(&format!(
-        "        {decoder_type}::wrap(self.buffer, self.sbe_group_offset({index}), self.acting_version)\n"
+        "        {decoder_type}::wrap(self.buffer, self.sbe_group_offset({index})?, self.acting_version)\n"
     ));
     output.push_str("    }\n\n");
 
@@ -191,27 +200,88 @@ pub(crate) fn generate_group_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     output.push_str("    index: u16,\n");
     output.push_str("    offset: usize,\n");
     output.push_str("    acting_version: u16,\n");
+    if !layout.is_fixed_stride() {
+        output.push_str("    /// Set once an entry failed to decode; iteration then stops.\n");
+        output.push_str("    failed: bool,\n");
+    }
     output.push_str("}\n\n");
 
     // Group decoder implementation
     output.push_str(&format!("impl<'a> {}<'a> {{\n", decoder_name));
+    let part = format!("repeating group '{}'", group.name);
+    let min_block = group
+        .fields
+        .iter()
+        .filter(|f| f.since_version == 0)
+        .map(|f| f.end_offset())
+        .max()
+        .unwrap_or(0);
+    output.push_str(&format!(
+        "    /// Part name used in error values.\n    pub(crate) const SBE_PART: &'static str = \"{part}\";\n\n"
+    ));
+    output.push_str("    /// Smallest entry block length that holds every field present in all\n");
+    output.push_str("    /// schema versions, in bytes.\n");
+    output.push_str(&format!(
+        "    pub(crate) const SBE_MIN_BLOCK: u16 = {min_block};\n\n"
+    ));
     output.push_str("    /// Wraps a buffer at the group header position.\n");
     output.push_str("    ///\n");
     output.push_str("    /// `acting_version` is the schema version the message was encoded\n");
     output.push_str("    /// with; entry fields added in a later version read as `None`.\n");
-    output.push_str("    #[must_use]\n");
+    output.push_str("    ///\n");
+    output.push_str("    /// # Errors\n");
     output.push_str(
-        "    pub fn wrap(buffer: &'a [u8], offset: usize, acting_version: u16) -> Self {\n",
+        "    /// Returns [`DecodeError::VarPartOutOfBounds`] if the group header does not\n",
     );
-    output.push_str("        let header = GroupHeader::wrap(buffer, offset);\n");
-    output.push_str("        Self {\n");
+    if layout.is_fixed_stride() {
+        output.push_str("    /// fit in the buffer or the entries it announces do not, and\n");
+    } else {
+        output.push_str("    /// fit in the buffer, and\n");
+    }
+    output.push_str(
+        "    /// [`DecodeError::BlockLengthTooSmall`] if it declares entries shorter than\n",
+    );
+    output.push_str("    /// their fields.\n");
+    output.push_str(
+        "    pub fn wrap(buffer: &'a [u8], offset: usize, acting_version: u16) -> Result<Self, DecodeError> {\n",
+    );
+    output.push_str(
+        "        let header = ironsbe_core::bounds::group_header_at(buffer, offset, Self::SBE_PART)?;\n",
+    );
+    output.push_str(
+        "        if header.num_in_group > 0 && header.block_length < Self::SBE_MIN_BLOCK {\n",
+    );
+    output.push_str("            return Err(DecodeError::BlockLengthTooSmall {\n");
+    output.push_str("                required: Self::SBE_MIN_BLOCK,\n");
+    output.push_str("                declared: header.block_length,\n");
+    output.push_str("                version: acting_version,\n");
+    output.push_str("            });\n");
+    output.push_str("        }\n");
+    output.push_str("        let first = offset + GroupHeader::ENCODED_LENGTH;\n");
+    if layout.is_fixed_stride() {
+        output.push_str("        // Fixed stride: check every entry fits up front, so iteration\n");
+        output.push_str("        // and `end_offset` cannot fail.\n");
+        output.push_str(
+            "        let total = usize::from(header.block_length).checked_mul(usize::from(header.num_in_group));\n",
+        );
+        output.push_str(
+            "        let Some(total) = total else {\n            return Err(DecodeError::VarPartOutOfBounds { part: Self::SBE_PART, required: usize::MAX, available: buffer.len() });\n        };\n",
+        );
+        output.push_str(
+            "        ironsbe_core::bounds::span_end(buffer.len(), first, total, Self::SBE_PART)?;\n",
+        );
+    }
+    output.push_str("        Ok(Self {\n");
     output.push_str("            buffer,\n");
     output.push_str("            block_length: header.block_length,\n");
     output.push_str("            count: header.num_in_group,\n");
     output.push_str("            index: 0,\n");
-    output.push_str("            offset: offset + GroupHeader::ENCODED_LENGTH,\n");
+    output.push_str("            offset: first,\n");
     output.push_str("            acting_version,\n");
-    output.push_str("        }\n");
+    if !layout.is_fixed_stride() {
+        output.push_str("            failed: false,\n");
+    }
+    output.push_str("        })\n");
     output.push_str("    }\n\n");
 
     output.push_str("    /// Returns the number of entries in the group.\n");
@@ -231,60 +301,96 @@ pub(crate) fn generate_group_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
     if layout.is_fixed_stride() {
         output.push_str("    /// Entries are exactly `blockLength` bytes, so this is O(1).\n");
         output.push_str("    ///\n");
-        output.push_str("    /// # Panics\n");
-        output.push_str("    /// Panics if the buffer is shorter than the group header claims.\n");
+        output.push_str("    /// # Errors\n");
+        output
+            .push_str("    /// Never fails: `wrap` checked that every entry fits. The `Result`\n");
+        output.push_str("    /// matches variable-stride groups.\n");
         output.push_str("    #[inline]\n");
-        output.push_str("    #[must_use]\n");
-        output.push_str("    pub fn end_offset(self) -> usize {\n");
-        output.push_str(
-            "        self.offset + self.block_length as usize * (self.count - self.index) as usize\n",
-        );
+        output.push_str("    pub fn end_offset(self) -> Result<usize, DecodeError> {\n");
+        output.push_str("        let remaining = usize::from(self.count - self.index);\n");
+        output.push_str("        Ok(self.offset + usize::from(self.block_length) * remaining)\n");
     } else {
         output.push_str(
             "    /// Entries carry nested groups or var data, so the remaining entries\n",
         );
         output.push_str("    /// are walked on the wire.\n");
         output.push_str("    ///\n");
-        output.push_str("    /// # Panics\n");
-        output.push_str("    /// Panics if the buffer is shorter than the wire lengths claim.\n");
-        output.push_str("    #[must_use]\n");
-        output.push_str("    pub fn end_offset(mut self) -> usize {\n");
-        output.push_str("        for _ in self.by_ref() {}\n");
-        output.push_str("        self.offset\n");
+        output.push_str("    /// # Errors\n");
+        output
+            .push_str("    /// Returns the first error hit while walking the remaining entries.\n");
+        output.push_str("    pub fn end_offset(mut self) -> Result<usize, DecodeError> {\n");
+        output.push_str("        for entry in self.by_ref() {\n");
+        output.push_str("            entry?;\n");
+        output.push_str("        }\n");
+        output.push_str("        Ok(self.offset)\n");
     }
     output.push_str("    }\n");
     output.push_str("}\n\n");
 
     // Iterator implementation
     output.push_str(&format!("impl<'a> Iterator for {}<'a> {{\n", decoder_name));
-    output.push_str(&format!("    type Item = {}<'a>;\n\n", entry_name));
-    output.push_str("    fn next(&mut self) -> Option<Self::Item> {\n");
-    output.push_str("        if self.index >= self.count {\n");
-    output.push_str("            return None;\n");
-    output.push_str("        }\n");
     output.push_str(&format!(
-        "        let entry = {}::wrap(self.buffer, self.offset, self.block_length, self.acting_version);\n",
+        "    type Item = Result<{}<'a>, DecodeError>;\n\n",
         entry_name
     ));
+    output.push_str("    fn next(&mut self) -> Option<Self::Item> {\n");
     if layout.is_fixed_stride() {
-        output.push_str("        self.offset += self.block_length as usize;\n");
+        output.push_str("        if self.index >= self.count {\n");
+        output.push_str("            return None;\n");
+        output.push_str("        }\n");
+        output.push_str(&format!(
+            "        let entry = {}::wrap(self.buffer, self.offset, self.block_length, self.acting_version);\n",
+            entry_name
+        ));
+        output.push_str("        self.offset += usize::from(self.block_length);\n");
+        output.push_str("        self.index += 1;\n");
+        output.push_str("        Some(Ok(entry))\n");
     } else {
-        output.push_str("        self.offset = entry.end_offset();\n");
+        output.push_str("        if self.failed || self.index >= self.count {\n");
+        output.push_str("            return None;\n");
+        output.push_str("        }\n");
+        output.push_str(
+            "        let checked = ironsbe_core::bounds::span_end(self.buffer.len(), self.offset, usize::from(self.block_length), Self::SBE_PART);\n",
+        );
+        output.push_str(&format!(
+            "        let entry = checked.map(|_| {}::wrap(self.buffer, self.offset, self.block_length, self.acting_version));\n",
+            entry_name
+        ));
+        output.push_str(
+            "        match entry.and_then(|entry| entry.end_offset().map(|end| (entry, end))) {\n",
+        );
+        output.push_str("            Ok((entry, end)) => {\n");
+        output.push_str("                self.offset = end;\n");
+        output.push_str("                self.index += 1;\n");
+        output.push_str("                Some(Ok(entry))\n");
+        output.push_str("            }\n");
+        output.push_str("            Err(err) => {\n");
+        output.push_str("                self.failed = true;\n");
+        output.push_str("                Some(Err(err))\n");
+        output.push_str("            }\n");
+        output.push_str("        }\n");
     }
-    output.push_str("        self.index += 1;\n");
-    output.push_str("        Some(entry)\n");
     output.push_str("    }\n\n");
 
     output.push_str("    fn size_hint(&self) -> (usize, Option<usize>) {\n");
-    output.push_str("        let remaining = (self.count - self.index) as usize;\n");
-    output.push_str("        (remaining, Some(remaining))\n");
+    output.push_str("        let remaining = usize::from(self.count - self.index);\n");
+    if layout.is_fixed_stride() {
+        output.push_str("        (remaining, Some(remaining))\n");
+    } else {
+        output.push_str("        if self.failed {\n");
+        output.push_str("            return (0, Some(0));\n");
+        output.push_str("        }\n");
+        output.push_str("        (remaining.min(1), Some(remaining))\n");
+    }
     output.push_str("    }\n");
     output.push_str("}\n\n");
 
-    output.push_str(&format!(
-        "impl<'a> ExactSizeIterator for {}<'a> {{}}\n\n",
-        decoder_name
-    ));
+    if layout.is_fixed_stride() {
+        output.push_str(&format!(
+            "impl<'a> ExactSizeIterator for {}<'a> {{}}\n\n",
+            decoder_name
+        ));
+    }
 
     // Entry decoder
     output.push_str(&generate_entry_decoder(ir, layout));
@@ -360,13 +466,15 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
         "    /// Byte offset just past this entry: fixed block, nested groups and var data.\n",
     );
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if the buffer is shorter than the wire lengths claim.\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`DecodeError::VarPartOutOfBounds`] if a nested group or var data\n",
+    );
+    output.push_str("    /// field of the entry extends past the end of the buffer.\n");
     output.push_str("    #[inline]\n");
-    output.push_str("    #[must_use]\n");
-    output.push_str("    pub fn end_offset(&self) -> usize {\n");
+    output.push_str("    pub fn end_offset(&self) -> Result<usize, DecodeError> {\n");
     output.push_str(&prelude);
-    output.push_str(&format!("        {end_expr}\n"));
+    output.push_str(&format!("        Ok({end_expr})\n"));
     output.push_str("    }\n");
 
     output.push_str("}\n\n");
@@ -431,8 +539,13 @@ pub(crate) fn generate_group_encoder(
         "    /// * `limit` - Parent's write cursor, positioned where the group header goes\n",
     );
     output.push_str("    /// * `count` - Number of entries to encode\n");
+    output.push_str("    ///\n");
     output.push_str(
-        "    pub fn wrap(buffer: &'a mut [u8], limit: &'a mut usize, count: u16) -> Self {\n",
+        "    /// The caller (the parent's `<group>_count`) has already checked that the\n",
+    );
+    output.push_str("    /// header fits in the buffer.\n");
+    output.push_str(
+        "    pub(crate) fn wrap(buffer: &'a mut [u8], limit: &'a mut usize, count: u16) -> Self {\n",
     );
     output.push_str("        let start = *limit;\n");
     output.push_str("        let header = GroupHeader::new(Self::BLOCK_LENGTH, count);\n");
@@ -474,24 +587,35 @@ pub(crate) fn generate_group_encoder(
         );
         output.push_str("    /// written, so this entry starts where the decoder expects it.\n");
     }
+    output.push_str("    ///\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`ironsbe_core::error::EncodeError::BufferTooShort`] if the entry's\n",
+    );
+    output.push_str("    /// fixed block does not fit in the buffer; nothing is written.\n");
     output.push_str(&format!(
-        "    pub fn next_entry(&mut self) -> Option<{}<'_>> {{\n",
+        "    pub fn next_entry(&mut self) -> Result<Option<{}<'_>>, ironsbe_core::error::EncodeError> {{\n",
         entry_name
     ));
     output.push_str("        if self.index >= self.count {\n");
-    output.push_str("            return None;\n");
+    output.push_str("            return Ok(None);\n");
     output.push_str("        }\n");
     output.push_str("        let offset = *self.limit;\n");
-    output.push_str("        *self.limit = offset + Self::BLOCK_LENGTH as usize;\n");
+    output.push_str("        let end = offset.checked_add(usize::from(Self::BLOCK_LENGTH));\n");
+    output.push_str(&format!(
+        "        ironsbe_core::bounds::ensure_capacity(self.buffer.len(), end, \"entry of repeating group '{}'\")?;\n",
+        group.name
+    ));
+    output.push_str("        *self.limit = offset + usize::from(Self::BLOCK_LENGTH);\n");
     output.push_str("        self.index += 1;\n");
     if layout.is_fixed_stride() {
         output.push_str(&format!(
-            "        Some({}::wrap(&mut *self.buffer, offset))\n",
+            "        Ok(Some({}::wrap(&mut *self.buffer, offset)))\n",
             entry_name
         ));
     } else {
         output.push_str(&format!(
-            "        Some({}::wrap(&mut *self.buffer, offset, &mut *self.limit))\n",
+            "        Ok(Some({}::wrap(&mut *self.buffer, offset, &mut *self.limit)))\n",
             entry_name
         ));
     }
@@ -563,20 +687,28 @@ pub(crate) fn generate_group_encoder_accessor(
     );
     output.push_str("    /// entry is dropped or the message is finished.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output
-        .push_str("    /// Panics if this group or a later part was already written, or if the\n");
-    output.push_str("    /// buffer is too short for the group header.\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`ironsbe_core::error::EncodeError::OutOfOrder`] if this group or a\n",
+    );
+    output.push_str("    /// later part was already written, and\n");
+    output.push_str(
+        "    /// [`ironsbe_core::error::EncodeError::BufferTooShort`] if the buffer cannot\n",
+    );
+    output.push_str(
+        "    /// hold the group header plus the empty headers of skipped parts. Nothing is\n",
+    );
+    output.push_str("    /// written on error.\n");
     output.push_str(&format!(
-        "    pub fn {}(&mut self, count: u16) -> {encoder_type}<'_> {{\n",
+        "    pub fn {}(&mut self, count: u16) -> Result<{encoder_type}<'_>, ironsbe_core::error::EncodeError> {{\n",
         group_encoder_accessor_name(group_name)
     ));
     output.push_str(&format!(
-        "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\");\n"
+        "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\", GroupHeader::ENCODED_LENGTH)?;\n"
     ));
     output.push_str(&format!("        self.written = {};\n", part_index + 1));
     output.push_str(&format!(
-        "        {encoder_type}::wrap(&mut *self.buffer, {cursor_ref}, count)\n"
+        "        Ok({encoder_type}::wrap(&mut *self.buffer, {cursor_ref}, count))\n"
     ));
     output.push_str("    }\n\n");
 
@@ -624,13 +756,13 @@ fn generate_entry_encoder(
     output.push_str(&format!("impl<'a> {}<'a> {{\n", entry_name));
     if fixed_stride {
         output.push_str("    /// Wraps an entry whose fixed block starts at `offset`.\n");
-        output.push_str("    pub fn wrap(buffer: &'a mut [u8], offset: usize) -> Self {\n");
+        output.push_str("    pub(crate) fn wrap(buffer: &'a mut [u8], offset: usize) -> Self {\n");
         output.push_str("        Self { buffer, offset }\n");
     } else {
         output.push_str("    /// Wraps an entry whose fixed block starts at `offset`, appending\n");
         output.push_str("    /// nested groups and var data at `limit`.\n");
         output.push_str(
-            "    pub fn wrap(buffer: &'a mut [u8], offset: usize, limit: &'a mut usize) -> Self {\n",
+            "    pub(crate) fn wrap(buffer: &'a mut [u8], offset: usize, limit: &'a mut usize) -> Self {\n",
         );
         output.push_str("        Self { buffer, offset, limit, written: 0 }\n");
     }
@@ -690,13 +822,21 @@ fn generate_entry_encoder_drop(entry_name: &str) -> String {
     output.push_str("    /// this entry as empty, so the following entry (or whatever follows\n");
     output.push_str("    /// the group) starts where the decoder expects it.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if the buffer is too short for the empty headers.\n");
+    output
+        .push_str("    /// If the buffer is too short for those headers, nothing is written and\n");
+    output.push_str("    /// the shared cursor is moved past the end of the buffer, so every\n");
+    output.push_str("    /// later write on the parent, including `finish()`, returns\n");
+    output.push_str("    /// [`ironsbe_core::error::EncodeError::BufferTooShort`] instead of\n");
+    output.push_str("    /// producing a malformed frame.\n");
     output.push_str("    fn drop(&mut self) {\n");
     output.push_str("        if std::thread::panicking() {\n");
     output.push_str("            return;\n");
     output.push_str("        }\n");
-    output.push_str("        self.sbe_fill_to(Self::SBE_VAR_PARTS);\n");
+    output.push_str(
+        "        if self.sbe_advance_to(Self::SBE_VAR_PARTS, \"entry trailing parts\", 0).is_err() {\n",
+    );
+    output.push_str("            *self.limit = self.buffer.len() + 1;\n");
+    output.push_str("        }\n");
     output.push_str("    }\n");
     output.push_str("}\n\n");
 
@@ -730,30 +870,42 @@ mod tests {
             ],
         );
         assert!(code.contains("let mut pos = self.offset + 8;"));
-        assert!(code.contains("if index == 0 {\n            return pos;\n        }"));
+        assert!(
+            code.contains(
+                "fn sbe_group_offset(&self, index: usize) -> Result<usize, DecodeError> {"
+            )
+        );
+        assert!(code.contains("if index == 0 {\n            return Ok(pos);\n        }"));
         assert!(code.contains(
-            "pos = a::LegsGroupDecoder::wrap(self.buffer, pos, self.acting_version).end_offset();"
+            "pos = a::LegsGroupDecoder::wrap(self.buffer, pos, self.acting_version)?.end_offset()?;"
         ));
-        assert!(code.contains("if index == 1 {\n            return pos;\n        }"));
+        assert!(code.contains("if index == 1 {\n            return Ok(pos);\n        }"));
         assert!(code.contains(
-            "pos = a::NotesGroupDecoder::wrap(self.buffer, pos, self.acting_version).end_offset();"
+            "pos = a::NotesGroupDecoder::wrap(self.buffer, pos, self.acting_version)?.end_offset()?;"
         ));
+        assert!(code.contains("        Ok(pos)\n"));
         assert!(!code.contains("group_size()"));
     }
 
     #[test]
     fn test_group_accessor_uses_walker_index() {
         let code = generate_group_accessor("fills", "FillsGroupDecoder", 1, ENTRY_RESERVED);
-        assert!(code.contains("pub fn fills(&self) -> FillsGroupDecoder<'a> {"));
+        assert!(
+            code.contains("pub fn fills(&self) -> Result<FillsGroupDecoder<'a>, DecodeError> {")
+        );
         assert!(code.contains(
-            "FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1), self.acting_version)"
+            "FillsGroupDecoder::wrap(self.buffer, self.sbe_group_offset(1)?, self.acting_version)"
         ));
     }
 
     #[test]
     fn test_group_accessor_renames_reserved_group_name() {
         let code = generate_group_accessor("decode", "m::DecodeGroupDecoder", 0, MESSAGE_RESERVED);
-        assert!(code.contains("pub fn decode_(&self) -> m::DecodeGroupDecoder<'a> {"));
+        assert!(
+            code.contains(
+                "pub fn decode_(&self) -> Result<m::DecodeGroupDecoder<'a>, DecodeError> {"
+            )
+        );
         assert!(code.contains("Renamed from `decode` to avoid the generated `decode()` method."));
     }
 
@@ -761,22 +913,34 @@ mod tests {
     fn test_group_encoder_accessor_guards_its_part_index() {
         let code =
             generate_group_encoder_accessor("fills", "FillsGroupEncoder", "&mut *self.limit", 2);
-        assert!(
-            code.contains("pub fn fills_count(&mut self, count: u16) -> FillsGroupEncoder<'_> {")
-        );
-        assert!(code.contains("self.sbe_advance_to(2, \"repeating group 'fills'\");"));
+        assert!(code.contains(
+            "pub fn fills_count(&mut self, count: u16) -> Result<FillsGroupEncoder<'_>, ironsbe_core::error::EncodeError> {"
+        ));
+        assert!(code.contains(
+            "self.sbe_advance_to(2, \"repeating group 'fills'\", GroupHeader::ENCODED_LENGTH)?;"
+        ));
         assert!(code.contains("self.written = 3;"));
         assert!(
-            code.contains("FillsGroupEncoder::wrap(&mut *self.buffer, &mut *self.limit, count)")
+            code.contains(
+                "Ok(FillsGroupEncoder::wrap(&mut *self.buffer, &mut *self.limit, count))"
+            )
         );
+        // order and header capacity are checked before the header is written
+        let guard = code.find("sbe_advance_to").expect("guard");
+        let wrap = code.find("FillsGroupEncoder::wrap").expect("header write");
+        assert!(guard < wrap);
     }
 
     #[test]
-    fn test_entry_encoder_drop_only_fills_and_skips_while_panicking() {
+    fn test_entry_encoder_drop_skips_while_panicking_then_fills_or_poisons_cursor() {
         let code = generate_entry_encoder_drop("LegsEntryEncoder");
         assert!(code.contains("impl Drop for LegsEntryEncoder<'_> {"));
         assert!(code.contains("if std::thread::panicking() {\n            return;\n        }"));
-        assert!(code.contains("self.sbe_fill_to(Self::SBE_VAR_PARTS);"));
+        assert!(code.contains(
+            "if self.sbe_advance_to(Self::SBE_VAR_PARTS, \"entry trailing parts\", 0).is_err() {"
+        ));
+        assert!(code.contains("*self.limit = self.buffer.len() + 1;"));
         assert!(!code.contains("assert!"));
+        assert!(!code.contains("panic!"));
     }
 }

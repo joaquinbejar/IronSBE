@@ -119,7 +119,7 @@ mod tests {
 </sbe:messageSchema>"#;
 
         let code = generate_from_xml(xml).expect("var data inside a group is supported");
-        assert!(code.contains("pub fn note(&self) -> &'a [u8]"));
+        assert!(code.contains("pub fn note(&self) -> Result<&'a [u8], DecodeError>"));
     }
 
     #[test]
@@ -141,7 +141,7 @@ mod tests {
 </sbe:messageSchema>"#;
 
         let code = generate_from_xml(xml).expect("codegen failed");
-        assert!(code.contains("pub fn label(&self) -> &'a [u8]"));
+        assert!(code.contains("pub fn label(&self) -> Result<&'a [u8], DecodeError>"));
         assert!(code.contains("pub fn set_label(&mut self, value: &[u8]) -> &mut Self"));
     }
 }

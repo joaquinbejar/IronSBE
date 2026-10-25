@@ -10,7 +10,7 @@
 pub use ironsbe_core::buffer::{AlignedBuffer, BufferPool, ReadBuffer, WriteBuffer};
 pub use ironsbe_core::decoder::{DecodeError, SbeDecoder};
 pub use ironsbe_core::encoder::SbeEncoder;
-pub use ironsbe_core::error::{Error as CoreError, Result as CoreResult};
+pub use ironsbe_core::error::{EncodeError, Error as CoreError, Result as CoreResult};
 pub use ironsbe_core::header::{GroupHeader, MessageHeader, VarDataHeader};
 
 // Channel types

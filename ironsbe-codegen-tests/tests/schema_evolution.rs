@@ -53,15 +53,18 @@ fn test_decode_older_version_reads_original_field_and_none_for_newer() {
     assert_eq!(decoder.acting_block_length(), V1_BLOCK);
     // The group header sits right after the 8-byte v1 block, not after the
     // 16-byte current block: walking it must not read past the buffer.
-    assert!(decoder.legs().next().is_none());
-    assert_eq!(decoder.memo(), b"ok");
-    assert_eq!(decoder.encoded_length(), bytes.len());
+    assert!(decoder.legs().expect("legs").next().is_none());
+    assert_eq!(decoder.memo().expect("memo"), b"ok");
+    assert_eq!(
+        decoder.encoded_length().expect("encoded length"),
+        bytes.len()
+    );
 
     let mut reader = EvolvedReader::decode(&bytes).expect("older version reads");
     assert_eq!(reader.ts(), 0x1122_3344_5566_7788);
     assert_eq!(reader.extra(), None);
-    assert!(reader.legs().next().is_none());
-    assert_eq!(reader.memo(), b"ok");
+    assert!(reader.legs().expect("legs").next().is_none());
+    assert_eq!(reader.memo().expect("memo"), b"ok");
 }
 
 #[test]
@@ -106,12 +109,13 @@ fn test_decode_truncated_block_claiming_older_version_is_rejected() {
 fn test_current_version_roundtrip_reads_versioned_fields_as_some() {
     let mut buf = vec![0u8; 256];
     let len = {
-        let mut enc = EvolvedEncoder::wrap(&mut buf, 0);
+        let mut enc = EvolvedEncoder::wrap(&mut buf, 0).expect("wrap Evolved");
         enc.set_ts(7).set_extra(9);
         {
-            let mut group = enc.legs_count(1);
+            let mut group = enc.legs_count(1).expect("legs group");
             group
                 .next_entry()
+                .expect("leg fits")
                 .expect("one leg")
                 .set_leg_id(42)
                 .set_ratio(3);
@@ -123,12 +127,12 @@ fn test_current_version_roundtrip_reads_versioned_fields_as_some() {
     let decoder = EvolvedDecoder::decode(&buf[..len]).expect("current version decodes");
     assert_eq!(decoder.ts(), 7);
     assert_eq!(decoder.extra(), Some(9));
-    let mut legs = decoder.legs();
-    let leg = legs.next().expect("one leg");
+    let mut legs = decoder.legs().expect("legs");
+    let leg = legs.next().expect("one leg").expect("leg decodes");
     assert_eq!(leg.leg_id(), 42);
     assert_eq!(leg.ratio(), Some(3));
     assert!(legs.next().is_none());
-    assert_eq!(decoder.memo(), b"hi");
+    assert_eq!(decoder.memo().expect("memo"), b"hi");
 }
 
 #[test]
@@ -143,8 +147,8 @@ fn test_group_entry_versioned_field_is_none_when_entry_block_is_older() {
     bytes.extend_from_slice(&0u16.to_le_bytes()); // memo length
 
     let decoder = EvolvedDecoder::decode(&bytes).expect("decodes");
-    let mut legs = decoder.legs();
-    let leg = legs.next().expect("one leg");
+    let mut legs = decoder.legs().expect("legs");
+    let leg = legs.next().expect("one leg").expect("leg decodes");
     assert_eq!(leg.leg_id(), 42);
     assert_eq!(leg.ratio(), None);
 }
@@ -165,12 +169,22 @@ fn test_group_entry_versioned_field_is_none_when_older_version_reserved_padding(
     bytes.extend_from_slice(&0u16.to_le_bytes()); // memo length
 
     let decoder = EvolvedDecoder::decode(&bytes).expect("decodes");
-    let leg = decoder.legs().next().expect("one leg");
+    let leg = decoder
+        .legs()
+        .expect("legs")
+        .next()
+        .expect("one leg")
+        .expect("leg decodes");
     assert_eq!(leg.leg_id(), 42);
     assert_eq!(leg.ratio(), None);
 
     let mut reader = EvolvedReader::decode(&bytes).expect("reads");
-    let leg = reader.legs().next().expect("one leg");
+    let leg = reader
+        .legs()
+        .expect("legs")
+        .next()
+        .expect("one leg")
+        .expect("leg decodes");
     assert_eq!(leg.leg_id(), 42);
     assert_eq!(leg.ratio(), None);
 }
@@ -187,11 +201,11 @@ fn test_entry_reader_gates_versioned_field_next_to_entry_var_data() {
     bytes.extend_from_slice(b"ab");
 
     let mut reader = TaggedLegsReader::decode(&bytes).expect("reads");
-    let mut legs = reader.legs();
-    let mut leg = legs.next_entry().expect("one leg");
+    let mut legs = reader.legs().expect("legs");
+    let mut leg = legs.next_entry().expect("leg fits").expect("one leg");
     assert_eq!(leg.leg_id(), 5);
     assert_eq!(leg.ratio(), None);
-    assert_eq!(leg.tag(), b"ab");
+    assert_eq!(leg.tag().expect("tag"), b"ab");
 }
 
 #[test]

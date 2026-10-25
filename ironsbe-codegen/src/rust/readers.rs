@@ -175,12 +175,14 @@ pub(crate) fn generate_message_reader(
     output.push_str("    /// Walks every part not read yet and returns the encoded length of\n");
     output.push_str("    /// the message in bytes: header, fixed block and variable section.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if the buffer is shorter than the wire lengths claim.\n");
-    output.push_str("    #[must_use]\n");
-    output.push_str("    pub fn finish(mut self) -> usize {\n");
-    output.push_str("        self.sbe_skip_to(Self::SBE_VAR_PARTS);\n");
-    output.push_str("        MessageHeader::ENCODED_LENGTH + (self.pos - self.offset)\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`DecodeError::VarPartOutOfBounds`] if a part not read yet extends\n",
+    );
+    output.push_str("    /// past the end of the buffer.\n");
+    output.push_str("    pub fn finish(mut self) -> Result<usize, DecodeError> {\n");
+    output.push_str("        self.sbe_skip_to(Self::SBE_VAR_PARTS)?;\n");
+    output.push_str("        Ok(MessageHeader::ENCODED_LENGTH + (self.pos - self.offset))\n");
     output.push_str("    }\n\n");
 
     output.push_str(&generate_reader_parts_skip(&parts, "self.pos"));
@@ -224,24 +226,43 @@ pub(crate) fn generate_group_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> 
     output.push_str("}\n\n");
 
     output.push_str(&format!("impl<'r, 'a> {reader_name}<'r, 'a> {{\n"));
+    let group_decoder = group.decoder_name();
     output.push_str("    /// Reads the group header at the cursor and advances past it.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if the buffer is shorter than the group header.\n");
-    output.push_str("    #[must_use]\n");
+    output.push_str("    /// # Errors\n");
     output.push_str(
-        "    pub fn wrap(buffer: &'a [u8], pos: &'r mut usize, acting_version: u16) -> Self {\n",
+        "    /// Returns [`DecodeError::VarPartOutOfBounds`] if the group header does not\n",
     );
-    output.push_str("        let header = GroupHeader::wrap(buffer, *pos);\n");
+    output.push_str(
+        "    /// fit in the buffer, and [`DecodeError::BlockLengthTooSmall`] if it declares\n",
+    );
+    output.push_str("    /// entries shorter than their fields.\n");
+    output.push_str(
+        "    pub fn wrap(buffer: &'a [u8], pos: &'r mut usize, acting_version: u16) -> Result<Self, DecodeError> {\n",
+    );
+    output.push_str(&format!(
+        "        let header = ironsbe_core::bounds::group_header_at(buffer, *pos, {group_decoder}::SBE_PART)?;\n"
+    ));
+    output.push_str(&format!(
+        "        if header.num_in_group > 0 && header.block_length < {group_decoder}::SBE_MIN_BLOCK {{\n"
+    ));
+    output.push_str("            return Err(DecodeError::BlockLengthTooSmall {\n");
+    output.push_str(&format!(
+        "                required: {group_decoder}::SBE_MIN_BLOCK,\n"
+    ));
+    output.push_str("                declared: header.block_length,\n");
+    output.push_str("                version: acting_version,\n");
+    output.push_str("            });\n");
+    output.push_str("        }\n");
     output.push_str("        *pos += GroupHeader::ENCODED_LENGTH;\n");
-    output.push_str("        Self {\n");
+    output.push_str("        Ok(Self {\n");
     output.push_str("            buffer,\n");
     output.push_str("            pos,\n");
     output.push_str("            block_length: header.block_length,\n");
     output.push_str("            acting_version,\n");
     output.push_str("            count: header.num_in_group,\n");
     output.push_str("            index: 0,\n");
-    output.push_str("        }\n");
+    output.push_str("        })\n");
     output.push_str("    }\n\n");
 
     output.push_str("    /// Returns the number of entries in the group.\n");
@@ -269,17 +290,25 @@ pub(crate) fn generate_group_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> 
     output.push_str("    /// The previous entry must be dropped first (it borrows this reader);\n");
     output.push_str("    /// on drop it walks the parts it did not read, so this entry starts\n");
     output.push_str("    /// where the wire says it does.\n");
+    output.push_str("    ///\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`DecodeError::VarPartOutOfBounds`] if the entry's fixed block\n",
+    );
+    output.push_str("    /// extends past the end of the buffer.\n");
     output.push_str(&format!(
-        "    pub fn next_entry(&mut self) -> Option<{entry_name}<'_, 'a>> {{\n"
+        "    pub fn next_entry(&mut self) -> Result<Option<{entry_name}<'_, 'a>>, DecodeError> {{\n"
     ));
     output.push_str("        if self.index >= self.count {\n");
-    output.push_str("            return None;\n");
+    output.push_str("            return Ok(None);\n");
     output.push_str("        }\n");
     output.push_str("        let offset = *self.pos;\n");
-    output.push_str("        *self.pos = offset + self.block_length as usize;\n");
+    output.push_str(&format!(
+        "        *self.pos = ironsbe_core::bounds::span_end(self.buffer.len(), offset, usize::from(self.block_length), {group_decoder}::SBE_PART)?;\n"
+    ));
     output.push_str("        self.index += 1;\n");
     output.push_str(&format!(
-        "        Some({entry_name}::wrap(self.buffer, offset, &mut *self.pos, self.block_length, self.acting_version))\n"
+        "        Ok(Some({entry_name}::wrap(self.buffer, offset, &mut *self.pos, self.block_length, self.acting_version)))\n"
     ));
     output.push_str("    }\n");
     output.push_str("}\n\n");
@@ -288,25 +317,21 @@ pub(crate) fn generate_group_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> 
     output
         .push_str("    /// Walks the entries not consumed so the cursor lands after the group.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if the buffer is shorter than the wire lengths claim.\n");
+    output.push_str("    /// If an entry extends past the buffer, the cursor is moved past the\n");
+    output.push_str("    /// end of the buffer instead, so every later read on the parent\n");
+    output.push_str("    /// returns [`DecodeError::VarPartOutOfBounds`].\n");
     output.push_str("    fn drop(&mut self) {\n");
-    output.push_str("        if std::thread::panicking() {\n");
-    output.push_str("            return;\n");
-    output.push_str("        }\n");
     output.push_str("        while self.index < self.count {\n");
     output.push_str(&format!(
-        "            let end = {entry_decoder}::wrap(self.buffer, *self.pos, self.block_length, self.acting_version).end_offset();\n"
+        "            let end = ironsbe_core::bounds::span_end(self.buffer.len(), *self.pos, usize::from(self.block_length), {group_decoder}::SBE_PART)\n                .and_then(|_| {entry_decoder}::wrap(self.buffer, *self.pos, self.block_length, self.acting_version).end_offset());\n"
     ));
-    output.push_str("            assert!(\n");
-    output.push_str("                end <= self.buffer.len(),\n");
-    output.push_str(&format!(
-        "                \"repeating group '{}' extends past the end of the buffer ({{}} bytes)\",\n",
-        group.name
-    ));
-    output.push_str("                self.buffer.len()\n");
-    output.push_str("            );\n");
-    output.push_str("            *self.pos = end;\n");
+    output.push_str("            match end {\n");
+    output.push_str("                Ok(end) => *self.pos = end,\n");
+    output.push_str("                Err(_) => {\n");
+    output.push_str("                    *self.pos = self.buffer.len() + 1;\n");
+    output.push_str("                    return;\n");
+    output.push_str("                }\n");
+    output.push_str("            }\n");
     output.push_str("            self.index += 1;\n");
     output.push_str("        }\n");
     output.push_str("    }\n");
@@ -381,13 +406,14 @@ fn generate_entry_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     output.push_str(&format!("impl Drop for {entry_name}<'_, '_> {{\n"));
     output.push_str("    /// Walks the nested groups and var data not read through this entry.\n");
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output.push_str("    /// Panics if the buffer is shorter than the wire lengths claim.\n");
+    output
+        .push_str("    /// If a part extends past the buffer, the cursor is moved past the end\n");
+    output.push_str("    /// of the buffer instead, so every later read on the parent returns\n");
+    output.push_str("    /// [`DecodeError::VarPartOutOfBounds`].\n");
     output.push_str("    fn drop(&mut self) {\n");
-    output.push_str("        if std::thread::panicking() {\n");
-    output.push_str("            return;\n");
+    output.push_str("        if self.sbe_skip_to(Self::SBE_VAR_PARTS).is_err() {\n");
+    output.push_str("            *self.pos = self.buffer.len() + 1;\n");
     output.push_str("        }\n");
-    output.push_str("        self.sbe_skip_to(Self::SBE_VAR_PARTS);\n");
     output.push_str("    }\n");
     output.push_str("}\n\n");
 
@@ -469,25 +495,29 @@ fn generate_fixed_group_accessor(
         .push_str("    /// positioned in O(1) and the cursor moves straight to the group's end.\n");
     output.push_str(&renamed_note(&snake, &accessor));
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`DecodeError::OutOfOrder`] if a later part was already read,\n",
+    );
     output
-        .push_str("    /// Panics if a later part was already read, or if the buffer is shorter\n");
-    output.push_str("    /// than the group claims.\n");
+        .push_str("    /// [`DecodeError::VarPartOutOfBounds`] if this group or a skipped part\n");
+    output.push_str(
+        "    /// extends past the end of the buffer, and [`DecodeError::BlockLengthTooSmall`]\n",
+    );
+    output.push_str("    /// if the group declares entries shorter than their fields.\n");
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
-        "    pub fn {accessor}(&mut self) -> {decoder_type}<'a> {{\n"
+        "    pub fn {accessor}(&mut self) -> Result<{decoder_type}<'a>, DecodeError> {{\n"
     ));
     output.push_str(&format!(
-        "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\");\n"
+        "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\")?;\n"
     ));
     output.push_str(&format!(
-        "        let group = {decoder_type}::wrap(self.buffer, {cursor}, self.acting_version);\n"
+        "        let group = {decoder_type}::wrap(self.buffer, {cursor}, self.acting_version)?;\n"
     ));
-    output.push_str(&format!(
-        "        {cursor} = self.sbe_bounded(Some(group.end_offset()), \"repeating group '{group_name}'\");\n"
-    ));
+    output.push_str(&format!("        {cursor} = group.end_offset()?;\n"));
     output.push_str(&format!("        self.part = {};\n", part_index + 1));
-    output.push_str("        group\n");
+    output.push_str("        Ok(group)\n");
     output.push_str("    }\n\n");
 
     output
@@ -515,16 +545,23 @@ fn generate_variable_group_accessor(
     output.push_str("    /// walked so the cursor lands right after the group.\n");
     output.push_str(&renamed_note(&snake, &accessor));
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output
-        .push_str("    /// Panics if a later part was already read, or if the buffer is shorter\n");
-    output.push_str("    /// than the group header.\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`DecodeError::OutOfOrder`] if a later part was already read,\n",
+    );
+    output.push_str(
+        "    /// [`DecodeError::VarPartOutOfBounds`] if the group header or a skipped part\n",
+    );
+    output.push_str(
+        "    /// extends past the end of the buffer, and [`DecodeError::BlockLengthTooSmall`]\n",
+    );
+    output.push_str("    /// if the group declares entries shorter than their fields.\n");
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
-        "    pub fn {accessor}(&mut self) -> {reader_type}<'_, 'a> {{\n"
+        "    pub fn {accessor}(&mut self) -> Result<{reader_type}<'_, 'a>, DecodeError> {{\n"
     ));
     output.push_str(&format!(
-        "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\");\n"
+        "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\")?;\n"
     ));
     output.push_str(&format!("        self.part = {};\n", part_index + 1));
     output.push_str(&format!(
@@ -552,47 +589,47 @@ fn generate_reader_var_data_getter(part_index: usize, info: &VarDataInfo, cursor
         .push_str("    /// Returns the raw bytes; call and ignore the result to skip the field.\n");
     output.push_str(&renamed_note(&info.accessor, &info.getter));
     output.push_str("    ///\n");
-    output.push_str("    /// # Panics\n");
-    output
-        .push_str("    /// Panics if a later part was already read, or if the buffer is shorter\n");
-    output.push_str("    /// than the length header claims.\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(
+        "    /// Returns [`DecodeError::OutOfOrder`] if a later part was already read,\n",
+    );
+    output.push_str(
+        "    /// and [`DecodeError::VarPartOutOfBounds`] if this field or a skipped part\n",
+    );
+    output.push_str("    /// extends past the end of the buffer.\n");
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
-        "    pub fn {}(&mut self) -> &'a [u8] {{\n",
+        "    pub fn {}(&mut self) -> Result<&'a [u8], DecodeError> {{\n",
         info.getter
     ));
     output.push_str(&format!(
-        "        self.sbe_advance_to({part_index}, \"var data field '{}'\");\n",
-        info.name
+        "        self.sbe_advance_to({part_index}, \"{}\")?;\n",
+        info.part_name()
     ));
     output.push_str(&format!(
-        "        let len = self.buffer.{}({cursor}) as usize;\n",
-        info.read_method
-    ));
-    output.push_str(&format!(
-        "        let start = {cursor} + {};\n",
-        info.header_length
-    ));
-    output.push_str(&format!(
-        "        let end = self.sbe_bounded(start.checked_add(len), \"var data field '{}'\");\n",
-        info.name
+        "        let (value, end) = ironsbe_core::bounds::var_data_at(self.buffer, {cursor}, {}, \"{}\")?;\n",
+        info.header_length,
+        info.part_name()
     ));
     output.push_str(&format!("        {cursor} = end;\n"));
     output.push_str(&format!("        self.part = {};\n", part_index + 1));
-    output.push_str("        &self.buffer[start..end]\n");
+    output.push_str("        Ok(value)\n");
     output.push_str("    }\n\n");
 
     output.push_str(&format!(
         "    /// Var data field `{}` as UTF-8 (empty string if not valid UTF-8).\n",
         info.name
     ));
+    output.push_str("    ///\n");
+    output.push_str("    /// # Errors\n");
+    output.push_str(&format!("    /// Same as [`Self::{}`].\n", info.getter));
     output.push_str("    #[inline]\n");
     output.push_str(&format!(
-        "    pub fn {}_as_str(&mut self) -> &'a str {{\n",
+        "    pub fn {}_as_str(&mut self) -> Result<&'a str, DecodeError> {{\n",
         info.accessor
     ));
     output.push_str(&format!(
-        "        std::str::from_utf8(self.{}()).unwrap_or(\"\")\n",
+        "        Ok(std::str::from_utf8(self.{}()?).unwrap_or(\"\"))\n",
         info.getter
     ));
     output.push_str("    }\n\n");
@@ -606,10 +643,10 @@ mod tests {
     use ironsbe_schema::ir::to_snake_case;
 
     fn info(name: &str, header_length: usize) -> VarDataInfo {
-        let (length_type, length_rust_type, read_method, write_method) = match header_length {
-            1 => ("uint8", "u8", "get_u8", "put_u8"),
-            4 => ("uint32", "u32", "get_u32_le", "put_u32_le"),
-            _ => ("uint16", "u16", "get_u16_le", "put_u16_le"),
+        let (length_type, length_rust_type, write_method) = match header_length {
+            1 => ("uint8", "u8", "put_u8"),
+            4 => ("uint32", "u32", "put_u32_le"),
+            _ => ("uint16", "u16", "put_u16_le"),
         };
         VarDataInfo {
             name: name.to_string(),
@@ -619,7 +656,6 @@ mod tests {
             length_type,
             length_rust_type,
             header_length,
-            read_method,
             write_method,
         }
     }
@@ -633,14 +669,15 @@ mod tests {
             "self.pos",
             MESSAGE_RESERVED,
         );
-        assert!(code.contains("pub fn notes(&mut self) -> example::NotesGroupDecoder<'a> {"));
-        assert!(code.contains("self.sbe_advance_to(1, \"repeating group 'notes'\");"));
-        assert!(
-            code.contains("let group = example::NotesGroupDecoder::wrap(self.buffer, self.pos, self.acting_version);")
-        );
         assert!(code.contains(
-            "self.pos = self.sbe_bounded(Some(group.end_offset()), \"repeating group 'notes'\");"
+            "pub fn notes(&mut self) -> Result<example::NotesGroupDecoder<'a>, DecodeError> {"
         ));
+        assert!(code.contains("self.sbe_advance_to(1, \"repeating group 'notes'\")?;"));
+        assert!(
+            code.contains("let group = example::NotesGroupDecoder::wrap(self.buffer, self.pos, self.acting_version)?;")
+        );
+        assert!(code.contains("self.pos = group.end_offset()?;"));
+        assert!(code.contains("Ok(group)"));
         assert!(code.contains("self.part = 2;"));
     }
 
@@ -653,8 +690,10 @@ mod tests {
             "&mut *self.pos",
             ENTRY_RESERVED,
         );
-        assert!(code.contains("pub fn fills(&mut self) -> FillsGroupReader<'_, 'a> {"));
-        assert!(code.contains("self.sbe_advance_to(0, \"repeating group 'fills'\");"));
+        assert!(code.contains(
+            "pub fn fills(&mut self) -> Result<FillsGroupReader<'_, 'a>, DecodeError> {"
+        ));
+        assert!(code.contains("self.sbe_advance_to(0, \"repeating group 'fills'\")?;"));
         assert!(code.contains("self.part = 1;"));
         assert!(
             code.contains(
@@ -666,19 +705,19 @@ mod tests {
     #[test]
     fn test_reader_var_data_getter_reads_header_once_and_advances() {
         let code = generate_reader_var_data_getter(2, &info("legTag", 2), "*self.pos");
-        assert!(code.contains("pub fn leg_tag(&mut self) -> &'a [u8] {"));
-        assert!(code.contains("self.sbe_advance_to(2, \"var data field 'legTag'\");"));
-        assert!(code.contains("let len = self.buffer.get_u16_le(*self.pos) as usize;"));
-        assert!(code.contains("let start = *self.pos + 2;"));
+        assert!(code.contains("pub fn leg_tag(&mut self) -> Result<&'a [u8], DecodeError> {"));
+        assert!(code.contains("self.sbe_advance_to(2, \"var data field 'legTag'\")?;"));
         assert!(code.contains(
-            "let end = self.sbe_bounded(start.checked_add(len), \"var data field 'legTag'\");"
+            "let (value, end) = ironsbe_core::bounds::var_data_at(self.buffer, *self.pos, 2, \"var data field 'legTag'\")?;"
         ));
         assert!(code.contains("*self.pos = end;"));
         assert!(code.contains("self.part = 3;"));
-        assert!(code.contains("&self.buffer[start..end]"));
-        assert!(code.contains("pub fn leg_tag_as_str(&mut self) -> &'a str {"));
+        assert!(code.contains("Ok(value)"));
+        assert!(
+            code.contains("pub fn leg_tag_as_str(&mut self) -> Result<&'a str, DecodeError> {")
+        );
         assert_eq!(
-            code.matches("get_u16_le").count(),
+            code.matches("var_data_at").count(),
             1,
             "one header read per call"
         );
@@ -693,7 +732,9 @@ mod tests {
             "self.pos",
             MESSAGE_RESERVED,
         );
-        assert!(code.contains("pub fn decode_(&mut self) -> m::DecodeGroupDecoder<'a> {"));
+        assert!(code.contains(
+            "pub fn decode_(&mut self) -> Result<m::DecodeGroupDecoder<'a>, DecodeError> {"
+        ));
         assert!(code.contains("Renamed from `decode` to avoid the generated `decode()` method."));
 
         let code = generate_variable_group_accessor(
@@ -703,7 +744,9 @@ mod tests {
             "&mut self.pos",
             MESSAGE_RESERVED,
         );
-        assert!(code.contains("pub fn finish_(&mut self) -> m::FinishGroupReader<'_, 'a> {"));
+        assert!(code.contains(
+            "pub fn finish_(&mut self) -> Result<m::FinishGroupReader<'_, 'a>, DecodeError> {"
+        ));
     }
 
     #[test]
@@ -711,8 +754,8 @@ mod tests {
         let mut field = info("finish", 2);
         field.getter = "finish_".to_string();
         let code = generate_reader_var_data_getter(0, &field, "self.pos");
-        assert!(code.contains("pub fn finish_(&mut self) -> &'a [u8] {"));
-        assert!(code.contains("pub fn finish_as_str(&mut self) -> &'a str {"));
+        assert!(code.contains("pub fn finish_(&mut self) -> Result<&'a [u8], DecodeError> {"));
+        assert!(code.contains("pub fn finish_as_str(&mut self) -> Result<&'a str, DecodeError> {"));
         assert!(code.contains("Renamed from `finish` to avoid the generated `finish()` method."));
     }
 }

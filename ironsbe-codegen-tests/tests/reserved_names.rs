@@ -19,19 +19,22 @@ const DECODE_BLOCK_LENGTH: usize = 2;
 
 /// Encodes a `Reserved` message and returns its encoded length in bytes.
 fn encode_reserved(buf: &mut [u8], wrap: u32, end_offsets: &[u16], finish: &[u8]) -> usize {
-    let mut encoder = ReservedEncoder::wrap(buf, 0);
+    let mut encoder = ReservedEncoder::wrap(buf, 0).expect("wrap Reserved");
     encoder.set_wrap(wrap);
     {
-        let mut group = encoder.decode_count(end_offsets.len() as u16);
+        let mut group = encoder
+            .decode_count(end_offsets.len() as u16)
+            .expect("decode group");
         for end_offset in end_offsets {
             group
                 .next_entry()
+                .expect("decode entry fits")
                 .expect("decode entry")
                 .set_end_offset(*end_offset);
         }
     }
     encoder.set_finish(finish);
-    encoder.finish()
+    encoder.finish().expect("finish")
 }
 
 #[test]
@@ -51,20 +54,29 @@ fn test_reserved_names_round_trip_through_decoder() {
 
     let decoder = ReservedDecoder::decode(&buf[..len]).expect("decode Reserved");
     assert_eq!(decoder.wrap_(), 7);
-    let entries: Vec<u16> = decoder.decode_().map(|entry| entry.end_offset_()).collect();
+    let entries: Vec<u16> = decoder
+        .decode_()
+        .expect("decode group")
+        .map(|entry| entry.expect("entry").end_offset_())
+        .collect();
     assert_eq!(entries, vec![10, 20]);
     // the generated entry end walker still exists next to the renamed getter
-    let first = decoder.decode_().next().expect("first entry");
+    let first = decoder
+        .decode_()
+        .expect("decode group")
+        .next()
+        .expect("first entry")
+        .expect("first entry decodes");
     assert_eq!(
-        first.end_offset(),
+        first.end_offset().expect("end offset"),
         MessageHeader::ENCODED_LENGTH
             + ReservedEncoder::BLOCK_LENGTH as usize
             + GroupHeader::ENCODED_LENGTH
             + DECODE_BLOCK_LENGTH
     );
-    assert_eq!(decoder.finish_(), b"done");
-    assert_eq!(decoder.finish_as_str(), "done");
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.finish_().expect("finish_"), b"done");
+    assert_eq!(decoder.finish_as_str().expect("finish_"), "done");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
@@ -74,22 +86,26 @@ fn test_reserved_names_round_trip_through_reader() {
 
     let mut reader = ReservedReader::decode(&buf[..len]).expect("read Reserved");
     assert_eq!(reader.wrap_(), 9);
-    let entries: Vec<u16> = reader.decode_().map(|entry| entry.end_offset_()).collect();
+    let entries: Vec<u16> = reader
+        .decode_()
+        .expect("decode group")
+        .map(|entry| entry.expect("entry").end_offset_())
+        .collect();
     assert_eq!(entries, vec![1]);
-    assert_eq!(reader.finish_(), b"x");
+    assert_eq!(reader.finish_().expect("finish_"), b"x");
     // the finaliser keeps its name and still returns the frame length
-    assert_eq!(reader.finish(), len);
+    assert_eq!(reader.finish().expect("finish"), len);
 }
 
 #[test]
 fn test_reserved_names_skipped_var_data_still_finishes() {
     let mut buf = [0u8; 64];
-    let mut encoder = ReservedEncoder::wrap(&mut buf, 0);
+    let mut encoder = ReservedEncoder::wrap(&mut buf, 0).expect("wrap Reserved");
     encoder.set_wrap(1);
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     let decoder = ReservedDecoder::decode(&buf[..len]).expect("decode Reserved");
-    assert!(decoder.decode_().is_empty());
-    assert_eq!(decoder.finish_(), b"");
-    assert_eq!(decoder.encoded_length(), len);
+    assert!(decoder.decode_().expect("decode group").is_empty());
+    assert_eq!(decoder.finish_().expect("finish_"), b"");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }

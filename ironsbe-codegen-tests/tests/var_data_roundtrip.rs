@@ -32,22 +32,34 @@ fn encode_example(
     label: &[u8],
     payload: &[u8],
 ) -> usize {
-    let mut encoder = ExampleEncoder::wrap(buf, 0);
+    let mut encoder = ExampleEncoder::wrap(buf, 0).expect("wrap Example");
     encoder.set_qty(qty);
     {
-        let mut group = encoder.legs_count(legs.len() as u16);
+        let mut group = encoder.legs_count(legs.len() as u16).expect("legs group");
         for (leg_id, ratio) in legs {
-            let mut entry = group.next_entry().expect("leg entry");
+            let mut entry = group.next_entry().expect("leg fits").expect("leg entry");
             entry.set_leg_id(*leg_id).set_ratio(*ratio);
         }
-        assert!(group.next_entry().is_none(), "legs group over-iterated");
+        assert!(
+            group.next_entry().expect("no error").is_none(),
+            "legs group over-iterated"
+        );
     }
     {
-        let mut group = encoder.notes_count(notes.len() as u16);
+        let mut group = encoder
+            .notes_count(notes.len() as u16)
+            .expect("notes group");
         for code in notes {
-            group.next_entry().expect("note entry").set_code(*code);
+            group
+                .next_entry()
+                .expect("note fits")
+                .expect("note entry")
+                .set_code(*code);
         }
-        assert!(group.next_entry().is_none(), "notes group over-iterated");
+        assert!(
+            group.next_entry().expect("no error").is_none(),
+            "notes group over-iterated"
+        );
     }
     encoder.set_label(label).set_payload(payload);
     encoder.encoded_length()
@@ -80,17 +92,19 @@ fn test_roundtrip_message_with_groups_and_var_data_matches() {
 
     let decoded_legs: Vec<(u64, u32)> = decoder
         .legs()
+        .expect("legs")
+        .map(|entry| entry.expect("leg"))
         .map(|entry| (entry.leg_id(), entry.ratio()))
         .collect();
     assert_eq!(decoded_legs, legs);
-    assert_eq!(decoder.notes().count(), 0);
+    assert_eq!(decoder.notes().expect("notes").count(), 0);
 
-    assert_eq!(decoder.label(), b"hello");
-    assert_eq!(decoder.label_as_str(), "hello");
-    assert_eq!(decoder.payload(), &[1, 2, 3]);
+    assert_eq!(decoder.label().expect("label"), b"hello");
+    assert_eq!(decoder.label_as_str().expect("label"), "hello");
+    assert_eq!(decoder.payload().expect("payload"), &[1, 2, 3]);
 
     assert_eq!(
-        decoder.encoded_length(),
+        decoder.encoded_length().expect("encoded length"),
         len,
         "decoder must report header + block + groups + var data"
     );
@@ -130,9 +144,13 @@ fn test_wire_layout_var_data_follows_last_group() {
 
     // the decoder reads the second group from the same place
     let decoder = ExampleDecoder::decode(&buf[..len]).expect("decode Example");
-    let codes: Vec<u16> = decoder.notes().map(|entry| entry.code()).collect();
+    let codes: Vec<u16> = decoder
+        .notes()
+        .expect("notes")
+        .map(|entry| entry.expect("note").code())
+        .collect();
     assert_eq!(codes, vec![0xBEEF]);
-    assert_eq!(decoder.payload(), &[9]);
+    assert_eq!(decoder.payload().expect("payload"), &[9]);
 }
 
 #[test]
@@ -143,10 +161,10 @@ fn test_roundtrip_empty_var_data_returns_empty_slice() {
     assert_eq!(len, expected_example_length(0, 0, 0, 0));
 
     let decoder = ExampleDecoder::decode(&buf[..len]).expect("decode Example");
-    assert!(decoder.label().is_empty());
-    assert_eq!(decoder.label_as_str(), "");
-    assert!(decoder.payload().is_empty());
-    assert_eq!(decoder.encoded_length(), len);
+    assert!(decoder.label().expect("label").is_empty());
+    assert_eq!(decoder.label_as_str().expect("label"), "");
+    assert!(decoder.payload().expect("payload").is_empty());
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
@@ -155,15 +173,15 @@ fn test_roundtrip_message_without_groups_only_var_data() {
     let mut buf = vec![0u8; 2048];
 
     let len = {
-        let mut encoder = OnlyDataEncoder::wrap(&mut buf, 0);
+        let mut encoder = OnlyDataEncoder::wrap(&mut buf, 0).expect("wrap OnlyData");
         encoder.set_blob(&blob);
         encoder.encoded_length()
     };
     assert_eq!(len, MessageHeader::ENCODED_LENGTH + U32_HEADER + blob.len());
 
     let decoder = OnlyDataDecoder::decode(&buf[..len]).expect("decode OnlyData");
-    assert_eq!(decoder.blob(), blob.as_slice());
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.blob().expect("blob"), blob.as_slice());
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
@@ -171,12 +189,16 @@ fn test_roundtrip_groups_only_encoded_length_includes_entries() {
     let mut buf = [0u8; 128];
 
     let len = {
-        let mut encoder = GroupsOnlyEncoder::wrap(&mut buf, 0);
+        let mut encoder = GroupsOnlyEncoder::wrap(&mut buf, 0).expect("wrap GroupsOnly");
         encoder.set_request_id(99);
         {
-            let mut group = encoder.items_count(3);
+            let mut group = encoder.items_count(3).expect("items group");
             for item_id in [10u64, 20, 30] {
-                group.next_entry().expect("item entry").set_item_id(item_id);
+                group
+                    .next_entry()
+                    .expect("item fits")
+                    .expect("item entry")
+                    .set_item_id(item_id);
             }
         }
         encoder.encoded_length()
@@ -188,9 +210,13 @@ fn test_roundtrip_groups_only_encoded_length_includes_entries() {
 
     let decoder = GroupsOnlyDecoder::decode(&buf[..len]).expect("decode GroupsOnly");
     assert_eq!(decoder.request_id(), 99);
-    let items: Vec<u64> = decoder.items().map(|entry| entry.item_id()).collect();
+    let items: Vec<u64> = decoder
+        .items()
+        .expect("items")
+        .map(|entry| entry.expect("item").item_id())
+        .collect();
     assert_eq!(items, vec![10, 20, 30]);
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
@@ -207,8 +233,8 @@ fn test_decoder_invalid_utf8_as_str_returns_empty() {
     let len = encode_example(&mut buf, 1, &[], &[], &[0xFF, 0xFE], b"");
 
     let decoder = ExampleDecoder::decode(&buf[..len]).expect("decode Example");
-    assert_eq!(decoder.label(), &[0xFF, 0xFE]);
-    assert_eq!(decoder.label_as_str(), "");
+    assert_eq!(decoder.label().expect("label"), &[0xFF, 0xFE]);
+    assert_eq!(decoder.label_as_str().expect("label"), "");
 }
 
 #[test]

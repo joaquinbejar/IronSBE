@@ -131,6 +131,46 @@ pub trait ReadBuffer {
         &self.as_slice()[offset..offset + len]
     }
 
+    /// Returns the `len` bytes at `offset`, or `None` if they are not all in
+    /// the buffer (including when `offset + len` overflows).
+    ///
+    /// Use it for offsets and lengths taken from the wire.
+    ///
+    /// # Arguments
+    /// * `offset` - Byte offset to start from
+    /// * `len` - Number of bytes to read
+    #[inline]
+    #[must_use]
+    fn try_get_bytes(&self, offset: usize, len: usize) -> Option<&[u8]> {
+        let end = offset.checked_add(len)?;
+        self.as_slice().get(offset..end)
+    }
+
+    /// Reads a u8 at `offset`, or `None` if it is past the end of the buffer.
+    #[inline]
+    #[must_use]
+    fn try_get_u8(&self, offset: usize) -> Option<u8> {
+        self.as_slice().get(offset).copied()
+    }
+
+    /// Reads a little-endian u16 at `offset`, or `None` if any of its 2
+    /// bytes is past the end of the buffer.
+    #[inline]
+    #[must_use]
+    fn try_get_u16_le(&self, offset: usize) -> Option<u16> {
+        let bytes = self.try_get_bytes(offset, 2)?;
+        Some(u16::from_le_bytes(bytes.try_into().ok()?))
+    }
+
+    /// Reads a little-endian u32 at `offset`, or `None` if any of its 4
+    /// bytes is past the end of the buffer.
+    #[inline]
+    #[must_use]
+    fn try_get_u32_le(&self, offset: usize) -> Option<u32> {
+        let bytes = self.try_get_bytes(offset, 4)?;
+        Some(u32::from_le_bytes(bytes.try_into().ok()?))
+    }
+
     /// Reads a fixed-length character array as a string slice.
     /// Trims null bytes from the end.
     ///
@@ -499,6 +539,30 @@ impl std::fmt::Debug for BufferPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_try_get_in_bounds_returns_values() {
+        let buf: &[u8] = &[0x01, 0x02, 0x03, 0x04, 0x05];
+        assert_eq!(buf.try_get_u8(4), Some(0x05));
+        assert_eq!(buf.try_get_u16_le(0), Some(0x0201));
+        assert_eq!(buf.try_get_u32_le(1), Some(0x0504_0302));
+        assert_eq!(buf.try_get_bytes(1, 3), Some(&[0x02, 0x03, 0x04][..]));
+        assert_eq!(buf.try_get_bytes(5, 0), Some(&[][..]));
+    }
+
+    #[test]
+    fn test_try_get_out_of_bounds_returns_none() {
+        let buf: &[u8] = &[0x01, 0x02, 0x03];
+        assert_eq!(buf.try_get_u8(3), None);
+        assert_eq!(buf.try_get_u16_le(2), None);
+        assert_eq!(buf.try_get_u32_le(0), None);
+        assert_eq!(buf.try_get_bytes(2, 2), None);
+        assert_eq!(
+            buf.try_get_bytes(usize::MAX, 2),
+            None,
+            "offset + len overflows"
+        );
+    }
 
     #[test]
     fn test_aligned_buffer_creation() {
