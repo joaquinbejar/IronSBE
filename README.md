@@ -70,10 +70,10 @@ Add IronSBE to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ironsbe = "0.1"
+ironsbe = "0.8"
 
 [build-dependencies]
-ironsbe-codegen = "0.1"
+ironsbe-codegen = "0.8"
 ```
 
 ### Define Your Schema
