@@ -301,11 +301,10 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
                     info.name
                 ));
                 output.push_str(&format!(
-                    "                let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, {cursor}, {}, \"{}\")?;\n",
+                    "                {cursor} = ironsbe_core::bounds::var_data_end(self.buffer, {cursor}, {}, \"{}\")?;\n",
                     info.header_length,
                     info.part_name()
                 ));
-                output.push_str(&format!("                {cursor} = end;\n"));
             }
         }
         output.push_str("            }\n");
@@ -438,11 +437,10 @@ mod tests {
             "self.pos = m::FlagsGroupDecoder::wrap(self.buffer, self.pos, self.acting_version)?.end_offset()?;"
         ));
         assert!(code.contains(
-            "let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.pos, 4, \"var data field 'trailer'\")?;"
+            "self.pos = ironsbe_core::bounds::var_data_end(self.buffer, self.pos, 4, \"var data field 'trailer'\")?;"
         ));
-        assert!(code.contains("self.pos = end;"));
         // every header is read exactly once per skipped part
-        assert_eq!(code.matches("var_data_at").count(), 1);
+        assert_eq!(code.matches("var_data_end").count(), 1);
     }
 
     #[test]
@@ -451,8 +449,7 @@ mod tests {
         let parts = [VarPart::Data(&data[0])];
         let code = generate_reader_parts_skip(&parts, "*self.pos");
         assert!(code.contains(
-            "let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, *self.pos, 1, \"var data field 'note'\")?;"
+            "*self.pos = ironsbe_core::bounds::var_data_end(self.buffer, *self.pos, 1, \"var data field 'note'\")?;"
         ));
-        assert!(code.contains("*self.pos = end;"));
     }
 }

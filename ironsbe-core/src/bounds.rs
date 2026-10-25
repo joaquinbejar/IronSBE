@@ -17,7 +17,7 @@ use crate::header::GroupHeader;
 /// # Errors
 /// Returns [`DecodeError::VarPartOutOfBounds`] for `part` when the span
 /// extends past the buffer or `start + len` overflows.
-#[inline]
+#[inline(always)]
 pub fn span_end(
     available: usize,
     start: usize,
@@ -58,6 +58,7 @@ pub fn var_data_at<'a>(
     header_length: usize,
     part: &'static str,
 ) -> Result<(&'a [u8], usize), DecodeError> {
+    // One bounds check per step: the header read, then the payload slice.
     let len = match header_length {
         1 => buffer.try_get_u8(pos).map(usize::from),
         2 => buffer.try_get_u16_le(pos).map(usize::from),
@@ -65,15 +66,74 @@ pub fn var_data_at<'a>(
             .try_get_u32_le(pos)
             .and_then(|len| usize::try_from(len).ok()),
     };
-    let header_end = span_end(buffer.len(), pos, header_length, part)?;
-    let Some(len) = len else {
-        return Err(out_of_bounds(part, Some(header_end), buffer.len()));
+    let span = len.and_then(|len| {
+        let start = pos.checked_add(header_length)?;
+        let end = start.checked_add(len)?;
+        Some((buffer.get(start..end)?, end))
+    });
+    match span {
+        Some(span) => Ok(span),
+        None => Err(var_data_out_of_bounds(
+            buffer,
+            pos,
+            header_length,
+            len,
+            part,
+        )),
+    }
+}
+
+/// Returns the offset just past the var data field whose length header
+/// (1, 2 or 4 bytes wide) starts at `pos`, without borrowing its payload.
+///
+/// Used to walk past fields that are not read.
+///
+/// # Errors
+/// Returns [`DecodeError::VarPartOutOfBounds`] for `part` when the length
+/// header or the payload it announces extends past the buffer.
+#[inline]
+pub fn var_data_end(
+    buffer: &[u8],
+    pos: usize,
+    header_length: usize,
+    part: &'static str,
+) -> Result<usize, DecodeError> {
+    let len = match header_length {
+        1 => buffer.try_get_u8(pos).map(usize::from),
+        2 => buffer.try_get_u16_le(pos).map(usize::from),
+        _ => buffer
+            .try_get_u32_le(pos)
+            .and_then(|len| usize::try_from(len).ok()),
     };
-    let end = span_end(buffer.len(), header_end, len, part)?;
-    let payload = buffer
-        .get(header_end..end)
-        .ok_or_else(|| out_of_bounds(part, Some(end), buffer.len()))?;
-    Ok((payload, end))
+    let end = len.and_then(|len| pos.checked_add(header_length)?.checked_add(len));
+    match end {
+        Some(end) if end <= buffer.len() => Ok(end),
+        _ => Err(var_data_out_of_bounds(
+            buffer,
+            pos,
+            header_length,
+            len,
+            part,
+        )),
+    }
+}
+
+/// Builds the error for [`var_data_at`] off the hot path.
+#[cold]
+#[inline(never)]
+fn var_data_out_of_bounds(
+    buffer: &[u8],
+    pos: usize,
+    header_length: usize,
+    len: Option<usize>,
+    part: &'static str,
+) -> DecodeError {
+    let header_end = pos.checked_add(header_length);
+    let required = match len {
+        Some(len) => header_end.and_then(|end| end.checked_add(len)),
+        None => header_end,
+    };
+    out_of_bounds(part, required, buffer.len())
 }
 
 /// Checks that a write needing `required` bytes fits a buffer of
@@ -209,6 +269,28 @@ mod tests {
                 part: PART,
                 required: 7,
                 available: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn test_var_data_end_matches_var_data_at() {
+        let buf = [2u8, 0, b'a', b'b', 7];
+        assert_eq!(var_data_end(&buf, 0, 2, PART), Ok(4));
+        assert_eq!(
+            var_data_end(&buf[..3], 0, 2, PART),
+            Err(DecodeError::VarPartOutOfBounds {
+                part: PART,
+                required: 4,
+                available: 3,
+            })
+        );
+        assert_eq!(
+            var_data_end(&buf[..1], 0, 2, PART),
+            Err(DecodeError::VarPartOutOfBounds {
+                part: PART,
+                required: 2,
+                available: 1,
             })
         );
     }

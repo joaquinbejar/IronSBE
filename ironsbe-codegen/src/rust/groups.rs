@@ -318,11 +318,22 @@ pub(crate) fn generate_group_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
         output.push_str("    /// # Errors\n");
         output
             .push_str("    /// Returns the first error hit while walking the remaining entries.\n");
-        output.push_str("    pub fn end_offset(mut self) -> Result<usize, DecodeError> {\n");
-        output.push_str("        for entry in self.by_ref() {\n");
-        output.push_str("            entry?;\n");
+        output.push_str("    pub fn end_offset(self) -> Result<usize, DecodeError> {\n");
+        output.push_str("        if self.failed {\n");
+        output.push_str(
+            "            return Err(DecodeError::VarPartOutOfBounds { part: Self::SBE_PART, required: usize::MAX, available: self.buffer.len() });\n",
+        );
         output.push_str("        }\n");
-        output.push_str("        Ok(self.offset)\n");
+        output.push_str("        let mut offset = self.offset;\n");
+        output.push_str("        for _ in self.index..self.count {\n");
+        output.push_str(
+            "            ironsbe_core::bounds::span_end(self.buffer.len(), offset, usize::from(self.block_length), Self::SBE_PART)?;\n",
+        );
+        output.push_str(&format!(
+            "            offset = {entry_name}::wrap(self.buffer, offset, self.block_length, self.acting_version).end_offset()?;\n"
+        ));
+        output.push_str("        }\n");
+        output.push_str("        Ok(offset)\n");
     }
     output.push_str("    }\n");
     output.push_str("}\n\n");
@@ -333,6 +344,7 @@ pub(crate) fn generate_group_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) ->
         "    type Item = Result<{}<'a>, DecodeError>;\n\n",
         entry_name
     ));
+    output.push_str("    #[inline]\n");
     output.push_str("    fn next(&mut self) -> Option<Self::Item> {\n");
     if layout.is_fixed_stride() {
         output.push_str("        if self.index >= self.count {\n");

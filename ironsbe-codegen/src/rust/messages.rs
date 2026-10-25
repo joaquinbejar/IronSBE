@@ -1166,9 +1166,8 @@ mod tests {
             "/// Var data field: payload",
         );
         assert!(payload.contains(
-            "let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_label_offset()?, 2, \"var data field 'label'\")?;"
+            "ironsbe_core::bounds::var_data_end(self.buffer, self.sbe_label_offset()?, 2, \"var data field 'label'\")\n"
         ));
-        assert!(payload.contains("Ok(end)"));
     }
 
     #[test]
@@ -1364,7 +1363,7 @@ mod tests {
             "/// Quote Encoder",
         );
         assert!(decoder_impl.contains(
-            "let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_payload_offset()?, 1, \"var data field 'payload'\")?;"
+            "let end = ironsbe_core::bounds::var_data_end(self.buffer, self.sbe_payload_offset()?, 1, \"var data field 'payload'\")?;"
         ));
         assert!(decoder_impl.contains("Ok(MessageHeader::ENCODED_LENGTH + (end - self.offset))"));
     }
@@ -1495,14 +1494,14 @@ mod tests {
         assert!(entry.contains("pub fn leg_tag(&self) -> Result<&'a [u8], DecodeError>"));
         assert!(entry.contains("pub fn leg_tag_as_str(&self) -> Result<&'a str, DecodeError>"));
         assert!(entry.contains(
-            "fn sbe_leg_note_offset(&self) -> Result<usize, DecodeError> {\n        let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_leg_tag_offset()?, 2, \"var data field 'legTag'\")?;\n        Ok(end)\n"
+            "fn sbe_leg_note_offset(&self) -> Result<usize, DecodeError> {\n        ironsbe_core::bounds::var_data_end(self.buffer, self.sbe_leg_tag_offset()?, 2, \"var data field 'legTag'\")\n"
         ));
         assert!(entry.contains("pub fn leg_note(&self) -> Result<&'a [u8], DecodeError>"));
         assert!(entry.contains(
             "ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_leg_note_offset()?, 1, \"var data field 'legNote'\")?;"
         ));
         assert!(entry.contains(
-            "pub fn end_offset(&self) -> Result<usize, DecodeError> {\n        let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_leg_note_offset()?, 1, \"var data field 'legNote'\")?;\n        Ok(end)\n"
+            "pub fn end_offset(&self) -> Result<usize, DecodeError> {\n        let end = ironsbe_core::bounds::var_data_end(self.buffer, self.sbe_leg_note_offset()?, 1, \"var data field 'legNote'\")?;\n        Ok(end)\n"
         ));
     }
 
@@ -1525,7 +1524,7 @@ mod tests {
         assert!(group.contains("self.failed = true;"));
         assert!(
             group.contains(
-                "pub fn end_offset(mut self) -> Result<usize, DecodeError> {\n        for entry in self.by_ref() {\n            entry?;\n        }\n        Ok(self.offset)\n"
+                "            offset = LegsEntryDecoder::wrap(self.buffer, offset, self.block_length, self.acting_version).end_offset()?;\n"
             ),
             "variable-stride group must walk its entries: {group}"
         );

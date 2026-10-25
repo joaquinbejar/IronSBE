@@ -161,12 +161,11 @@ pub(crate) fn generate_var_data_getter(
     match index.checked_sub(1).and_then(|i| var_data.get(i)) {
         Some(prev) => {
             output.push_str(&format!(
-                "        let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_{}_offset()?, {}, \"{}\")?;\n",
+                "        ironsbe_core::bounds::var_data_end(self.buffer, self.sbe_{}_offset()?, {}, \"{}\")\n",
                 prev.accessor,
                 prev.header_length,
                 prev.part_name()
             ));
-            output.push_str("        Ok(end)\n");
         }
         None if group_count > 0 => {
             output.push_str(&format!("        self.sbe_group_offset({})\n", group_count));
@@ -247,7 +246,7 @@ pub(crate) fn end_offset_parts(
     match var_data.last() {
         Some(last) => (
             format!(
-                "        let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_{}_offset()?, {}, \"{}\")?;\n",
+                "        let end = ironsbe_core::bounds::var_data_end(self.buffer, self.sbe_{}_offset()?, {}, \"{}\")?;\n",
                 last.accessor,
                 last.header_length,
                 last.part_name()
@@ -427,7 +426,7 @@ mod tests {
         let (prelude, expr) = end_offset_parts(&fields, 3, "BLOCK_END");
         assert_eq!(
             prelude,
-            "        let (_, end) = ironsbe_core::bounds::var_data_at(self.buffer, self.sbe_payload_offset()?, 1, \"var data field 'payload'\")?;\n"
+            "        let end = ironsbe_core::bounds::var_data_end(self.buffer, self.sbe_payload_offset()?, 1, \"var data field 'payload'\")?;\n"
         );
         assert_eq!(expr, "end");
     }
