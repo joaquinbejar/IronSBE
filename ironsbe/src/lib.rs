@@ -86,6 +86,7 @@ pub use ironsbe_core::{
     buffer::{AlignedBuffer, BufferPool, ReadBuffer, WriteBuffer},
     decoder::{DecodeError, SbeDecoder},
     encoder::SbeEncoder,
+    error::EncodeError,
     header::{GroupHeader, MessageHeader, VarDataHeader},
 };
 

@@ -9,6 +9,7 @@
 //! - Error types for encoding/decoding operations
 //! - Aligned buffer implementations for optimal performance
 
+pub mod bounds;
 pub mod buffer;
 pub mod decoder;
 pub mod encoder;
@@ -19,5 +20,6 @@ pub mod types;
 pub use buffer::{AlignedBuffer, BufferPool, ReadBuffer, WriteBuffer};
 pub use decoder::{DecodeError, SbeDecoder};
 pub use encoder::SbeEncoder;
-pub use error::{Error, Result, VarDataError};
+#[allow(deprecated)]
+pub use error::{EncodeError, Error, Result, VarDataError};
 pub use header::{GroupHeader, MessageHeader, VarDataHeader};

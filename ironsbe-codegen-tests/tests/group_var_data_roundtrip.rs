@@ -32,15 +32,18 @@ type Leg<'a> = (u32, &'a [u8]);
 
 /// Encodes a `Quote` message and returns its encoded length in bytes.
 fn encode_quote(buf: &mut [u8], request_id: u32, legs: &[Leg<'_>], comment: &[u8]) -> usize {
-    let mut encoder = QuoteEncoder::wrap(buf, 0);
+    let mut encoder = QuoteEncoder::wrap(buf, 0).expect("wrap");
     encoder.set_request_id(request_id);
     {
-        let mut group = encoder.legs_count(legs.len() as u16);
+        let mut group = encoder.legs_count(legs.len() as u16).expect("group");
         for (qty, tag) in legs {
-            let mut entry = group.next_entry().expect("leg entry");
+            let mut entry = group.next_entry().expect("entry fits").expect("leg entry");
             entry.set_leg_qty(*qty).set_leg_tag(tag);
         }
-        assert!(group.next_entry().is_none(), "legs group over-iterated");
+        assert!(
+            group.next_entry().expect("entry fits").is_none(),
+            "legs group over-iterated"
+        );
     }
     encoder.set_comment(comment);
     encoder.encoded_length()
@@ -63,7 +66,9 @@ fn expected_quote_length(legs: &[Leg<'_>], comment: usize) -> usize {
 fn decode_legs(decoder: &QuoteDecoder<'_>) -> Vec<(u32, Vec<u8>)> {
     decoder
         .legs()
-        .map(|entry| (entry.leg_qty(), entry.leg_tag().to_vec()))
+        .expect("legs")
+        .map(|e| e.expect("entry"))
+        .map(|entry| (entry.leg_qty(), entry.leg_tag().expect("leg_tag").to_vec()))
         .collect()
 }
 
@@ -77,13 +82,13 @@ fn test_roundtrip_group_with_single_var_data_matches() {
 
     let decoder = QuoteDecoder::decode(&buf[..len]).expect("decode Quote");
     assert_eq!(decoder.request_id(), 7);
-    assert_eq!(decoder.legs().count(), 2);
+    assert_eq!(decoder.legs().expect("legs").count(), 2);
     assert_eq!(
         decode_legs(&decoder),
         vec![(1, b"A".to_vec()), (2, b"long-tag".to_vec())]
     );
-    assert_eq!(decoder.comment(), b"c");
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.comment().expect("comment"), b"c");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
@@ -118,12 +123,12 @@ fn test_roundtrip_message_var_data_after_variable_stride_group() {
 
     let decoder = QuoteDecoder::decode(&buf[..len]).expect("decode Quote");
     assert_eq!(
-        decoder.comment(),
+        decoder.comment().expect("comment"),
         b"after",
         "message var data must start after the last entry's var data, not after blockLength * count"
     );
-    assert_eq!(decoder.comment_as_str(), "after");
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.comment_as_str().expect("comment_as_str"), "after");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
@@ -134,10 +139,10 @@ fn test_roundtrip_empty_group_with_var_data_entries() {
     assert_eq!(len, expected_quote_length(&[], 1));
 
     let decoder = QuoteDecoder::decode(&buf[..len]).expect("decode Quote");
-    assert!(decoder.legs().is_empty());
-    assert_eq!(decoder.legs().count(), 0);
-    assert_eq!(decoder.comment(), b"x");
-    assert_eq!(decoder.encoded_length(), len);
+    assert!(decoder.legs().expect("legs").is_empty());
+    assert_eq!(decoder.legs().expect("legs").count(), 0);
+    assert_eq!(decoder.comment().expect("comment"), b"x");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
@@ -151,22 +156,26 @@ fn test_entry_end_offset_matches_next_entry_start() {
         + QuoteEncoder::BLOCK_LENGTH as usize
         + GroupHeader::ENCODED_LENGTH;
 
-    let mut legs_iter = decoder.legs();
+    let mut legs_iter = decoder.legs().expect("legs").map(|e| e.expect("entry"));
     let first = legs_iter.next().expect("first leg");
     assert_eq!(
-        first.end_offset(),
+        first.end_offset().expect("end offset"),
         entries_start + LEG_BLOCK_LENGTH + U16_HEADER + 1
     );
     let second = legs_iter.next().expect("second leg");
     assert_eq!(
-        second.end_offset(),
-        first.end_offset() + LEG_BLOCK_LENGTH + U16_HEADER + 8
+        second.end_offset().expect("end offset"),
+        first.end_offset().expect("end offset") + LEG_BLOCK_LENGTH + U16_HEADER + 8
     );
     assert!(legs_iter.next().is_none());
 
     // group end == last entry end == where the message-level comment starts
-    let comment_pos = decoder.legs().end_offset();
-    assert_eq!(comment_pos, second.end_offset());
+    let comment_pos = decoder
+        .legs()
+        .expect("legs")
+        .end_offset()
+        .expect("end offset");
+    assert_eq!(comment_pos, second.end_offset().expect("end offset"));
     assert_eq!(
         &buf[comment_pos..comment_pos + U16_HEADER],
         &5u16.to_le_bytes()
@@ -176,19 +185,20 @@ fn test_entry_end_offset_matches_next_entry_start() {
 #[test]
 fn test_group_encoder_encoded_length_tracks_written_bytes() {
     let mut buf = [0u8; 128];
-    let mut encoder = QuoteEncoder::wrap(&mut buf, 0);
+    let mut encoder = QuoteEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_request_id(1);
 
     let after_block = MessageHeader::ENCODED_LENGTH + QuoteEncoder::BLOCK_LENGTH as usize;
     assert_eq!(encoder.encoded_length(), after_block);
 
     let group_len = {
-        let mut group = encoder.legs_count(2);
+        let mut group = encoder.legs_count(2).expect("group");
         assert_eq!(group.count(), 2);
         assert_eq!(group.encoded_length(), GroupHeader::ENCODED_LENGTH);
 
         group
             .next_entry()
+            .expect("entry fits")
             .expect("leg 0")
             .set_leg_qty(1)
             .set_leg_tag(b"A");
@@ -199,6 +209,7 @@ fn test_group_encoder_encoded_length_tracks_written_bytes() {
 
         group
             .next_entry()
+            .expect("entry fits")
             .expect("leg 1")
             .set_leg_qty(2)
             .set_leg_tag(b"long-tag");
@@ -231,31 +242,39 @@ type DecodedOrder = (u64, Vec<DecodedFill>, Vec<u8>);
 
 /// Encodes a `Nested` message and returns its encoded length in bytes.
 fn encode_nested(buf: &mut [u8], orders: &[Order<'_>], flags: &[u8], trailer: &[u8]) -> usize {
-    let mut encoder = NestedEncoder::wrap(buf, 0);
+    let mut encoder = NestedEncoder::wrap(buf, 0).expect("wrap");
     {
-        let mut group = encoder.orders_count(orders.len() as u16);
+        let mut group = encoder.orders_count(orders.len() as u16).expect("group");
         for (order_id, fills, memo) in orders {
-            let mut order = group.next_entry().expect("order entry");
+            let mut order = group
+                .next_entry()
+                .expect("entry fits")
+                .expect("order entry");
             order.set_order_id(*order_id);
             {
-                let mut fills_group = order.fills_count(fills.len() as u16);
+                let mut fills_group = order.fills_count(fills.len() as u16).expect("group");
                 for (fill_id, note) in fills.iter() {
                     fills_group
                         .next_entry()
+                        .expect("entry fits")
                         .expect("fill entry")
                         .set_fill_id(*fill_id)
                         .set_note(note);
                 }
-                assert!(fills_group.next_entry().is_none());
+                assert!(fills_group.next_entry().expect("entry fits").is_none());
             }
             order.set_memo(memo);
         }
-        assert!(group.next_entry().is_none());
+        assert!(group.next_entry().expect("entry fits").is_none());
     }
     {
-        let mut group = encoder.flags_count(flags.len() as u16);
+        let mut group = encoder.flags_count(flags.len() as u16).expect("group");
         for flag in flags {
-            group.next_entry().expect("flag entry").set_flag(*flag);
+            group
+                .next_entry()
+                .expect("entry fits")
+                .expect("flag entry")
+                .set_flag(*flag);
         }
     }
     encoder.set_trailer(trailer);
@@ -303,12 +322,20 @@ fn test_roundtrip_nested_group_with_var_data_in_inner_entries() {
 
     let decoded_orders: Vec<DecodedOrder> = decoder
         .orders()
+        .expect("orders")
+        .map(|e| e.expect("entry"))
         .map(|order| {
             let fills = order
                 .fills()
-                .map(|fill| (fill.fill_id(), fill.note().to_vec()))
+                .expect("fills")
+                .map(|e| e.expect("entry"))
+                .map(|fill| (fill.fill_id(), fill.note().expect("note").to_vec()))
                 .collect();
-            (order.order_id(), fills, order.memo().to_vec())
+            (
+                order.order_id(),
+                fills,
+                order.memo().expect("memo").to_vec(),
+            )
         })
         .collect();
     assert_eq!(
@@ -320,11 +347,16 @@ fn test_roundtrip_nested_group_with_var_data_in_inner_entries() {
     );
 
     // the flat group after the variable one is read from the right place
-    let decoded_flags: Vec<u8> = decoder.flags().map(|entry| entry.flag()).collect();
+    let decoded_flags: Vec<u8> = decoder
+        .flags()
+        .expect("flags")
+        .map(|e| e.expect("entry"))
+        .map(|entry| entry.flag())
+        .collect();
     assert_eq!(decoded_flags, vec![0x0A, 0x0B]);
 
-    assert_eq!(decoder.trailer(), trailer.as_slice());
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.trailer().expect("trailer"), trailer.as_slice());
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
@@ -367,10 +399,29 @@ fn test_wire_layout_second_group_follows_variable_group_end() {
 
     // decoder-side positions agree with the encoder-side layout
     let decoder = NestedDecoder::decode(&buf[..len]).expect("decode Nested");
-    assert_eq!(decoder.orders().end_offset(), flags_header);
-    let order = decoder.orders().next().expect("order");
-    assert_eq!(order.fills().end_offset(), memo_pos);
-    assert_eq!(order.end_offset(), flags_header);
+    assert_eq!(
+        decoder
+            .orders()
+            .expect("orders")
+            .end_offset()
+            .expect("end offset"),
+        flags_header
+    );
+    let order = decoder
+        .orders()
+        .expect("orders")
+        .map(|e| e.expect("entry"))
+        .next()
+        .expect("order");
+    assert_eq!(
+        order
+            .fills()
+            .expect("fills")
+            .end_offset()
+            .expect("end offset"),
+        memo_pos
+    );
+    assert_eq!(order.end_offset().expect("end offset"), flags_header);
 }
 
 #[test]
@@ -389,7 +440,12 @@ fn test_entry_invalid_utf8_as_str_returns_empty() {
     let len = encode_quote(&mut buf, 1, &[(1, &[0xFF, 0xFE])], b"");
 
     let decoder = QuoteDecoder::decode(&buf[..len]).expect("decode Quote");
-    let leg = decoder.legs().next().expect("leg");
-    assert_eq!(leg.leg_tag(), &[0xFF, 0xFE]);
-    assert_eq!(leg.leg_tag_as_str(), "");
+    let leg = decoder
+        .legs()
+        .expect("legs")
+        .map(|e| e.expect("entry"))
+        .next()
+        .expect("leg");
+    assert_eq!(leg.leg_tag().expect("leg_tag"), &[0xFF, 0xFE]);
+    assert_eq!(leg.leg_tag_as_str().expect("leg_tag_as_str"), "");
 }

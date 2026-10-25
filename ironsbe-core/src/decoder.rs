@@ -6,6 +6,7 @@ use crate::header::MessageHeader;
 
 /// Error type for decoding operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// Buffer is too short for the message.
     BufferTooShort {
@@ -59,6 +60,24 @@ pub enum DecodeError {
         declared: u16,
         /// Version the header declared (clamped to the decoder's schema version).
         version: u16,
+    },
+    /// A repeating group, group entry or var data field extends past the
+    /// end of the buffer. Its lengths come from the wire and are untrusted.
+    VarPartOutOfBounds {
+        /// The part, e.g. `var data field 'label'` or `repeating group 'legs'`.
+        part: &'static str,
+        /// Buffer size the part needs, in bytes (`usize::MAX` when the
+        /// size itself overflows).
+        required: usize,
+        /// Buffer size in bytes.
+        available: usize,
+    },
+    /// A sequential reader was asked for a part it has already read past.
+    OutOfOrder {
+        /// The part that was requested.
+        part: &'static str,
+        /// Number of variable parts already consumed by the reader.
+        read: u16,
     },
 }
 
@@ -114,6 +133,24 @@ impl std::fmt::Display for DecodeError {
                     f,
                     "block length too small: version {} requires {} bytes, header declares {}",
                     version, required, declared
+                )
+            }
+            Self::VarPartOutOfBounds {
+                part,
+                required,
+                available,
+            } => {
+                write!(
+                    f,
+                    "{} extends past the end of the buffer: required {} bytes, available {} bytes",
+                    part, required, available
+                )
+            }
+            Self::OutOfOrder { part, read } => {
+                write!(
+                    f,
+                    "{} read out of schema order (parts already read: {})",
+                    part, read
                 )
             }
         }
@@ -197,7 +234,11 @@ pub trait SbeDecoder<'a>: Sized {
     /// Returns the encoded length of the message in bytes.
     ///
     /// This includes the header and all fixed/variable portions.
-    fn encoded_length(&self) -> usize;
+    ///
+    /// # Errors
+    /// Returns [`DecodeError::VarPartOutOfBounds`] when a repeating group or
+    /// var data field claims more bytes than the buffer holds.
+    fn encoded_length(&self) -> Result<usize, DecodeError>;
 
     /// Validates that the message header matches the expected template.
     ///
@@ -231,9 +272,9 @@ pub trait SbeDecoder<'a>: Sized {
     /// A successful `decode` guarantees the header and the **root block** are
     /// present and consistent with the message's version, so every fixed
     /// field accessor is in bounds. Repeating groups and var data are read
-    /// lazily and their lengths come from the wire: a frame truncated inside
-    /// a group or var data is not detected here and panics on access. A
-    /// checked walk of the variable parts is pending.
+    /// lazily and their lengths come from the wire; generated accessors for
+    /// them check every length against the buffer and return
+    /// [`DecodeError::VarPartOutOfBounds`] instead of reading past it.
     ///
     /// # Errors
     /// Returns an error if the header is invalid, the declared block is shorter
@@ -422,8 +463,8 @@ mod tests {
             }
         }
 
-        fn encoded_length(&self) -> usize {
-            MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize
+        fn encoded_length(&self) -> Result<usize, DecodeError> {
+            Ok(MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize)
         }
     }
 
@@ -447,8 +488,8 @@ mod tests {
             Self { buffer }
         }
 
-        fn encoded_length(&self) -> usize {
-            MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize
+        fn encoded_length(&self) -> Result<usize, DecodeError> {
+            Ok(MessageHeader::ENCODED_LENGTH + Self::BLOCK_LENGTH as usize)
         }
     }
 
@@ -459,6 +500,31 @@ mod tests {
         h[4..6].copy_from_slice(&100u16.to_le_bytes());
         h[6..8].copy_from_slice(&version.to_le_bytes());
         h
+    }
+
+    #[test]
+    fn test_decode_error_var_part_out_of_bounds_display_includes_values() {
+        let err = DecodeError::VarPartOutOfBounds {
+            part: "var data field 'label'",
+            required: 40,
+            available: 32,
+        };
+        assert_eq!(
+            err.to_string(),
+            "var data field 'label' extends past the end of the buffer: required 40 bytes, available 32 bytes"
+        );
+    }
+
+    #[test]
+    fn test_decode_error_out_of_order_display_includes_values() {
+        let err = DecodeError::OutOfOrder {
+            part: "repeating group 'legs'",
+            read: 2,
+        };
+        assert_eq!(
+            err.to_string(),
+            "repeating group 'legs' read out of schema order (parts already read: 2)"
+        );
     }
 
     #[test]
@@ -568,7 +634,7 @@ mod tests {
         let result = TestDecoder::decode(buffer.as_slice());
         assert!(result.is_ok());
         let decoder = result.unwrap();
-        assert_eq!(decoder.encoded_length(), 24); // 8 header + 16 block
+        assert_eq!(decoder.encoded_length(), Ok(24)); // 8 header + 16 block
     }
 
     #[test]

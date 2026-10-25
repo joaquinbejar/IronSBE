@@ -79,18 +79,24 @@ pub enum Error {
 /// Result type alias for IronSBE core operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Error returned by the generated `try_set_<field>` var data setters.
+/// Former name of [`EncodeError`], kept for code written against 0.7.2.
+#[deprecated(since = "0.8.0", note = "renamed to `EncodeError`")]
+pub type VarDataError = EncodeError;
+
+/// Error returned by the fallible methods of generated encoders: `wrap`,
+/// `<group>_count`, `next_entry`, `try_set_<field>` and `finish`.
 ///
 /// Every check runs before anything is written, so on error the buffer
-/// and the encoder's write cursor are left unchanged.
+/// and the encoder's write cursor are left unchanged. `field` names the
+/// part concerned: a var data field (`note`), a repeating group
+/// (`repeating group 'legs'`), an entry or the message block.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum VarDataError {
+#[non_exhaustive]
+pub enum EncodeError {
     /// The value is longer than the field's length header can encode.
-    #[error(
-        "var data field '{field}': length {length} bytes exceeds the length header maximum {max}"
-    )]
+    #[error("{field}: length {length} bytes exceeds the length header maximum {max}")]
     LengthOverflow {
-        /// Schema name of the var data field.
+        /// The var data field, e.g. `var data field 'note'`.
         field: &'static str,
         /// Length of the rejected value in bytes.
         length: usize,
@@ -98,24 +104,20 @@ pub enum VarDataError {
         max: u64,
     },
 
-    /// The field, or a part after it, was already written.
-    #[error(
-        "var data field '{field}' written out of schema order (parts already written: {written})"
-    )]
+    /// The part, or a part after it, was already written.
+    #[error("{field} written out of schema order (parts already written: {written})")]
     OutOfOrder {
-        /// Schema name of the var data field.
+        /// The part being written.
         field: &'static str,
         /// Number of variable parts already written on the owner.
         written: u16,
     },
 
-    /// The buffer cannot hold the empty headers of skipped parts plus
-    /// this field's header and value.
-    #[error(
-        "var data field '{field}': buffer too short, required {required} bytes, available {available} bytes"
-    )]
+    /// The buffer cannot hold what the call would write: the part itself
+    /// plus the empty headers of any skipped parts.
+    #[error("{field}: buffer too short, required {required} bytes, available {available} bytes")]
     BufferTooShort {
-        /// Schema name of the var data field.
+        /// The part being written.
         field: &'static str,
         /// Buffer size the write needs, in bytes (`usize::MAX` when the
         /// size itself overflows).
@@ -130,9 +132,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_var_data_error_length_overflow_display_includes_values() {
-        let err = VarDataError::LengthOverflow {
-            field: "note",
+    fn test_encode_error_length_overflow_display_includes_values() {
+        let err = EncodeError::LengthOverflow {
+            field: "var data field 'note'",
             length: 256,
             max: 255,
         };
@@ -143,9 +145,9 @@ mod tests {
     }
 
     #[test]
-    fn test_var_data_error_out_of_order_display_includes_values() {
-        let err = VarDataError::OutOfOrder {
-            field: "note",
+    fn test_encode_error_out_of_order_display_includes_values() {
+        let err = EncodeError::OutOfOrder {
+            field: "var data field 'note'",
             written: 3,
         };
         assert_eq!(
@@ -155,9 +157,9 @@ mod tests {
     }
 
     #[test]
-    fn test_var_data_error_buffer_too_short_display_includes_values() {
-        let err = VarDataError::BufferTooShort {
-            field: "note",
+    fn test_encode_error_buffer_too_short_display_includes_values() {
+        let err = EncodeError::BufferTooShort {
+            field: "var data field 'note'",
             required: 40,
             available: 32,
         };

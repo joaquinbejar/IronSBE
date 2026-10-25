@@ -139,12 +139,13 @@ mod trading {
 
 use trading::{NewOrderSingleEncoder, Side};
 
-fn main() {
+fn main() -> Result<(), ironsbe_core::EncodeError> {
     // Allocate buffer (stack or pool)
     let mut buffer = [0u8; 256];
     
-    // Create encoder (writes header automatically)
-    let mut encoder = NewOrderSingleEncoder::wrap(&mut buffer, 0);
+    // Create encoder (writes header automatically; errors if the buffer
+    // cannot hold the header and fixed block)
+    let mut encoder = NewOrderSingleEncoder::wrap(&mut buffer, 0)?;
     
     // Set fields with builder pattern
     encoder
@@ -159,6 +160,7 @@ fn main() {
     
     // Send buffer[..len] over network
     println!("Encoded {} bytes", len);
+    Ok(())
 }
 ```
 
@@ -171,18 +173,15 @@ mod trading {
     include!(concat!(env!("OUT_DIR"), "/trading.rs"));
 }
 
-use trading::{NewOrderSingleDecoder, SCHEMA_VERSION};
+use trading::NewOrderSingleDecoder;
 
-fn main() {
+fn main() -> Result<(), DecodeError> {
     // Received from network
     let buffer: &[u8] = /* ... */;
     
-    // Zero-copy decode (no allocation)
-    let decoder = NewOrderSingleDecoder::wrap(
-        buffer,
-        MessageHeader::ENCODED_LENGTH,
-        SCHEMA_VERSION,
-    );
+    // Zero-copy decode (no allocation). `decode` validates the header and
+    // the fixed block, so the fixed-field getters below cannot fail.
+    let decoder = NewOrderSingleDecoder::decode(buffer)?;
     
     // Access fields directly from buffer
     println!("ClOrdId: {:?}", decoder.cl_ord_id());
@@ -190,6 +189,7 @@ fn main() {
     println!("Side: {:?}", decoder.side());
     println!("Price: {}", decoder.price());
     println!("Quantity: {}", decoder.quantity());
+    Ok(())
 }
 ```
 
@@ -198,30 +198,40 @@ fn main() {
 Groups and `<data>` fields are appended at a write cursor, in schema order.
 Call `finish()` to complete the message: any group not begun or var data
 field not set is encoded as empty (a group header with zero entries, a
-zero-length var data header), so the frame is always well-formed. Writing
-a part out of schema order, or twice, panics.
+zero-length var data header), so the frame is always well-formed.
+
+Generated codecs never panic on untrusted input or short buffers (#74):
+every operation whose lengths come from the wire or need buffer space
+returns a `Result`. Encoders return `ironsbe_core::EncodeError` (part
+written out of schema order, value too long for its length header, buffer
+too short), checked before anything is written; decoders and readers return
+`DecodeError::VarPartOutOfBounds` when a group, entry or var data field
+claims more bytes than the frame holds.
 
 ```rust
+use ironsbe_core::EncodeError;
 use trading::QuoteEncoder;
 
-fn encode(buffer: &mut [u8]) -> usize {
-    let mut encoder = QuoteEncoder::wrap(buffer, 0);
+fn encode(buffer: &mut [u8]) -> Result<usize, EncodeError> {
+    let mut encoder = QuoteEncoder::wrap(buffer, 0)?;
     encoder.set_request_id(7);
     {
-        let mut legs = encoder.legs_count(2);
-        legs.next_entry().unwrap().set_leg_qty(10).set_leg_tag(b"A");
-        legs.next_entry().unwrap().set_leg_qty(20); // legTag encoded as empty
+        let mut legs = encoder.legs_count(2)?;
+        if let Some(mut leg) = legs.next_entry()? {
+            leg.set_leg_qty(10).try_set_leg_tag(b"A")?;
+        }
+        if let Some(mut leg) = legs.next_entry()? {
+            leg.set_leg_qty(20); // legTag encoded as empty
+        }
     }
     // comment never set: encoded as empty by finish()
     encoder.finish()
 }
 ```
 
-Every var data field also gets a fallible `try_set_<field>` that returns
-`Result<&mut Self, ironsbe_core::VarDataError>` instead of panicking when
-the value is too long for its length header, the buffer is too short, or
-the field is written out of order; nothing is written on error. Crates that
-deny `clippy::panic` can drop the panicking `set_<field>` setters:
+Each var data field gets the fallible `try_set_<field>` and, by default, a
+`set_<field>` that wraps it and panics on error. Crates that deny
+`clippy::panic` can drop the panicking setters:
 
 ```rust
 use ironsbe_codegen::{GeneratorOptions, generate_from_xml_with_options};
@@ -237,21 +247,26 @@ sequential `<Message>Reader` that reads the frame front to back with one
 cursor, visiting every header exactly once:
 
 ```rust
+use ironsbe_core::decoder::DecodeError;
 use trading::QuoteReader;
 
-fn read(frame: &[u8]) -> usize {
-    let mut reader = QuoteReader::decode(frame).unwrap();
-    let request_id = reader.request_id();
+fn read(frame: &[u8]) -> Result<usize, DecodeError> {
+    let mut reader = QuoteReader::decode(frame)?;
+    let _request_id = reader.request_id();
     {
-        let mut legs = reader.legs();
-        while let Some(mut leg) = legs.next_entry() {
-            let _ = (leg.leg_qty(), leg.leg_tag());
+        let mut legs = reader.legs()?;
+        while let Some(mut leg) = legs.next_entry()? {
+            let _ = (leg.leg_qty(), leg.leg_tag()?);
         }
     }
-    let _comment = reader.comment(); // or skip it: parts not read are walked lazily
+    let _comment = reader.comment()?; // or skip it: parts not read are walked lazily
     reader.finish() // encoded length
 }
 ```
+
+The random-access decoder works the same way: `decoder.legs()?` returns a
+group iterator whose items are `Result<Entry, DecodeError>`, and var data
+getters return `Result<&[u8], DecodeError>`.
 
 On a book with 256 variable entries followed by eight var data fields the
 sequential path decodes in 375 ns (p50) against 2583 ns for random access,

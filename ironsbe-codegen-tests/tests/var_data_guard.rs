@@ -5,13 +5,15 @@
 //! a hole in the frame, so the decoder read the next entry's fixed block as
 //! a length header. Skipped parts now encode as empty (a group header with
 //! zero entries, a zero-length var data header) and out-of-order writes
-//! panic instead of corrupting the wire.
+//! fail (or panic, through the panicking `set_*` setters) instead of
+//! corrupting the wire.
 
 use ironsbe_codegen_tests::var_data::{
     ExampleDecoder, ExampleEncoder, FlatDecoder, FlatEncoder, GroupsOnlyDecoder, GroupsOnlyEncoder,
     NestedDecoder, NestedEncoder, OnlyDataDecoder, OnlyDataEncoder, QuoteDecoder, QuoteEncoder,
 };
 use ironsbe_core::decoder::SbeDecoder;
+use ironsbe_core::error::EncodeError;
 use ironsbe_core::header::{GroupHeader, MessageHeader};
 
 /// Length header width of `varStringEncoding` (uint16).
@@ -54,9 +56,9 @@ fn group_header(buf: &[u8], pos: usize) -> (u16, u16) {
 #[test]
 fn test_finish_with_every_part_skipped_encodes_empty_groups_and_var_data() {
     let mut buf = [0xAAu8; 64];
-    let mut encoder = ExampleEncoder::wrap(&mut buf, 0);
+    let mut encoder = ExampleEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_qty(7);
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     let legs_pos = block_end(ExampleEncoder::BLOCK_LENGTH);
     let notes_pos = legs_pos + GroupHeader::ENCODED_LENGTH;
@@ -75,27 +77,29 @@ fn test_finish_with_every_part_skipped_encodes_empty_groups_and_var_data() {
 
     let decoder = ExampleDecoder::decode(&buf[..len]).expect("decode Example");
     assert_eq!(decoder.qty(), 7);
-    assert!(decoder.legs().is_empty());
-    assert!(decoder.notes().is_empty());
-    assert_eq!(decoder.label(), b"");
-    assert_eq!(decoder.payload(), b"");
-    assert_eq!(decoder.encoded_length(), len);
+    assert!(decoder.legs().expect("legs").is_empty());
+    assert!(decoder.notes().expect("notes").is_empty());
+    assert_eq!(decoder.label().expect("label"), b"");
+    assert_eq!(decoder.payload().expect("payload"), b"");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_finish_fills_trailing_var_data_only() {
     let mut buf = [0u8; 64];
-    let mut encoder = ExampleEncoder::wrap(&mut buf, 0);
+    let mut encoder = ExampleEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_qty(1);
     encoder
         .legs_count(1)
+        .expect("group")
         .next_entry()
+        .expect("entry fits")
         .expect("leg")
         .set_leg_id(5)
         .set_ratio(2);
-    encoder.notes_count(0);
+    encoder.notes_count(0).expect("group");
     encoder.set_label(b"lbl");
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     assert_eq!(
         len,
@@ -108,18 +112,18 @@ fn test_finish_fills_trailing_var_data_only() {
             + U8_HEADER
     );
     let decoder = ExampleDecoder::decode(&buf[..len]).expect("decode Example");
-    assert_eq!(decoder.label(), b"lbl");
-    assert_eq!(decoder.payload(), b"");
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.label().expect("label"), b"lbl");
+    assert_eq!(decoder.payload().expect("payload"), b"");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_var_data_after_skipped_groups_writes_empty_groups_first() {
     let mut buf = [0u8; 64];
-    let mut encoder = ExampleEncoder::wrap(&mut buf, 0);
+    let mut encoder = ExampleEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_qty(1);
     encoder.set_label(b"x").set_payload(&[9]);
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     let legs_pos = block_end(ExampleEncoder::BLOCK_LENGTH);
     let notes_pos = legs_pos + GroupHeader::ENCODED_LENGTH;
@@ -130,52 +134,59 @@ fn test_var_data_after_skipped_groups_writes_empty_groups_first() {
     assert_eq!(buf[label_pos + U16_HEADER], b'x');
 
     let decoder = ExampleDecoder::decode(&buf[..len]).expect("decode Example");
-    assert!(decoder.legs().is_empty());
-    assert!(decoder.notes().is_empty());
-    assert_eq!(decoder.label(), b"x");
-    assert_eq!(decoder.payload(), &[9]);
-    assert_eq!(decoder.encoded_length(), len);
+    assert!(decoder.legs().expect("legs").is_empty());
+    assert!(decoder.notes().expect("notes").is_empty());
+    assert_eq!(decoder.label().expect("label"), b"x");
+    assert_eq!(decoder.payload().expect("payload"), &[9]);
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_group_after_skipped_group_writes_empty_group_first() {
     let mut buf = [0u8; 64];
-    let mut encoder = ExampleEncoder::wrap(&mut buf, 0);
+    let mut encoder = ExampleEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_qty(1);
     encoder
         .notes_count(1)
+        .expect("group")
         .next_entry()
+        .expect("entry fits")
         .expect("note")
         .set_code(0x1234);
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     let decoder = ExampleDecoder::decode(&buf[..len]).expect("decode Example");
-    assert!(decoder.legs().is_empty());
-    let codes: Vec<u16> = decoder.notes().map(|entry| entry.code()).collect();
+    assert!(decoder.legs().expect("legs").is_empty());
+    let codes: Vec<u16> = decoder
+        .notes()
+        .expect("notes")
+        .map(|e| e.expect("entry"))
+        .map(|entry| entry.code())
+        .collect();
     assert_eq!(codes, vec![0x1234]);
-    assert_eq!(decoder.label(), b"");
-    assert_eq!(decoder.payload(), b"");
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.label().expect("label"), b"");
+    assert_eq!(decoder.payload().expect("payload"), b"");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_only_data_message_skipped_blob_finishes_with_zero_length_header() {
     let mut buf = [0u8; 16];
-    let encoder = OnlyDataEncoder::wrap(&mut buf, 0);
-    let len = encoder.finish();
+    let encoder = OnlyDataEncoder::wrap(&mut buf, 0).expect("wrap");
+    let len = encoder.finish().expect("finish");
 
     assert_eq!(len, MessageHeader::ENCODED_LENGTH + U32_HEADER);
     let decoder = OnlyDataDecoder::decode(&buf[..len]).expect("decode OnlyData");
-    assert_eq!(decoder.blob(), b"");
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.blob().expect("blob"), b"");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_groups_only_message_skipped_group_finishes_with_empty_header() {
     let mut buf = [0u8; 32];
-    let mut encoder = GroupsOnlyEncoder::wrap(&mut buf, 0);
+    let mut encoder = GroupsOnlyEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_request_id(3);
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     assert_eq!(
         len,
@@ -183,14 +194,14 @@ fn test_groups_only_message_skipped_group_finishes_with_empty_header() {
     );
     let decoder = GroupsOnlyDecoder::decode(&buf[..len]).expect("decode GroupsOnly");
     assert_eq!(decoder.request_id(), 3);
-    assert!(decoder.items().is_empty());
-    assert_eq!(decoder.encoded_length(), len);
+    assert!(decoder.items().expect("items").is_empty());
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_flat_message_finish_equals_encoded_length() {
     let mut buf = [0u8; 32];
-    let mut encoder = FlatEncoder::wrap(&mut buf, 0);
+    let mut encoder = FlatEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_ts(42);
     let before = encoder.encoded_length();
     let len = encoder.finish();
@@ -199,23 +210,25 @@ fn test_flat_message_finish_equals_encoded_length() {
     assert_eq!(len, block_end(FlatEncoder::BLOCK_LENGTH));
     let decoder = FlatDecoder::decode(&buf[..len]).expect("decode Flat");
     assert_eq!(decoder.ts(), 42);
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_all_parts_written_output_is_byte_identical_and_finish_adds_nothing() {
     let mut buf = [0u8; 64];
-    let mut encoder = QuoteEncoder::wrap(&mut buf, 0);
+    let mut encoder = QuoteEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_request_id(7);
     encoder
         .legs_count(1)
+        .expect("group")
         .next_entry()
+        .expect("entry fits")
         .expect("leg")
         .set_leg_qty(10)
         .set_leg_tag(b"ab");
     encoder.set_comment(b"");
     let before = encoder.encoded_length();
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     // same bytes as the 0.6.0 wire-layout test in group_var_data_roundtrip.rs
     let expected: Vec<u8> = [
@@ -241,21 +254,30 @@ fn test_all_parts_written_output_is_byte_identical_and_finish_adds_nothing() {
 #[test]
 fn test_entry_skipped_var_data_does_not_corrupt_following_entries() {
     let mut buf = [0u8; 128];
-    let mut encoder = QuoteEncoder::wrap(&mut buf, 0);
+    let mut encoder = QuoteEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_request_id(1);
     {
-        let mut group = encoder.legs_count(3);
-        group.next_entry().expect("leg 0").set_leg_qty(1);
+        let mut group = encoder.legs_count(3).expect("group");
         group
             .next_entry()
+            .expect("entry fits")
+            .expect("leg 0")
+            .set_leg_qty(1);
+        group
+            .next_entry()
+            .expect("entry fits")
             .expect("leg 1")
             .set_leg_qty(2)
             .set_leg_tag(b"two");
-        group.next_entry().expect("leg 2").set_leg_qty(3);
-        assert!(group.next_entry().is_none());
+        group
+            .next_entry()
+            .expect("entry fits")
+            .expect("leg 2")
+            .set_leg_qty(3);
+        assert!(group.next_entry().expect("entry fits").is_none());
     }
     encoder.set_comment(b"c");
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     assert_eq!(
         len,
@@ -271,103 +293,123 @@ fn test_entry_skipped_var_data_does_not_corrupt_following_entries() {
     let decoder = QuoteDecoder::decode(&buf[..len]).expect("decode Quote");
     let legs: Vec<(u32, Vec<u8>)> = decoder
         .legs()
-        .map(|leg| (leg.leg_qty(), leg.leg_tag().to_vec()))
+        .expect("legs")
+        .map(|e| e.expect("entry"))
+        .map(|leg| (leg.leg_qty(), leg.leg_tag().expect("leg_tag").to_vec()))
         .collect();
     assert_eq!(
         legs,
         vec![(1, Vec::new()), (2, b"two".to_vec()), (3, Vec::new())]
     );
-    assert_eq!(decoder.comment(), b"c");
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.comment().expect("comment"), b"c");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_entry_skipped_nested_group_writes_empty_group_header() {
     let mut buf = [0u8; 128];
-    let mut encoder = NestedEncoder::wrap(&mut buf, 0);
+    let mut encoder = NestedEncoder::wrap(&mut buf, 0).expect("wrap");
     {
-        let mut group = encoder.orders_count(1);
-        let mut order = group.next_entry().expect("order");
+        let mut group = encoder.orders_count(1).expect("group");
+        let mut order = group.next_entry().expect("entry fits").expect("order");
         order.set_order_id(9);
         order.set_memo(b"m");
     }
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     let fills_pos =
         block_end(NestedEncoder::BLOCK_LENGTH) + GroupHeader::ENCODED_LENGTH + ORDER_BLOCK_LENGTH;
     assert_eq!(group_header(&buf, fills_pos), (FILL_BLOCK_LENGTH as u16, 0));
 
     let decoder = NestedDecoder::decode(&buf[..len]).expect("decode Nested");
-    let order = decoder.orders().next().expect("order");
+    let order = decoder
+        .orders()
+        .expect("orders")
+        .map(|e| e.expect("entry"))
+        .next()
+        .expect("order");
     assert_eq!(order.order_id(), 9);
-    assert!(order.fills().is_empty());
-    assert_eq!(order.memo(), b"m");
+    assert!(order.fills().expect("fills").is_empty());
+    assert_eq!(order.memo().expect("memo"), b"m");
     assert!(
-        decoder.flags().is_empty(),
+        decoder.flags().expect("flags").is_empty(),
         "skipped flags group encoded empty"
     );
-    assert_eq!(decoder.trailer(), b"", "skipped trailer encoded empty");
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(
+        decoder.trailer().expect("trailer"),
+        b"",
+        "skipped trailer encoded empty"
+    );
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_entry_dropped_immediately_encodes_every_part_empty() {
     let mut buf = [0u8; 128];
-    let mut encoder = NestedEncoder::wrap(&mut buf, 0);
+    let mut encoder = NestedEncoder::wrap(&mut buf, 0).expect("wrap");
     {
-        let mut group = encoder.orders_count(2);
-        group.next_entry();
-        group.next_entry();
-        assert!(group.next_entry().is_none());
+        let mut group = encoder.orders_count(2).expect("group");
+        group.next_entry().expect("entry fits");
+        group.next_entry().expect("entry fits");
+        assert!(group.next_entry().expect("entry fits").is_none());
         assert_eq!(
             group.encoded_length(),
             GroupHeader::ENCODED_LENGTH
                 + 2 * (ORDER_BLOCK_LENGTH + GroupHeader::ENCODED_LENGTH + U16_HEADER)
         );
     }
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     let decoder = NestedDecoder::decode(&buf[..len]).expect("decode Nested");
     let orders: Vec<(u64, usize, Vec<u8>)> = decoder
         .orders()
+        .expect("orders")
+        .map(|e| e.expect("entry"))
         .map(|order| {
             (
                 order.order_id(),
-                order.fills().count(),
-                order.memo().to_vec(),
+                order.fills().expect("fills").count(),
+                order.memo().expect("memo").to_vec(),
             )
         })
         .collect();
     assert_eq!(orders, vec![(0, 0, Vec::new()), (0, 0, Vec::new())]);
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_inner_entry_skipped_var_data_keeps_outer_entries_aligned() {
     let mut buf = [0u8; 256];
-    let mut encoder = NestedEncoder::wrap(&mut buf, 0);
+    let mut encoder = NestedEncoder::wrap(&mut buf, 0).expect("wrap");
     {
-        let mut orders = encoder.orders_count(2);
+        let mut orders = encoder.orders_count(2).expect("group");
         {
-            let mut order = orders.next_entry().expect("order 0");
+            let mut order = orders.next_entry().expect("entry fits").expect("order 0");
             order.set_order_id(1);
             {
-                let mut fills = order.fills_count(2);
+                let mut fills = order.fills_count(2).expect("group");
                 fills
                     .next_entry()
+                    .expect("entry fits")
                     .expect("fill 0")
                     .set_fill_id(11)
                     .set_note(&[1, 2]);
-                fills.next_entry().expect("fill 1").set_fill_id(12);
+                fills
+                    .next_entry()
+                    .expect("entry fits")
+                    .expect("fill 1")
+                    .set_fill_id(12);
             }
             order.set_memo(b"first");
         }
         {
-            let mut order = orders.next_entry().expect("order 1");
+            let mut order = orders.next_entry().expect("entry fits").expect("order 1");
             order.set_order_id(2);
             order
                 .fills_count(1)
+                .expect("group")
                 .next_entry()
+                .expect("entry fits")
                 .expect("fill")
                 .set_fill_id(21)
                 .set_note(&[3]);
@@ -376,21 +418,31 @@ fn test_inner_entry_skipped_var_data_keeps_outer_entries_aligned() {
     }
     encoder
         .flags_count(1)
+        .expect("group")
         .next_entry()
+        .expect("entry fits")
         .expect("flag")
         .set_flag(0xFF);
     encoder.set_trailer(b"t");
-    let len = encoder.finish();
+    let len = encoder.finish().expect("finish");
 
     let decoder = NestedDecoder::decode(&buf[..len]).expect("decode Nested");
     let orders: Vec<DecodedOrder> = decoder
         .orders()
+        .expect("orders")
+        .map(|e| e.expect("entry"))
         .map(|order| {
             let fills = order
                 .fills()
-                .map(|fill| (fill.fill_id(), fill.note().to_vec()))
+                .expect("fills")
+                .map(|e| e.expect("entry"))
+                .map(|fill| (fill.fill_id(), fill.note().expect("note").to_vec()))
                 .collect();
-            (order.order_id(), fills, order.memo().to_vec())
+            (
+                order.order_id(),
+                fills,
+                order.memo().expect("memo").to_vec(),
+            )
         })
         .collect();
     assert_eq!(
@@ -404,19 +456,24 @@ fn test_inner_entry_skipped_var_data_keeps_outer_entries_aligned() {
             (2, vec![(21, vec![3])], b"second".to_vec()),
         ]
     );
-    let flags: Vec<u8> = decoder.flags().map(|entry| entry.flag()).collect();
+    let flags: Vec<u8> = decoder
+        .flags()
+        .expect("flags")
+        .map(|e| e.expect("entry"))
+        .map(|entry| entry.flag())
+        .collect();
     assert_eq!(flags, vec![0xFF]);
-    assert_eq!(decoder.trailer(), b"t");
-    assert_eq!(decoder.encoded_length(), len);
+    assert_eq!(decoder.trailer().expect("trailer"), b"t");
+    assert_eq!(decoder.encoded_length().expect("encoded length"), len);
 }
 
 #[test]
 fn test_entry_drop_while_panicking_writes_nothing() {
     let mut buf = [0xAAu8; 64];
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut encoder = QuoteEncoder::wrap(&mut buf, 0);
-        let mut group = encoder.legs_count(1);
-        let _entry = group.next_entry().expect("leg");
+        let mut encoder = QuoteEncoder::wrap(&mut buf, 0).expect("wrap");
+        let mut group = encoder.legs_count(1).expect("group");
+        let _entry = group.next_entry().expect("entry fits").expect("leg");
         panic!("caller panics while an entry encoder is alive");
     }));
     assert!(result.is_err());
@@ -436,7 +493,7 @@ fn test_entry_drop_while_panicking_writes_nothing() {
 #[should_panic(expected = "var data field 'label' written out of schema order")]
 fn test_message_var_data_written_out_of_order_panics() {
     let mut buf = [0u8; 64];
-    let mut encoder = ExampleEncoder::wrap(&mut buf, 0);
+    let mut encoder = ExampleEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_payload(&[1]).set_label(b"late");
 }
 
@@ -444,45 +501,60 @@ fn test_message_var_data_written_out_of_order_panics() {
 #[should_panic(expected = "var data field 'label' written out of schema order")]
 fn test_message_var_data_written_twice_panics() {
     let mut buf = [0u8; 64];
-    let mut encoder = ExampleEncoder::wrap(&mut buf, 0);
+    let mut encoder = ExampleEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_label(b"once").set_label(b"twice");
 }
 
 #[test]
-#[should_panic(expected = "repeating group 'legs' written out of schema order")]
-fn test_group_begun_after_var_data_panics() {
+fn test_group_begun_after_var_data_returns_err() {
     let mut buf = [0u8; 64];
-    let mut encoder = QuoteEncoder::wrap(&mut buf, 0);
+    let mut encoder = QuoteEncoder::wrap(&mut buf, 0).expect("wrap");
     encoder.set_comment(b"c");
-    encoder.legs_count(0);
+    assert!(matches!(
+        encoder.legs_count(0).map(|_| ()),
+        Err(EncodeError::OutOfOrder {
+            field: "repeating group 'legs'",
+            written: 2,
+        })
+    ));
 }
 
 #[test]
-#[should_panic(expected = "repeating group 'legs' written out of schema order")]
-fn test_group_begun_twice_panics() {
+fn test_group_begun_twice_returns_err() {
     let mut buf = [0u8; 64];
-    let mut encoder = ExampleEncoder::wrap(&mut buf, 0);
-    encoder.legs_count(0);
-    encoder.legs_count(0);
+    let mut encoder = ExampleEncoder::wrap(&mut buf, 0).expect("wrap");
+    encoder.legs_count(0).expect("group");
+    assert!(matches!(
+        encoder.legs_count(0).map(|_| ()),
+        Err(EncodeError::OutOfOrder {
+            field: "repeating group 'legs'",
+            written: 1,
+        })
+    ));
 }
 
 #[test]
 #[should_panic(expected = "var data field 'legTag' written out of schema order")]
 fn test_entry_var_data_written_twice_panics() {
     let mut buf = [0u8; 64];
-    let mut encoder = QuoteEncoder::wrap(&mut buf, 0);
-    let mut group = encoder.legs_count(1);
-    let mut entry = group.next_entry().expect("leg");
+    let mut encoder = QuoteEncoder::wrap(&mut buf, 0).expect("wrap");
+    let mut group = encoder.legs_count(1).expect("group");
+    let mut entry = group.next_entry().expect("entry fits").expect("leg");
     entry.set_leg_tag(b"a").set_leg_tag(b"b");
 }
 
 #[test]
-#[should_panic(expected = "repeating group 'fills' written out of schema order")]
-fn test_entry_nested_group_after_var_data_panics() {
+fn test_entry_nested_group_after_var_data_returns_err() {
     let mut buf = [0u8; 64];
-    let mut encoder = NestedEncoder::wrap(&mut buf, 0);
-    let mut group = encoder.orders_count(1);
-    let mut order = group.next_entry().expect("order");
+    let mut encoder = NestedEncoder::wrap(&mut buf, 0).expect("wrap");
+    let mut group = encoder.orders_count(1).expect("group");
+    let mut order = group.next_entry().expect("entry fits").expect("order");
     order.set_memo(b"m");
-    order.fills_count(0);
+    assert!(matches!(
+        order.fills_count(0).map(|_| ()),
+        Err(EncodeError::OutOfOrder {
+            field: "repeating group 'fills'",
+            written: 2,
+        })
+    ));
 }

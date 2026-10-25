@@ -51,13 +51,14 @@ const TRAILING_FIELDS: [&[u8]; 8] = [
 
 /// Encodes a `Book` with `levels` entries and returns its length in bytes.
 fn encode_book(buf: &mut [u8], levels: u16) -> usize {
-    let mut encoder = BookEncoder::wrap(buf, 0);
+    let mut encoder = BookEncoder::wrap(buf, 0).expect("buffer holds the Book block");
     encoder.set_seq(1);
     {
-        let mut group = encoder.levels_count(levels);
+        let mut group = encoder.levels_count(levels).expect("levels header fits");
         for i in 0..levels {
             group
                 .next_entry()
+                .expect("level entry fits")
                 .expect("level entry")
                 .set_price(i64::from(i) * 100)
                 .set_size(u64::from(i) + 1)
@@ -73,7 +74,7 @@ fn encode_book(buf: &mut [u8], levels: u16) -> usize {
         .set_target(TRAILING_FIELDS[5])
         .set_tag(TRAILING_FIELDS[6])
         .set_trailer(TRAILING_FIELDS[7]);
-    encoder.finish()
+    encoder.finish().expect("trailing headers fit")
 }
 
 /// Folds `bytes` into `acc` so the compiler cannot drop the read.
@@ -87,20 +88,21 @@ fn fold(acc: u64, bytes: &[u8]) -> u64 {
 fn decode_random_access(frame: &[u8]) -> u64 {
     let decoder = BookDecoder::decode(frame).expect("decode Book");
     let mut acc = decoder.seq();
-    for level in decoder.levels() {
+    for level in decoder.levels().expect("levels") {
+        let level = level.expect("level");
         acc ^= level.price() as u64;
         acc ^= level.size();
-        acc = fold(acc, level.venue());
+        acc = fold(acc, level.venue().expect("venue"));
     }
-    acc = fold(acc, decoder.symbol());
-    acc = fold(acc, decoder.account());
-    acc = fold(acc, decoder.cl_ord_id());
-    acc = fold(acc, decoder.text());
-    acc = fold(acc, decoder.source());
-    acc = fold(acc, decoder.target());
-    acc = fold(acc, decoder.tag());
-    acc = fold(acc, decoder.trailer());
-    acc ^ decoder.encoded_length() as u64
+    acc = fold(acc, decoder.symbol().expect("symbol"));
+    acc = fold(acc, decoder.account().expect("account"));
+    acc = fold(acc, decoder.cl_ord_id().expect("clOrdId"));
+    acc = fold(acc, decoder.text().expect("text"));
+    acc = fold(acc, decoder.source().expect("source"));
+    acc = fold(acc, decoder.target().expect("target"));
+    acc = fold(acc, decoder.tag().expect("tag"));
+    acc = fold(acc, decoder.trailer().expect("trailer"));
+    acc ^ decoder.encoded_length().expect("encoded length") as u64
 }
 
 /// Reads every field of the frame through the sequential reader.
@@ -109,22 +111,22 @@ fn decode_sequential(frame: &[u8]) -> u64 {
     let mut reader = BookReader::decode(frame).expect("read Book");
     let mut acc = reader.seq();
     {
-        let mut levels = reader.levels();
-        while let Some(mut level) = levels.next_entry() {
+        let mut levels = reader.levels().expect("levels");
+        while let Some(mut level) = levels.next_entry().expect("level") {
             acc ^= level.price() as u64;
             acc ^= level.size();
-            acc = fold(acc, level.venue());
+            acc = fold(acc, level.venue().expect("venue"));
         }
     }
-    acc = fold(acc, reader.symbol());
-    acc = fold(acc, reader.account());
-    acc = fold(acc, reader.cl_ord_id());
-    acc = fold(acc, reader.text());
-    acc = fold(acc, reader.source());
-    acc = fold(acc, reader.target());
-    acc = fold(acc, reader.tag());
-    acc = fold(acc, reader.trailer());
-    acc ^ reader.finish() as u64
+    acc = fold(acc, reader.symbol().expect("symbol"));
+    acc = fold(acc, reader.account().expect("account"));
+    acc = fold(acc, reader.cl_ord_id().expect("clOrdId"));
+    acc = fold(acc, reader.text().expect("text"));
+    acc = fold(acc, reader.source().expect("source"));
+    acc = fold(acc, reader.target().expect("target"));
+    acc = fold(acc, reader.tag().expect("tag"));
+    acc = fold(acc, reader.trailer().expect("trailer"));
+    acc ^ reader.finish().expect("finish") as u64
 }
 
 /// Times each call of `decode` on `frame` and returns the nanoseconds per
