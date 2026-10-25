@@ -247,7 +247,11 @@ fn test_try_set_colliding_without_panicking_setters_compiles() {
 
     let mut buf = [0u8; 128];
     let mut encoder = SetterCollisionEncoder::wrap(&mut buf, 0).expect("wrap");
-    let _orders = encoder.try_set_order_count(0).expect("orders group");
+    drop(
+        encoder
+            .try_set_order_count(0)
+            .expect("empty group header fits"),
+    );
     encoder.try_set_order_count_(b"o").expect("order note fits");
     assert!(encoder.encoded_length() > 0);
 }

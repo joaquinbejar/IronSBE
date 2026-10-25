@@ -48,6 +48,9 @@ pub fn group_header_at(
 /// Reads the var data field whose length header (1, 2 or 4 bytes wide)
 /// starts at `pos`, and returns its payload plus the offset just past it.
 ///
+/// `header_length` must be 1, 2 or 4, the SBE length encodings the
+/// generator emits; any other value is read as a 4-byte header.
+///
 /// # Errors
 /// Returns [`DecodeError::VarPartOutOfBounds`] for `part` when the length
 /// header or the payload it announces extends past the buffer.
@@ -58,6 +61,7 @@ pub fn var_data_at<'a>(
     header_length: usize,
     part: &'static str,
 ) -> Result<(&'a [u8], usize), DecodeError> {
+    debug_assert!(matches!(header_length, 1 | 2 | 4));
     // One bounds check per step: the header read, then the payload slice.
     let len = match header_length {
         1 => buffer.try_get_u8(pos).map(usize::from),
@@ -86,6 +90,8 @@ pub fn var_data_at<'a>(
 /// Returns the offset just past the var data field whose length header
 /// (1, 2 or 4 bytes wide) starts at `pos`, without borrowing its payload.
 ///
+/// `header_length` must be 1, 2 or 4, as for [`var_data_at`].
+///
 /// Used to walk past fields that are not read.
 ///
 /// # Errors
@@ -98,6 +104,7 @@ pub fn var_data_end(
     header_length: usize,
     part: &'static str,
 ) -> Result<usize, DecodeError> {
+    debug_assert!(matches!(header_length, 1 | 2 | 4));
     let len = match header_length {
         1 => buffer.try_get_u8(pos).map(usize::from),
         2 => buffer.try_get_u16_le(pos).map(usize::from),

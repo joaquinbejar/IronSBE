@@ -182,6 +182,12 @@ pub(crate) fn generate_message_reader(
     output.push_str("    /// past the end of the buffer.\n");
     output.push_str("    pub fn finish(mut self) -> Result<usize, DecodeError> {\n");
     output.push_str("        self.sbe_skip_to(Self::SBE_VAR_PARTS)?;\n");
+    output.push_str("        // A dropped group or entry reader that could not walk its parts\n");
+    output.push_str("        // leaves the cursor past the buffer: report it here.\n");
+    output.push_str(&format!(
+        "        ironsbe_core::bounds::span_end(self.buffer.len(), self.pos, 0, \"message '{}'\")?;\n",
+        msg.name
+    ));
     output.push_str("        Ok(MessageHeader::ENCODED_LENGTH + (self.pos - self.offset))\n");
     output.push_str("    }\n\n");
 
@@ -457,7 +463,9 @@ fn generate_reader_part_accessors(
                     output.push_str(&generate_variable_group_accessor(
                         index,
                         name,
+                        decoder_type,
                         reader_type,
+                        cursor,
                         cursor_ref,
                         reserved,
                     ));
@@ -528,7 +536,9 @@ fn generate_fixed_group_accessor(
 fn generate_variable_group_accessor(
     part_index: usize,
     group_name: &str,
+    decoder_type: &str,
     reader_type: &str,
+    cursor: &str,
     cursor_ref: &str,
     reserved: &[&str],
 ) -> String {
@@ -562,6 +572,11 @@ fn generate_variable_group_accessor(
     ));
     output.push_str(&format!(
         "        self.sbe_advance_to({part_index}, \"repeating group '{group_name}'\")?;\n"
+    ));
+    output.push_str("        // Validate the header before marking the group consumed, so a\n");
+    output.push_str("        // rejected group is still pending for `finish()` and later parts.\n");
+    output.push_str(&format!(
+        "        {decoder_type}::wrap(self.buffer, {cursor}, self.acting_version)?;\n"
     ));
     output.push_str(&format!("        self.part = {};\n", part_index + 1));
     output.push_str(&format!(
@@ -686,7 +701,9 @@ mod tests {
         let code = generate_variable_group_accessor(
             0,
             "fills",
+            "FillsGroupDecoder",
             "FillsGroupReader",
+            "*self.pos",
             "&mut *self.pos",
             ENTRY_RESERVED,
         );
@@ -700,6 +717,12 @@ mod tests {
                 "FillsGroupReader::wrap(self.buffer, &mut *self.pos, self.acting_version)"
             )
         );
+        // the header is validated before the group is marked consumed
+        let check = code
+            .find("FillsGroupDecoder::wrap(self.buffer, *self.pos, self.acting_version)?;")
+            .expect("header check");
+        let advance = code.find("self.part = 1;").expect("part advance");
+        assert!(check < advance);
     }
 
     #[test]
@@ -740,7 +763,9 @@ mod tests {
         let code = generate_variable_group_accessor(
             0,
             "finish",
+            "m::FinishGroupDecoder",
             "m::FinishGroupReader",
+            "self.pos",
             "&mut self.pos",
             MESSAGE_RESERVED,
         );
