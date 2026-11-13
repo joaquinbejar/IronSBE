@@ -749,6 +749,7 @@ Contributions are welcome! Please follow these steps:
 
 If you have any questions, issues, or would like to provide feedback, please feel free to contact the project maintainer:
 
+### **Contact Information**
 - **Author**: Joaquín Béjar García
 - **Email**: jb@taunais.com
 - **Telegram**: [@joaquin_bejar](https://t.me/joaquin_bejar)
@@ -770,7 +771,8 @@ Repositories by the same author that this project depends on, and repositories t
 
 | Repository | Description |
 |------------|-------------|
-| [hft-clob-core](https://github.com/joaquinbejar/hft-clob-core) | Single-symbol CLOB matching engine with an integer-only hot path and deterministic replay. |
-| [otc-rfq](https://github.com/joaquinbejar/otc-rfq) | OTC Request-for-Quote engine with REST, SBE streaming and FIX/WebSocket/gRPC venue connectivity. *(build and runtime dependency)* |
+| [IronFix](https://github.com/joaquinbejar/IronFix) | Rust FIX protocol engine; uses IronSBE for its binary SBE encoding layer. |
+| [hft-clob-core](https://github.com/joaquinbejar/hft-clob-core) | Single symbol CLOB matching engine; uses IronSBE for its framed binary wire messages. |
+| [otc-rfq](https://github.com/joaquinbejar/otc-rfq) | OTC Request for Quote engine; uses IronSBE for SBE binary quote streaming. |
 
 <!-- related-projects:end -->
