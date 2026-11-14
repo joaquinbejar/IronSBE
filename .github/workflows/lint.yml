@@ -11,6 +11,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # GCC on Ubuntu 26 turns a warning in libxdp-sys vendored libbpf into an error
+  CFLAGS: "-g -O2 -Wno-error"
+  # newer clang warns on "-S ... -c" in libxdp BPF build, which uses -Werror
+  BPF_CFLAGS: "-Wno-visibility -fno-stack-protector -Wno-unused-command-line-argument"
 
 jobs:
   lint:
@@ -21,7 +25,7 @@ jobs:
         
       - name: Install dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y make pkg-config libelf-dev zlib1g-dev libpcap-dev clang m4
+          sudo apt-get update && sudo apt-get install -y make pkg-config libelf-dev zlib1g-dev libpcap-dev clang llvm m4
 
       - name: Install Rust
         uses: actions-rs/toolchain@v1
