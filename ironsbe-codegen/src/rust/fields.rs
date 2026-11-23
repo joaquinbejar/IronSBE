@@ -124,8 +124,8 @@ fn field_getters(ir: &SchemaIr, field: &ResolvedField, reserved: &[&str]) -> Vec
     );
     doc.push_str(&renamed_note(&field.getter_name, &getter));
     let range = format!(
-        "self.offset + {}..self.offset + {}",
-        field.offset,
+        "{}..self.offset + {}",
+        super::names::plus("self.offset", field.offset),
         field.end_offset()
     );
 
@@ -136,7 +136,9 @@ fn field_getters(ir: &SchemaIr, field: &ResolvedField, reserved: &[&str]) -> Vec
             name: getter.clone(),
             ret: "&'a [u8]".to_owned(),
             bindings: Vec::new(),
-            value: format!("&self.buffer[{range}]"),
+            // Within the block a decoder's `wrap` checked, so the default
+            // (no bytes) is unreachable; no slice index that could panic.
+            value: format!("self.buffer.get({range}).unwrap_or_default()"),
         }];
         if elem_type == "u8" {
             // Also generate a string accessor for char arrays
@@ -145,11 +147,12 @@ fn field_getters(ir: &SchemaIr, field: &ResolvedField, reserved: &[&str]) -> Vec
                 name: format!("{getter}_as_str"),
                 ret: "&'a str".to_owned(),
                 bindings: vec![
-                    format!("let bytes = &self.buffer[{range}];"),
+                    format!("let bytes = self.buffer.get({range}).unwrap_or_default();"),
                     "let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());"
                         .to_owned(),
                 ],
-                value: "std::str::from_utf8(&bytes[..end]).unwrap_or(\"\")".to_owned(),
+                value: "std::str::from_utf8(bytes.get(..end).unwrap_or_default()).unwrap_or(\"\")"
+                    .to_owned(),
             });
         }
         return getters;
@@ -164,8 +167,10 @@ fn field_getters(ir: &SchemaIr, field: &ResolvedField, reserved: &[&str]) -> Vec
             (
                 rust_type.clone(),
                 format!(
-                    "{}::from(self.buffer.{}(self.offset + {}))",
-                    rust_type, read_method, field.offset
+                    "{}::from(self.buffer.{}({}))",
+                    rust_type,
+                    read_method,
+                    super::names::plus("self.offset", field.offset)
                 ),
             )
         }
@@ -174,16 +179,19 @@ fn field_getters(ir: &SchemaIr, field: &ResolvedField, reserved: &[&str]) -> Vec
             (
                 rust_type.clone(),
                 format!(
-                    "{}::from_raw(self.buffer.{}(self.offset + {}))",
-                    rust_type, read_method, field.offset
+                    "{}::from_raw(self.buffer.{}({}))",
+                    rust_type,
+                    read_method,
+                    super::names::plus("self.offset", field.offset)
                 ),
             )
         }
         Some(TypeKind::Composite { .. }) => (
             format!("{rust_type}<'a>"),
             format!(
-                "{}::wrap(self.buffer, self.offset + {})",
-                rust_type, field.offset
+                "{}::wrap(self.buffer, {})",
+                rust_type,
+                super::names::plus("self.offset", field.offset)
             ),
         ),
         _ => {
@@ -191,8 +199,9 @@ fn field_getters(ir: &SchemaIr, field: &ResolvedField, reserved: &[&str]) -> Vec
             (
                 rust_type,
                 format!(
-                    "self.buffer.{}(self.offset + {})",
-                    read_method, field.offset
+                    "self.buffer.{}({})",
+                    read_method,
+                    super::names::plus("self.offset", field.offset)
                 ),
             )
         }
@@ -238,7 +247,7 @@ fn constant_getter(ir: &SchemaIr, field: &ResolvedField, getter: String) -> Opti
 /// Message encoders keep `offset` at the message header, so the field offset
 /// is prefixed with `MessageHeader::ENCODED_LENGTH`.
 pub(crate) fn generate_field_setter(ir: &SchemaIr, field: &ResolvedField) -> String {
-    let field_offset = format!("MessageHeader::ENCODED_LENGTH + {}", field.offset);
+    let field_offset = super::names::plus("MessageHeader::ENCODED_LENGTH", field.offset);
     generate_setter_at(ir, field, &field_offset)
 }
 
@@ -253,6 +262,8 @@ pub(crate) fn generate_entry_field_setter(ir: &SchemaIr, field: &ResolvedField) 
 /// Generates a field setter whose write position is `self.offset + field_offset`.
 fn generate_setter_at(ir: &SchemaIr, field: &ResolvedField, field_offset: &str) -> String {
     let mut output = String::new();
+    // The write position: `self.offset`, plus the field offset unless zero.
+    let at = super::names::plus("self.offset", field_offset);
     // A constant takes no bytes: nothing to set.
     if field.is_constant {
         return output;
@@ -273,20 +284,15 @@ fn generate_setter_at(ir: &SchemaIr, field: &ResolvedField, field_offset: &str) 
             "    pub fn {}(&mut self, value: &[u8]) -> &mut Self {{\n",
             field.setter_name
         ));
+        // Copies what fits and zero-fills the rest, with no slice index
+        // that could panic: the block was checked when the encoder wrapped
+        // its buffer, so the bytes are always there.
         output.push_str(&format!(
-            "        let copy_len = value.len().min({});\n",
-            len
+            "        if let Some(dst) = self.buffer.get_mut({at}..{at} + {len}) {{\n"
         ));
-        output.push_str(&format!(
-            "        self.buffer[self.offset + {}..self.offset + {} + copy_len]\n",
-            field_offset, field_offset
-        ));
-        output.push_str("            .copy_from_slice(&value[..copy_len]);\n");
-        output.push_str(&format!("        if copy_len < {} {{\n", len));
-        output.push_str(&format!(
-            "            self.buffer[self.offset + {} + copy_len..self.offset + {} + {}].fill(0);\n",
-            field_offset, field_offset, len
-        ));
+        output.push_str("            for (index, byte) in dst.iter_mut().enumerate() {\n");
+        output.push_str("                *byte = value.get(index).copied().unwrap_or(0);\n");
+        output.push_str("            }\n");
         output.push_str("        }\n");
         output.push_str("        self\n");
         output.push_str("    }\n\n");
@@ -305,8 +311,8 @@ fn generate_setter_at(ir: &SchemaIr, field: &ResolvedField, field_offset: &str) 
                     field.setter_name, rust_type
                 ));
                 output.push_str(&format!(
-                    "        self.buffer.{}(self.offset + {}, {}::from(value));\n",
-                    write_method, field_offset, prim_type
+                    "        self.buffer.{}({}, {}::from(value));\n",
+                    write_method, at, prim_type
                 ));
                 output.push_str("        self\n");
                 output.push_str("    }\n\n");
@@ -319,8 +325,8 @@ fn generate_setter_at(ir: &SchemaIr, field: &ResolvedField, field_offset: &str) 
                     field.setter_name, rust_type
                 ));
                 output.push_str(&format!(
-                    "        self.buffer.{}(self.offset + {}, value.raw());\n",
-                    write_method, field_offset
+                    "        self.buffer.{}({}, value.raw());\n",
+                    write_method, at
                 ));
                 output.push_str("        self\n");
                 output.push_str("    }\n\n");
@@ -332,8 +338,8 @@ fn generate_setter_at(ir: &SchemaIr, field: &ResolvedField, field_offset: &str) 
                     field.setter_name, rust_type
                 ));
                 output.push_str(&format!(
-                    "        {}Encoder::wrap(self.buffer, self.offset + {})\n",
-                    rust_type, field_offset
+                    "        {}Encoder::wrap(self.buffer, {})\n",
+                    rust_type, at
                 ));
                 output.push_str("    }\n\n");
             }
@@ -345,8 +351,8 @@ fn generate_setter_at(ir: &SchemaIr, field: &ResolvedField, field_offset: &str) 
                     field.setter_name, rust_type
                 ));
                 output.push_str(&format!(
-                    "        self.buffer.{}(self.offset + {}, value);\n",
-                    write_method, field_offset
+                    "        self.buffer.{}({}, value);\n",
+                    write_method, at
                 ));
                 output.push_str("        self\n");
                 output.push_str("    }\n\n");

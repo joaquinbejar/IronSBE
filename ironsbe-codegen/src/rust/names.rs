@@ -24,7 +24,32 @@ pub(crate) const MESSAGE_RESERVED: &[&str] = &[
 
 /// Methods every entry decoder and reader defines: a field, nested group or
 /// var data accessor with one of these names is renamed on both.
-pub(crate) const ENTRY_RESERVED: &[&str] = &["wrap", "end_offset"];
+pub(crate) const ENTRY_RESERVED: &[&str] = &[
+    "wrap",
+    "end_offset",
+    "acting_version",
+    "acting_block_length",
+];
+
+/// The acting version and block length accessors of a group entry decoder
+/// or reader. They read the two fields the presence gate of a versioned
+/// field reads, so an entry with no versioned field still reads them: no
+/// field is dead under a downstream `-D warnings`.
+pub(crate) const ENTRY_ACCESSORS: &str = "    /// The schema version the message was encoded with.
+    #[inline(always)]
+    #[must_use]
+    pub const fn acting_version(&self) -> u16 {
+        self.acting_version
+    }
+
+    /// The entry's block length as encoded, from its group header.
+    #[inline(always)]
+    #[must_use]
+    pub const fn acting_block_length(&self) -> u16 {
+        self.block_length
+    }
+
+";
 
 /// Returns the method name for a snake_case schema accessor on a host that
 /// defines `reserved`: the name itself, or the name with a trailing
@@ -48,6 +73,18 @@ pub(crate) fn renamed_note(snake: &str, accessor: &str) -> String {
         format!(
             "    ///\n    /// Renamed from `{snake}` to avoid the generated `{snake}()` method.\n"
         )
+    }
+}
+
+/// The position `base + offset` as generated code, or `base` alone when the
+/// offset is zero, so the output carries no no-op `+ 0` (clippy's
+/// `identity_op` under a downstream `-D warnings`).
+pub(crate) fn plus(base: &str, offset: impl std::fmt::Display) -> String {
+    let offset = offset.to_string();
+    if offset == "0" {
+        base.to_owned()
+    } else {
+        format!("{base} + {offset}")
     }
 }
 

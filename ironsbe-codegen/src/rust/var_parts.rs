@@ -170,9 +170,18 @@ pub(crate) fn generate_encoder_parts_guard(parts: &[VarPart<'_>], cursor: &str) 
     output
         .push_str("    /// a group header with zero entries, or a zero-length var data header.\n");
     output.push_str("    fn sbe_write_empty_part(&mut self, index: u16) {\n");
-    output.push_str("        match index {\n");
+    // One part: an `if`, not a one-arm `match` (clippy's
+    // `single_match` under a downstream `-D warnings`).
+    let single = parts.len() == 1;
+    if !single {
+        output.push_str("        match index {\n");
+    }
     for (index, part) in parts.iter().enumerate() {
-        output.push_str(&format!("            {index} => {{\n"));
+        if single {
+            output.push_str(&format!("        if index == {index} {{\n"));
+        } else {
+            output.push_str(&format!("            {index} => {{\n"));
+        }
         match part {
             VarPart::Group {
                 name, encoder_type, ..
@@ -202,10 +211,16 @@ pub(crate) fn generate_encoder_parts_guard(parts: &[VarPart<'_>], cursor: &str) 
                 ));
             }
         }
-        output.push_str("            }\n");
+        if single {
+            output.push_str("        }\n");
+        } else {
+            output.push_str("            }\n");
+        }
     }
-    output.push_str("            _ => {}\n");
-    output.push_str("        }\n");
+    if !single {
+        output.push_str("            _ => {}\n");
+        output.push_str("        }\n");
+    }
     output.push_str("    }\n\n");
 
     output
@@ -281,9 +296,17 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
     );
     output.push_str("    /// end of the buffer.\n");
     output.push_str("    fn sbe_skip_part(&mut self, index: u16) -> Result<(), DecodeError> {\n");
-    output.push_str("        match index {\n");
+    // One part: an `if`, not a one-arm `match` (clippy's `single_match`).
+    let single = parts.len() == 1;
+    if !single {
+        output.push_str("        match index {\n");
+    }
     for (index, part) in parts.iter().enumerate() {
-        output.push_str(&format!("            {index} => {{\n"));
+        if single {
+            output.push_str(&format!("        if index == {index} {{\n"));
+        } else {
+            output.push_str(&format!("            {index} => {{\n"));
+        }
         match part {
             VarPart::Group {
                 name, decoder_type, ..
@@ -307,10 +330,16 @@ pub(crate) fn generate_reader_parts_skip(parts: &[VarPart<'_>], cursor: &str) ->
                 ));
             }
         }
-        output.push_str("            }\n");
+        if single {
+            output.push_str("        }\n");
+        } else {
+            output.push_str("            }\n");
+        }
     }
-    output.push_str("            _ => {}\n");
-    output.push_str("        }\n");
+    if !single {
+        output.push_str("            _ => {}\n");
+        output.push_str("        }\n");
+    }
     output.push_str("        Ok(())\n");
     output.push_str("    }\n\n");
 

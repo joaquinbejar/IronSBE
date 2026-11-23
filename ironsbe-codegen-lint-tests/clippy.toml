@@ -1,0 +1,6 @@
+# Tests are exempt from the unwrap, expect, indexing and panic restrictions;
+# the generated library code is not.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true

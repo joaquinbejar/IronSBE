@@ -1,0 +1,34 @@
+[package]
+name = "ironsbe-codegen-lint-tests"
+description = "Compiles code emitted by ironsbe-codegen in panic-free mode under a strict lint bar (not published)"
+publish = false
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+ironsbe-core = { workspace = true }
+
+[build-dependencies]
+ironsbe-codegen = { workspace = true }
+
+# The lint bar of a downstream workspace that compiles generated codecs into
+# its own crates with no `#[allow]` (karyos, ADR-0007 and ADR-0052): the
+# panic-free output must pass it as is, under `cargo clippy -D warnings`.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"

@@ -343,7 +343,7 @@ pub(crate) fn generate_var_data_setter(
     output.push_str("            });\n");
     output.push_str("        };\n");
     output.push_str(&format!(
-        "        let extra = {}usize.checked_add(value.len()).unwrap_or(usize::MAX);\n",
+        "        let extra = {}usize.saturating_add(value.len());\n",
         info.header_length
     ));
     output.push_str(&format!(
@@ -509,9 +509,7 @@ mod tests {
         assert!(code.contains("let Ok(len) = u8::try_from(value.len()) else {"));
         assert!(code.contains("max: u64::from(u8::MAX),"));
         // order and capacity (header width 1 + value) go through the guard
-        assert!(
-            code.contains("let extra = 1usize.checked_add(value.len()).unwrap_or(usize::MAX);")
-        );
+        assert!(code.contains("let extra = 1usize.saturating_add(value.len());"));
         assert!(code.contains("self.sbe_advance_to(2, \"var data field 'note'\", extra)?;"));
         // every check returns before the first write
         let try_set = code.find("pub fn try_set_note").expect("try_set");
