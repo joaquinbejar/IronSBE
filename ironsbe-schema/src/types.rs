@@ -28,7 +28,16 @@ pub struct Schema {
     pub messages: Vec<super::messages::MessageDef>,
     /// Type lookup map (built during parsing).
     type_map: HashMap<String, usize>,
+    /// Types declared inside a composite, waiting for their final name: the
+    /// owning composite's name, the member's index in it, and the type. The
+    /// parser registers them once every top-level type is known, so an
+    /// inline type never shadows another type of the same name.
+    pub(crate) inline_types: Vec<InlineType>,
 }
+
+/// A type declared inside a composite: the owning composite's name, the
+/// member's index in it, and the type.
+pub(crate) type InlineType = (String, usize, TypeDef);
 
 impl Schema {
     /// Creates a new empty schema.
@@ -45,6 +54,7 @@ impl Schema {
             types: Vec::new(),
             messages: Vec::new(),
             type_map: HashMap::new(),
+            inline_types: Vec::new(),
         }
     }
 
@@ -132,6 +142,16 @@ impl TypeDef {
             Self::Composite(c) => c.encoded_length(),
             Self::Enum(e) => e.encoding_type.size(),
             Self::Set(s) => s.encoding_type.size(),
+        }
+    }
+
+    /// Renames the type.
+    pub fn set_name(&mut self, name: String) {
+        match self {
+            Self::Primitive(p) => p.name = name,
+            Self::Composite(c) => c.name = name,
+            Self::Enum(e) => e.name = name,
+            Self::Set(s) => s.name = name,
         }
     }
 
@@ -358,10 +378,20 @@ impl CompositeDef {
         }
     }
 
-    /// Returns the encoded length in bytes.
+    /// Returns the encoded length in bytes: the extent of its members, so a
+    /// gap an explicit `offset` leaves counts (a `uint8` at 0 and a `uint32`
+    /// at 4 take 8 bytes). A member without an offset follows the previous
+    /// one.
     #[must_use]
     pub fn encoded_length(&self) -> usize {
-        self.fields.iter().map(|f| f.encoded_length).sum()
+        let mut running = 0usize;
+        let mut extent = 0usize;
+        for field in &self.fields {
+            let offset = field.offset.unwrap_or(running);
+            running = offset + field.encoded_length;
+            extent = extent.max(running);
+        }
+        extent
     }
 
     /// Adds a field to the composite.
@@ -389,6 +419,12 @@ pub struct CompositeField {
     pub description: Option<String>,
     /// Constant value.
     pub constant_value: Option<String>,
+    /// Array length of a primitive member (`length` attribute), `None` for a
+    /// scalar.
+    pub length: Option<usize>,
+    /// Whether the member has `presence="constant"`: it takes no bytes on the
+    /// wire.
+    pub is_constant: bool,
 }
 
 impl CompositeField {
@@ -404,7 +440,16 @@ impl CompositeField {
             semantic_type: None,
             description: None,
             constant_value: None,
+            length: None,
+            is_constant: false,
         }
+    }
+
+    /// Returns true if the member refers to another type (an enum, a set or
+    /// a composite, named by `type_name`) rather than being a primitive.
+    #[must_use]
+    pub fn is_ref(&self) -> bool {
+        self.primitive_type.is_none() && !self.is_constant
     }
 }
 

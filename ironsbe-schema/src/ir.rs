@@ -94,24 +94,56 @@ impl ResolvedType {
                 array_length: p.length,
             },
             TypeDef::Composite(c) => {
-                let mut offset = 0usize;
-                let fields = c
-                    .fields
-                    .iter()
-                    .filter_map(|f| {
-                        let field_offset = offset;
-                        offset += f.encoded_length;
-                        f.primitive_type.map(|prim| CompositeFieldInfo {
-                            name: f.name.clone(),
+                // Offsets were resolved by the parser's layout pass; a member
+                // without one (a composite built by hand) follows the
+                // previous member.
+                let mut running = 0usize;
+                let mut members = Vec::with_capacity(c.fields.len());
+                for f in &c.fields {
+                    let offset = f.offset.unwrap_or(running);
+                    running = offset + f.encoded_length;
+                    let kind = if f.is_constant {
+                        MemberKind::Constant {
+                            primitive_type: f.primitive_type,
+                            value: f.constant_value.clone().unwrap_or_default(),
+                        }
+                    } else if let Some(prim) = f.primitive_type {
+                        MemberKind::Primitive {
                             primitive_type: prim,
-                            offset: field_offset,
-                            encoded_length: f.encoded_length,
-                        })
+                            array_length: f.length.filter(|&len| len != 1),
+                        }
+                    } else {
+                        MemberKind::Ref {
+                            type_name: f.type_name.clone(),
+                        }
+                    };
+                    members.push(CompositeMember {
+                        name: f.name.clone(),
+                        offset,
+                        encoded_length: f.encoded_length,
+                        kind,
+                    });
+                }
+                // Scalar primitive members, as before: what the var data
+                // generator reads a length header from.
+                let fields = members
+                    .iter()
+                    .filter_map(|m| match m.kind {
+                        MemberKind::Primitive {
+                            primitive_type,
+                            array_length: None,
+                        } => Some(CompositeFieldInfo {
+                            name: m.name.clone(),
+                            primitive_type,
+                            offset: m.offset,
+                            encoded_length: m.encoded_length,
+                        }),
+                        _ => None,
                     })
                     .collect();
                 Self {
                     name: c.name.clone(),
-                    kind: TypeKind::Composite { fields },
+                    kind: TypeKind::Composite { fields, members },
                     encoded_length: c.encoded_length(),
                     rust_type: to_pascal_case(&c.name),
                     is_array: false,
@@ -123,8 +155,16 @@ impl ResolvedType {
                     .valid_values
                     .iter()
                     .filter_map(|v| {
-                        // Use signed parsing for signed types, unsigned for others
-                        let value = if e.encoding_type.is_signed() {
+                        // A char-encoded enum lists its values as characters
+                        // (`<validValue name="A">A</validValue>`): the value
+                        // is the character's byte. Otherwise signed parsing
+                        // for signed types, unsigned for the others.
+                        let value = if e.encoding_type == PrimitiveType::Char {
+                            match v.value.as_bytes() {
+                                [byte] => Some(i64::from(*byte)),
+                                _ => v.as_u64().map(|u| u as i64),
+                            }
+                        } else if e.encoding_type.is_signed() {
                             v.as_i64()
                         } else {
                             v.as_u64().map(|u| u as i64)
@@ -216,6 +256,44 @@ pub struct CompositeFieldInfo {
     pub encoded_length: usize,
 }
 
+/// One member of a composite, at its resolved offset.
+#[derive(Debug, Clone)]
+pub struct CompositeMember {
+    /// Member name.
+    pub name: String,
+    /// Offset within the composite.
+    pub offset: usize,
+    /// Encoded length in bytes (0 for a constant).
+    pub encoded_length: usize,
+    /// What the member is.
+    pub kind: MemberKind,
+}
+
+/// The kind of a composite member.
+#[derive(Debug, Clone)]
+pub enum MemberKind {
+    /// A primitive, or an array of `array_length` primitives.
+    Primitive {
+        /// The primitive.
+        primitive_type: PrimitiveType,
+        /// Number of elements of an array member, `None` for a scalar.
+        array_length: Option<usize>,
+    },
+    /// A member of another type of the schema (an enum, a set or a
+    /// composite), named by `type_name`.
+    Ref {
+        /// The referenced type's name.
+        type_name: String,
+    },
+    /// A `presence="constant"` member: no bytes on the wire.
+    Constant {
+        /// Its primitive type, when declared.
+        primitive_type: Option<PrimitiveType>,
+        /// Its value as written in the schema.
+        value: String,
+    },
+}
+
 /// Type kind enumeration.
 #[derive(Debug, Clone)]
 pub enum TypeKind {
@@ -223,8 +301,11 @@ pub enum TypeKind {
     Primitive(PrimitiveType),
     /// Composite type with fields.
     Composite {
-        /// Fields in the composite.
+        /// Scalar primitive members of the composite.
         fields: Vec<CompositeFieldInfo>,
+        /// Every member of the composite in declaration order: primitives,
+        /// arrays, references to other types and constants.
+        members: Vec<CompositeMember>,
     },
     /// Enum type with encoding and variants.
     Enum {
@@ -349,6 +430,11 @@ pub struct ResolvedField {
     /// A field with `since_version > 0` is absent from messages encoded by an
     /// older version, so generated getters for it return `Option`.
     pub since_version: u16,
+    /// Whether the field has `presence="constant"`: it takes no bytes and has
+    /// no setter.
+    pub is_constant: bool,
+    /// The constant's `valueRef` (`Type.Value`), when given.
+    pub value_ref: Option<String>,
 }
 
 impl ResolvedField {
@@ -371,7 +457,11 @@ impl ResolvedField {
         let (encoded_length, rust_type, is_array, array_length, primitive_type) =
             if let Some(rt) = &resolved_type {
                 (
-                    rt.encoded_length,
+                    if field.is_constant() {
+                        0
+                    } else {
+                        rt.encoded_length
+                    },
                     rt.rust_type.clone(),
                     rt.is_array,
                     rt.array_length,
@@ -398,6 +488,8 @@ impl ResolvedField {
             array_length,
             primitive_type,
             since_version: field.since_version.unwrap_or(0),
+            is_constant: field.is_constant(),
+            value_ref: field.value_ref.clone(),
         }
     }
 }
@@ -711,7 +803,10 @@ mod tests {
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Primitive"));
 
-        let kind = TypeKind::Composite { fields: vec![] };
+        let kind = TypeKind::Composite {
+            fields: vec![],
+            members: vec![],
+        };
         let debug_str = format!("{:?}", kind);
         assert!(debug_str.contains("Composite"));
 

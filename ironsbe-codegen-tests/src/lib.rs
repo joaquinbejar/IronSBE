@@ -36,3 +36,23 @@ pub mod var_data_no_panic {
 pub mod versioned {
     include!(concat!(env!("OUT_DIR"), "/versioned_schema.rs"));
 }
+
+/// Codecs generated at build time from Real Logic's example schema, `Car`
+/// version 0 (`schemas/real-logic/example-schema.xml`).
+#[allow(dead_code, unused_imports, missing_docs, clippy::all)]
+pub mod car_v0 {
+    include!(concat!(env!("OUT_DIR"), "/car_v0_schema.rs"));
+}
+
+/// Codecs generated at build time from Real Logic's example extension
+/// schema, `Car` version 1 (`schemas/real-logic/example-extension-schema.xml`).
+#[allow(dead_code, unused_imports, missing_docs, clippy::all)]
+pub mod car_v1 {
+    include!(concat!(env!("OUT_DIR"), "/car_v1_schema.rs"));
+}
+
+/// Codecs generated from the layout edges schema in `build.rs`.
+#[allow(dead_code, unused_imports, missing_docs, clippy::all)]
+pub mod layout_edges {
+    include!(concat!(env!("OUT_DIR"), "/layout_edges_schema.rs"));
+}

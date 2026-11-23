@@ -107,6 +107,10 @@ pub struct FieldDef {
     pub value_ref: Option<String>,
     /// Encoded length in bytes (resolved from type).
     pub encoded_length: usize,
+    /// Whether `offset` came from an explicit `offset` attribute. When it
+    /// did not, the parser lays the field out right after the previous one
+    /// (SBE 1.0: fields are packed in declaration order).
+    pub explicit_offset: bool,
 }
 
 impl FieldDef {
@@ -125,6 +129,7 @@ impl FieldDef {
             deprecated: None,
             value_ref: None,
             encoded_length: 0,
+            explicit_offset: false,
         }
     }
 
