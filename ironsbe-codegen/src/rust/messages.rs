@@ -637,7 +637,7 @@ mod tests {
 
         // orderId at offset 0
         assert!(
-            code.contains("self.offset + 0)"),
+            code.contains("(self.offset)"),
             "orderId should be at offset 0"
         );
         // instrumentId at offset 8 (after uint64)
@@ -771,7 +771,7 @@ mod tests {
             .expect("entry decoder impl");
         let decoder_section = &code[decoder_pos..];
         // Verify all five fields have distinct offsets
-        assert!(decoder_section.contains("self.offset + 0)"));
+        assert!(decoder_section.contains("(self.offset)"));
         assert!(decoder_section.contains("self.offset + 8)"));
         assert!(decoder_section.contains("self.offset + 12)"));
         assert!(decoder_section.contains("self.offset + 20)"));
@@ -783,7 +783,7 @@ mod tests {
             .expect("entry encoder impl");
         let encoder_section = &code[encoder_pos..];
         // Verify setter offsets match decoder offsets
-        assert!(encoder_section.contains("self.offset + 0,"));
+        assert!(encoder_section.contains("(self.offset,"));
         assert!(encoder_section.contains("self.offset + 8,"));
         assert!(encoder_section.contains("self.offset + 12,"));
         assert!(encoder_section.contains("self.offset + 20,"));
@@ -826,7 +826,7 @@ mod tests {
 
         // set_order_id at offset 0
         assert!(
-            entry_code.contains("self.offset + 0,"),
+            entry_code.contains("(self.offset,"),
             "set_order_id should write at offset 0"
         );
         // set_instrument_id at offset 8
@@ -1460,8 +1460,10 @@ mod tests {
             "impl<'a> OrdersEntryDecoder<'a>",
             "/// fills Group Decoder",
         );
+        // No versioned field reads the acting version: the field is dropped
+        // and the private `wrap` keeps it as an unused parameter (#80).
         assert!(entry.contains(
-            "fn wrap(buffer: &'a [u8], offset: usize, block_length: u16, acting_version: u16)"
+            "fn wrap(buffer: &'a [u8], offset: usize, block_length: u16, _acting_version: u16)"
         ));
         assert!(entry.contains(
             "pub fn end_offset(&self) -> Result<usize, DecodeError> {\n        Ok(self.offset + self.block_length as usize)\n"
@@ -1815,9 +1817,11 @@ mod tests {
         assert!(reader.contains("decoder.acting_version(),"));
         assert!(reader.contains("decoder.acting_block_length(),"));
         // same fixed-field getter as the decoder
-        assert!(reader.contains(
-            "pub fn qty(&self) -> u64 {\n        self.buffer.get_u64_le(self.offset + 0)"
-        ));
+        assert!(
+            reader.contains(
+                "pub fn qty(&self) -> u64 {\n        self.buffer.get_u64_le(self.offset)"
+            )
+        );
         // flat group: existing decoder, cursor stepped in O(1)
         assert!(reader.contains(
             "pub fn legs(&mut self) -> Result<quote::LegsGroupDecoder<'a>, DecodeError> {"

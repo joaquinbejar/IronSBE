@@ -491,7 +491,7 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
 
     output.push_str("}\n\n");
 
-    output
+    crate::rust::names::prune_entry_metadata(output)
 }
 
 /// Generates a group encoder, its entry encoder, and the encoders of every

@@ -423,7 +423,7 @@ fn generate_entry_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     output.push_str("    }\n");
     output.push_str("}\n\n");
 
-    output
+    crate::rust::names::prune_entry_metadata(output)
 }
 
 /// Generates one accessor per variable part of a reader host, in schema

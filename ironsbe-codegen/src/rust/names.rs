@@ -26,6 +26,39 @@ pub(crate) const MESSAGE_RESERVED: &[&str] = &[
 /// var data accessor with one of these names is renamed on both.
 pub(crate) const ENTRY_RESERVED: &[&str] = &["wrap", "end_offset"];
 
+/// `code`, a group entry decoder or reader (its struct, then its impl),
+/// without the `acting_version` and `block_length` fields its impl never
+/// reads: a dead field is an error under a downstream `-D warnings`, and a
+/// metadata accessor would take a name a schema field may already use. The
+/// private `wrap` keeps both parameters, unused ones prefixed with `_`.
+pub(crate) fn prune_entry_metadata(code: String) -> String {
+    let Some(impl_at) = code.find("\nimpl") else {
+        return code;
+    };
+    let mut code = code;
+    for field in ["acting_version", "block_length"] {
+        let read = format!("self.{field}");
+        if code.get(impl_at..).is_some_and(|body| body.contains(&read)) {
+            continue;
+        }
+        code = code.replacen(&format!("    {field}: u16,\n"), "", 1);
+        code = code.replacen(&format!("{field}: u16"), &format!("_{field}: u16"), 1);
+        code = code
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("Self { buffer") {
+                    line.replace(&format!(", {field}"), "")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+    }
+    code
+}
+
 /// Returns the method name for a snake_case schema accessor on a host that
 /// defines `reserved`: the name itself, or the name with a trailing
 /// underscore when it collides.
@@ -51,8 +84,42 @@ pub(crate) fn renamed_note(snake: &str, accessor: &str) -> String {
     }
 }
 
+/// The position `base + offset` as generated code, or `base` alone when the
+/// offset is zero, so the output carries no no-op `+ 0` (clippy's
+/// `identity_op` under a downstream `-D warnings`).
+pub(crate) fn plus(base: &str, offset: impl std::fmt::Display) -> String {
+    let offset = offset.to_string();
+    if offset == "0" {
+        base.to_owned()
+    } else {
+        format!("{base} + {offset}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// IronSBE#80 review: an entry whose impl never reads its metadata
+    /// loses those fields, and keeps them when it reads them.
+    #[test]
+    fn test_prune_entry_metadata() {
+        let unread = "pub struct E<'a> {\n    buffer: &'a [u8],\n    offset: usize,\n    block_length: u16,\n    acting_version: u16,\n}\n\nimpl<'a> E<'a> {\n    fn wrap(buffer: &'a [u8], offset: usize, block_length: u16, acting_version: u16) -> Self {\n        Self { buffer, offset, block_length, acting_version }\n    }\n}\n".to_owned();
+        let pruned = super::prune_entry_metadata(unread);
+        assert!(!pruned.contains("    acting_version: u16,\n"), "{pruned}");
+        assert!(!pruned.contains("    block_length: u16,\n"), "{pruned}");
+        assert!(
+            pruned.contains("_block_length: u16, _acting_version: u16"),
+            "{pruned}"
+        );
+        assert!(pruned.contains("Self { buffer, offset }"), "{pruned}");
+        let read = "pub struct E {\n    acting_version: u16,\n}\n\nimpl E {\n    fn v(&self) -> u16 { self.acting_version }\n}\n".to_owned();
+        assert_eq!(
+            super::prune_entry_metadata(read.clone())
+                .matches("acting_version: u16")
+                .count(),
+            1
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -128,6 +128,8 @@ impl<'a> TypeGenerator<'a> {
         }
         let field_name = to_snake_case(&member.name);
         let offset = member.offset;
+        // `self.offset`, plus the member offset unless zero (no `+ 0`).
+        let at = super::names::plus("self.offset", offset);
         let (ret, value) = match &member.kind {
             MemberKind::Primitive {
                 array_length: Some(_),
@@ -135,16 +137,13 @@ impl<'a> TypeGenerator<'a> {
             } => (
                 "&'a [u8]".to_owned(),
                 format!(
-                    "self.buffer.get(self.offset + {offset}..self.offset + {}).unwrap_or(&[])",
+                    "self.buffer.get({at}..self.offset + {}).unwrap_or(&[])",
                     offset + member.encoded_length
                 ),
             ),
             MemberKind::Primitive { primitive_type, .. } => (
                 primitive_type.rust_type().to_owned(),
-                format!(
-                    "self.buffer.{}(self.offset + {offset})",
-                    get_read_method(*primitive_type)
-                ),
+                format!("self.buffer.{}({at})", get_read_method(*primitive_type)),
             ),
             MemberKind::Constant {
                 primitive_type,
@@ -158,7 +157,7 @@ impl<'a> TypeGenerator<'a> {
                     Some((t, TypeKind::Enum { encoding, .. })) => (
                         t.rust_type.clone(),
                         format!(
-                            "{}::from(self.buffer.{}(self.offset + {offset}))",
+                            "{}::from(self.buffer.{}({at}))",
                             t.rust_type,
                             get_read_method(*encoding)
                         ),
@@ -166,28 +165,25 @@ impl<'a> TypeGenerator<'a> {
                     Some((t, TypeKind::Set { encoding, .. })) => (
                         t.rust_type.clone(),
                         format!(
-                            "{}::from_raw(self.buffer.{}(self.offset + {offset}))",
+                            "{}::from_raw(self.buffer.{}({at}))",
                             t.rust_type,
                             get_read_method(*encoding)
                         ),
                     ),
                     Some((t, TypeKind::Composite { .. })) => (
                         format!("{}<'a>", t.rust_type),
-                        format!("{}::wrap(self.buffer, self.offset + {offset})", t.rust_type),
+                        format!("{}::wrap(self.buffer, {at})", t.rust_type),
                     ),
                     Some((t, TypeKind::Primitive(_))) if t.is_array => (
                         "&'a [u8]".to_owned(),
                         format!(
-                            "self.buffer.get(self.offset + {offset}..self.offset + {}).unwrap_or(&[])",
+                            "self.buffer.get({at}..self.offset + {}).unwrap_or(&[])",
                             offset + member.encoded_length
                         ),
                     ),
                     Some((_, TypeKind::Primitive(prim))) => (
                         prim.rust_type().to_owned(),
-                        format!(
-                            "self.buffer.{}(self.offset + {offset})",
-                            get_read_method(*prim)
-                        ),
+                        format!("self.buffer.{}({at})", get_read_method(*prim)),
                     ),
                     None => return String::new(),
                 }
@@ -210,6 +206,8 @@ impl<'a> TypeGenerator<'a> {
         }
         let field_name = to_snake_case(&member.name);
         let offset = member.offset;
+        // `self.offset`, plus the member offset unless zero (no `+ 0`).
+        let at = super::names::plus("self.offset", offset);
         let bytes_setter = |len: usize| {
             let mut out = String::new();
             out.push_str(&format!(
@@ -223,7 +221,7 @@ impl<'a> TypeGenerator<'a> {
             // Copies what fits and zero-fills the rest; a buffer too short
             // for the member is left as it is.
             out.push_str(&format!(
-                "        if let Some(dst) = self.buffer.get_mut(self.offset + {offset}..self.offset + {}) {{\n",
+                "        if let Some(dst) = self.buffer.get_mut({at}..self.offset + {}) {{\n",
                 offset + len
             ));
             out.push_str("            let copy_len = value.len().min(dst.len());\n");
@@ -258,7 +256,7 @@ impl<'a> TypeGenerator<'a> {
             MemberKind::Primitive { primitive_type, .. } => scalar_setter(
                 primitive_type.rust_type(),
                 format!(
-                    "self.buffer.{}(self.offset + {offset}, value)",
+                    "self.buffer.{}({at}, value)",
                     get_write_method(*primitive_type)
                 ),
             ),
@@ -267,7 +265,7 @@ impl<'a> TypeGenerator<'a> {
                     Some((t, TypeKind::Enum { encoding, .. })) => scalar_setter(
                         &t.rust_type,
                         format!(
-                            "self.buffer.{}(self.offset + {offset}, {}::from(value))",
+                            "self.buffer.{}({at}, {}::from(value))",
                             get_write_method(*encoding),
                             encoding.rust_type()
                         ),
@@ -275,7 +273,7 @@ impl<'a> TypeGenerator<'a> {
                     Some((t, TypeKind::Set { encoding, .. })) => scalar_setter(
                         &t.rust_type,
                         format!(
-                            "self.buffer.{}(self.offset + {offset}, value.raw())",
+                            "self.buffer.{}({at}, value.raw())",
                             get_write_method(*encoding)
                         ),
                     ),
@@ -288,7 +286,7 @@ impl<'a> TypeGenerator<'a> {
                             t.rust_type
                         ));
                         out.push_str(&format!(
-                            "        {}Encoder::wrap(self.buffer, self.offset + {offset})\n",
+                            "        {}Encoder::wrap(self.buffer, {at})\n",
                             t.rust_type
                         ));
                         out.push_str("    }\n\n");
@@ -299,10 +297,7 @@ impl<'a> TypeGenerator<'a> {
                     }
                     Some((_, TypeKind::Primitive(prim))) => scalar_setter(
                         prim.rust_type(),
-                        format!(
-                            "self.buffer.{}(self.offset + {offset}, value)",
-                            get_write_method(*prim)
-                        ),
+                        format!("self.buffer.{}({at}, value)", get_write_method(*prim)),
                     ),
                     None => String::new(),
                 }
