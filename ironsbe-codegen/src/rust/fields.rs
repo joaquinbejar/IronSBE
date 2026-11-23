@@ -115,6 +115,9 @@ pub(crate) fn generate_field_getter(
 
 fn field_getters(ir: &SchemaIr, field: &ResolvedField, reserved: &[&str]) -> Vec<Getter> {
     let getter = accessor_name(&field.getter_name, reserved);
+    if field.is_constant {
+        return constant_getter(ir, field, getter).into_iter().collect();
+    }
     let mut doc = format!(
         "    /// Field: {} (id={}, offset={}).\n",
         field.name, field.id, field.offset
@@ -203,6 +206,33 @@ fn field_getters(ir: &SchemaIr, field: &ResolvedField, reserved: &[&str]) -> Vec
     }]
 }
 
+/// The getter of a `presence="constant"` field, which takes no bytes: an
+/// enum constant named by `valueRef="Type.Value"` returns that value. Other
+/// constants have no getter.
+fn constant_getter(ir: &SchemaIr, field: &ResolvedField, getter: String) -> Option<Getter> {
+    let value_ref = field.value_ref.as_deref()?;
+    let (type_name, value) = value_ref.split_once('.')?;
+    let resolved = ir.get_type(type_name)?;
+    let TypeKind::Enum { variants, .. } = &resolved.kind else {
+        return None;
+    };
+    let variant = variants.iter().find(|v| v.name == value)?;
+    Some(Getter {
+        doc: format!(
+            "    /// Constant field: {} (id={}), always `{}`.\n",
+            field.name, field.id, value_ref
+        ),
+        name: getter,
+        ret: resolved.rust_type.clone(),
+        bindings: Vec::new(),
+        value: format!(
+            "{}::{}",
+            resolved.rust_type,
+            ironsbe_schema::ir::to_pascal_case(&variant.name)
+        ),
+    })
+}
+
 /// Generates a field setter for a message encoder.
 ///
 /// Message encoders keep `offset` at the message header, so the field offset
@@ -223,6 +253,10 @@ pub(crate) fn generate_entry_field_setter(ir: &SchemaIr, field: &ResolvedField) 
 /// Generates a field setter whose write position is `self.offset + field_offset`.
 fn generate_setter_at(ir: &SchemaIr, field: &ResolvedField, field_offset: &str) -> String {
     let mut output = String::new();
+    // A constant takes no bytes: nothing to set.
+    if field.is_constant {
+        return output;
+    }
 
     output.push_str(&format!(
         "    /// Set field: {} (id={}, offset={}).\n",
@@ -231,8 +265,9 @@ fn generate_setter_at(ir: &SchemaIr, field: &ResolvedField, field_offset: &str) 
     output.push_str("    #[inline(always)]\n");
 
     if field.is_array {
-        // Array field - accept slice
-        let len = field.array_length.unwrap_or(field.encoded_length);
+        // Array field - accept slice of its encoded bytes (`encoded_length`,
+        // not the element count: an int64 array of 2 is 16 bytes).
+        let len = field.encoded_length;
 
         output.push_str(&format!(
             "    pub fn {}(&mut self, value: &[u8]) -> &mut Self {{\n",

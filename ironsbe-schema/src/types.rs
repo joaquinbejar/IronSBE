@@ -389,6 +389,12 @@ pub struct CompositeField {
     pub description: Option<String>,
     /// Constant value.
     pub constant_value: Option<String>,
+    /// Array length of a primitive member (`length` attribute), `None` for a
+    /// scalar.
+    pub length: Option<usize>,
+    /// Whether the member has `presence="constant"`: it takes no bytes on the
+    /// wire.
+    pub is_constant: bool,
 }
 
 impl CompositeField {
@@ -404,7 +410,16 @@ impl CompositeField {
             semantic_type: None,
             description: None,
             constant_value: None,
+            length: None,
+            is_constant: false,
         }
+    }
+
+    /// Returns true if the member refers to another type (an enum, a set or
+    /// a composite, named by `type_name`) rather than being a primitive.
+    #[must_use]
+    pub fn is_ref(&self) -> bool {
+        self.primitive_type.is_none() && !self.is_constant
     }
 }
 

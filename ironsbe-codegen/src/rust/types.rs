@@ -1,6 +1,8 @@
 //! Type code generation.
 
-use ironsbe_schema::ir::{CompositeFieldInfo, SchemaIr, TypeKind, to_pascal_case, to_snake_case};
+use ironsbe_schema::ir::{
+    CompositeMember, MemberKind, SchemaIr, TypeKind, to_pascal_case, to_snake_case,
+};
 use ironsbe_schema::types::PrimitiveType;
 
 /// Generator for type definitions.
@@ -21,14 +23,14 @@ impl<'a> TypeGenerator<'a> {
         let mut output = String::new();
 
         for resolved_type in self.ir.types.values() {
-            if let TypeKind::Composite { fields } = &resolved_type.kind {
+            if let TypeKind::Composite { members, .. } = &resolved_type.kind {
                 // Skip messageHeader - it's provided by ironsbe_core::header::MessageHeader
                 if resolved_type.name.eq_ignore_ascii_case("messageHeader") {
                     continue;
                 }
                 output.push_str(&self.generate_composite(
                     &resolved_type.name,
-                    fields,
+                    members,
                     resolved_type.encoded_length,
                 ));
             }
@@ -38,10 +40,15 @@ impl<'a> TypeGenerator<'a> {
     }
 
     /// Generates a composite type struct with zero-copy decoder and encoder.
+    ///
+    /// Each member gets a typed accessor at its resolved offset: a primitive
+    /// reads and writes its value, an array its bytes, an enum or a set its
+    /// type, a nested composite its own decoder and encoder, and a constant
+    /// returns its value and takes no bytes.
     fn generate_composite(
         &self,
         name: &str,
-        fields: &[CompositeFieldInfo],
+        members: &[CompositeMember],
         encoded_length: usize,
     ) -> String {
         let mut output = String::new();
@@ -73,24 +80,8 @@ impl<'a> TypeGenerator<'a> {
         output.push_str("        Self { buffer, offset }\n");
         output.push_str("    }\n\n");
 
-        // Field getters
-        for field in fields {
-            let field_name = to_snake_case(&field.name);
-            let rust_type = field.primitive_type.rust_type();
-            let read_method = get_read_method(field.primitive_type);
-
-            output.push_str(&format!("    /// Gets the {} field.\n", field.name));
-            output.push_str("    #[inline(always)]\n");
-            output.push_str("    #[must_use]\n");
-            output.push_str(&format!(
-                "    pub fn {}(&self) -> {} {{\n",
-                field_name, rust_type
-            ));
-            output.push_str(&format!(
-                "        self.buffer.{}(self.offset + {})\n",
-                read_method, field.offset
-            ));
-            output.push_str("    }\n\n");
+        for member in members {
+            output.push_str(&self.member_getter(member));
         }
 
         output.push_str("}\n\n");
@@ -119,29 +110,227 @@ impl<'a> TypeGenerator<'a> {
         output.push_str("        Self { buffer, offset }\n");
         output.push_str("    }\n\n");
 
-        // Field setters
-        for field in fields {
-            let field_name = to_snake_case(&field.name);
-            let rust_type = field.primitive_type.rust_type();
-            let write_method = get_write_method(field.primitive_type);
-
-            output.push_str(&format!("    /// Sets the {} field.\n", field.name));
-            output.push_str("    #[inline(always)]\n");
-            output.push_str(&format!(
-                "    pub fn set_{}(&mut self, value: {}) -> &mut Self {{\n",
-                field_name, rust_type
-            ));
-            output.push_str(&format!(
-                "        self.buffer.{}(self.offset + {}, value);\n",
-                write_method, field.offset
-            ));
-            output.push_str("        self\n");
-            output.push_str("    }\n\n");
+        for member in members {
+            output.push_str(&self.member_setter(member));
         }
 
         output.push_str("}\n\n");
 
         output
+    }
+
+    /// The getter of one composite member.
+    fn member_getter(&self, member: &CompositeMember) -> String {
+        // A zero-length member (the `varData` of a var data encoding) has no
+        // fixed bytes to read.
+        if member.encoded_length == 0 && !matches!(member.kind, MemberKind::Constant { .. }) {
+            return String::new();
+        }
+        let field_name = to_snake_case(&member.name);
+        let offset = member.offset;
+        let (ret, value) = match &member.kind {
+            MemberKind::Primitive {
+                array_length: Some(_),
+                ..
+            } => (
+                "&'a [u8]".to_owned(),
+                format!(
+                    "self.buffer.get(self.offset + {offset}..self.offset + {}).unwrap_or(&[])",
+                    offset + member.encoded_length
+                ),
+            ),
+            MemberKind::Primitive { primitive_type, .. } => (
+                primitive_type.rust_type().to_owned(),
+                format!(
+                    "self.buffer.{}(self.offset + {offset})",
+                    get_read_method(*primitive_type)
+                ),
+            ),
+            MemberKind::Constant {
+                primitive_type,
+                value,
+            } => match constant_value(*primitive_type, value) {
+                Some(pair) => pair,
+                None => return String::new(),
+            },
+            MemberKind::Ref { type_name } => {
+                match self.ir.get_type(type_name).map(|t| (t, &t.kind)) {
+                    Some((t, TypeKind::Enum { encoding, .. })) => (
+                        t.rust_type.clone(),
+                        format!(
+                            "{}::from(self.buffer.{}(self.offset + {offset}))",
+                            t.rust_type,
+                            get_read_method(*encoding)
+                        ),
+                    ),
+                    Some((t, TypeKind::Set { encoding, .. })) => (
+                        t.rust_type.clone(),
+                        format!(
+                            "{}::from_raw(self.buffer.{}(self.offset + {offset}))",
+                            t.rust_type,
+                            get_read_method(*encoding)
+                        ),
+                    ),
+                    Some((t, TypeKind::Composite { .. })) => (
+                        format!("{}<'a>", t.rust_type),
+                        format!("{}::wrap(self.buffer, self.offset + {offset})", t.rust_type),
+                    ),
+                    Some((t, TypeKind::Primitive(_))) if t.is_array => (
+                        "&'a [u8]".to_owned(),
+                        format!(
+                            "self.buffer.get(self.offset + {offset}..self.offset + {}).unwrap_or(&[])",
+                            offset + member.encoded_length
+                        ),
+                    ),
+                    Some((_, TypeKind::Primitive(prim))) => (
+                        prim.rust_type().to_owned(),
+                        format!(
+                            "self.buffer.{}(self.offset + {offset})",
+                            get_read_method(*prim)
+                        ),
+                    ),
+                    None => return String::new(),
+                }
+            }
+        };
+        let mut out = String::new();
+        out.push_str(&format!("    /// Gets the {} member.\n", member.name));
+        out.push_str("    #[inline(always)]\n");
+        out.push_str("    #[must_use]\n");
+        out.push_str(&format!("    pub fn {field_name}(&self) -> {ret} {{\n"));
+        out.push_str(&format!("        {value}\n"));
+        out.push_str("    }\n\n");
+        out
+    }
+
+    /// The setter of one composite member; constants have none.
+    fn member_setter(&self, member: &CompositeMember) -> String {
+        if member.encoded_length == 0 {
+            return String::new();
+        }
+        let field_name = to_snake_case(&member.name);
+        let offset = member.offset;
+        let bytes_setter = |len: usize| {
+            let mut out = String::new();
+            out.push_str(&format!(
+                "    /// Sets the {} member's bytes.\n",
+                member.name
+            ));
+            out.push_str("    #[inline(always)]\n");
+            out.push_str(&format!(
+                "    pub fn set_{field_name}(&mut self, value: &[u8]) -> &mut Self {{\n"
+            ));
+            // Copies what fits and zero-fills the rest; a buffer too short
+            // for the member is left as it is.
+            out.push_str(&format!(
+                "        if let Some(dst) = self.buffer.get_mut(self.offset + {offset}..self.offset + {}) {{\n",
+                offset + len
+            ));
+            out.push_str("            let copy_len = value.len().min(dst.len());\n");
+            out.push_str("            let (head, tail) = dst.split_at_mut(copy_len);\n");
+            out.push_str("            if let Some(src) = value.get(..copy_len) {\n");
+            out.push_str("                head.copy_from_slice(src);\n");
+            out.push_str("            }\n");
+            out.push_str("            tail.fill(0);\n");
+            out.push_str("        }\n");
+            out.push_str("        self\n");
+            out.push_str("    }\n\n");
+            out
+        };
+        let scalar_setter = |rust_type: &str, write: String| {
+            let mut out = String::new();
+            out.push_str(&format!("    /// Sets the {} member.\n", member.name));
+            out.push_str("    #[inline(always)]\n");
+            out.push_str(&format!(
+                "    pub fn set_{field_name}(&mut self, value: {rust_type}) -> &mut Self {{\n"
+            ));
+            out.push_str(&format!("        {write};\n"));
+            out.push_str("        self\n");
+            out.push_str("    }\n\n");
+            out
+        };
+        match &member.kind {
+            MemberKind::Constant { .. } => String::new(),
+            MemberKind::Primitive {
+                array_length: Some(_),
+                ..
+            } => bytes_setter(member.encoded_length),
+            MemberKind::Primitive { primitive_type, .. } => scalar_setter(
+                primitive_type.rust_type(),
+                format!(
+                    "self.buffer.{}(self.offset + {offset}, value)",
+                    get_write_method(*primitive_type)
+                ),
+            ),
+            MemberKind::Ref { type_name } => {
+                match self.ir.get_type(type_name).map(|t| (t, &t.kind)) {
+                    Some((t, TypeKind::Enum { encoding, .. })) => scalar_setter(
+                        &t.rust_type,
+                        format!(
+                            "self.buffer.{}(self.offset + {offset}, {}::from(value))",
+                            get_write_method(*encoding),
+                            encoding.rust_type()
+                        ),
+                    ),
+                    Some((t, TypeKind::Set { encoding, .. })) => scalar_setter(
+                        &t.rust_type,
+                        format!(
+                            "self.buffer.{}(self.offset + {offset}, value.raw())",
+                            get_write_method(*encoding)
+                        ),
+                    ),
+                    Some((t, TypeKind::Composite { .. })) => {
+                        let mut out = String::new();
+                        out.push_str(&format!("    /// Encoder of the {} member.\n", member.name));
+                        out.push_str("    #[inline(always)]\n");
+                        out.push_str(&format!(
+                            "    pub fn {field_name}(&mut self) -> {}Encoder<'_> {{\n",
+                            t.rust_type
+                        ));
+                        out.push_str(&format!(
+                            "        {}Encoder::wrap(self.buffer, self.offset + {offset})\n",
+                            t.rust_type
+                        ));
+                        out.push_str("    }\n\n");
+                        out
+                    }
+                    Some((t, TypeKind::Primitive(_))) if t.is_array => {
+                        bytes_setter(member.encoded_length)
+                    }
+                    Some((_, TypeKind::Primitive(prim))) => scalar_setter(
+                        prim.rust_type(),
+                        format!(
+                            "self.buffer.{}(self.offset + {offset}, value)",
+                            get_write_method(*prim)
+                        ),
+                    ),
+                    None => String::new(),
+                }
+            }
+        }
+    }
+}
+
+/// The return type and value of a constant member's getter: a number for a
+/// numeric primitive, a `&'static str` for a char constant. `None` when the
+/// constant cannot be expressed (no primitive type, or a value that does not
+/// parse).
+fn constant_value(prim: Option<PrimitiveType>, value: &str) -> Option<(String, String)> {
+    let prim = prim?;
+    match prim {
+        PrimitiveType::Char => Some(("&'static str".to_owned(), format!("{value:?}"))),
+        PrimitiveType::Float | PrimitiveType::Double => value.parse::<f64>().ok().map(|_| {
+            (
+                prim.rust_type().to_owned(),
+                format!("{value}_{}", prim.rust_type()),
+            )
+        }),
+        _ => value.parse::<i128>().ok().map(|_| {
+            (
+                prim.rust_type().to_owned(),
+                format!("{value}_{}", prim.rust_type()),
+            )
+        }),
     }
 }
 

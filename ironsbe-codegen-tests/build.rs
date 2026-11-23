@@ -182,8 +182,35 @@ const VERSIONED_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     </sbe:message>
 </sbe:messageSchema>"#;
 
+/// Real Logic's example schema with its `xi:include` of `common-types.xml`
+/// expanded in place (the include is a `<types>` section of its own).
+fn real_logic_schema(file: &str) -> String {
+    let dir = PathBuf::from("schemas/real-logic");
+    println!("cargo:rerun-if-changed=schemas/real-logic/{file}");
+    println!("cargo:rerun-if-changed=schemas/real-logic/common-types.xml");
+    let schema = fs::read_to_string(dir.join(file)).expect("read the example schema");
+    let common = fs::read_to_string(dir.join("common-types.xml")).expect("read common-types.xml");
+    let common = common
+        .split_once("?>")
+        .map_or(common.as_str(), |(_, body)| body)
+        .trim();
+    schema.replace(r#"<xi:include href="common-types.xml"/>"#, common)
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+
+    // Real Logic's public example schemas (`schemas/real-logic/`), checked
+    // against the reference tool's bytes by `tests/car_vectors.rs`.
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    for (file, out) in [
+        ("example-schema.xml", "car_v0_schema.rs"),
+        ("example-extension-schema.xml", "car_v1_schema.rs"),
+    ] {
+        let code = ironsbe_codegen::generate_from_xml(&real_logic_schema(file))
+            .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"));
+        fs::write(out_dir.join(out), code).expect("failed to write generated Car codecs");
+    }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
     let code = ironsbe_codegen::generate_from_xml(VERSIONED_SCHEMA)

@@ -81,7 +81,7 @@ pub(crate) fn resolve_var_data(
                 .get_type(&vd.type_name)
                 .ok_or_else(|| CodegenError::unknown_type(&vd.type_name, &field_path))?;
 
-            let TypeKind::Composite { fields } = &resolved.kind else {
+            let TypeKind::Composite { fields, .. } = &resolved.kind else {
                 return Err(CodegenError::unsupported(
                     format!("var data type '{}' is not a composite", vd.type_name),
                     context,
