@@ -53,7 +53,7 @@ fn main() {
 
     // orderId at offset 0
     assert!(
-        decoder_section.contains("self.offset + 0)"),
+        decoder_section.contains("(self.offset)"),
         "orderId getter should read at offset 0"
     );
     // instrumentId at offset 8 (after uint64)
@@ -136,7 +136,7 @@ fn main() {
 
     // Verify offsets in setters
     assert!(
-        encoder_section.contains("self.offset + 0,"),
+        encoder_section.contains("(self.offset,"),
         "set_order_id should write at offset 0"
     );
     assert!(

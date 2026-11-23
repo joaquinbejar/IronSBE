@@ -1460,8 +1460,10 @@ mod tests {
             "impl<'a> OrdersEntryDecoder<'a>",
             "/// fills Group Decoder",
         );
+        // No versioned field reads the acting version: the field is dropped
+        // and the private `wrap` keeps it as an unused parameter (#80).
         assert!(entry.contains(
-            "fn wrap(buffer: &'a [u8], offset: usize, block_length: u16, acting_version: u16)"
+            "fn wrap(buffer: &'a [u8], offset: usize, block_length: u16, _acting_version: u16)"
         ));
         assert!(entry.contains(
             "pub fn end_offset(&self) -> Result<usize, DecodeError> {\n        Ok(self.offset + self.block_length as usize)\n"

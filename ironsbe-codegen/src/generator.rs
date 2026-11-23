@@ -69,7 +69,9 @@ impl<'a> Generator<'a> {
             self.ir.package, self.ir.schema_version
         ));
         output.push('\n');
-        let uses = |name: &str| body.contains(name);
+        // A whole identifier, not a substring: a type named
+        // `GroupHeaderSnapshot` does not use `GroupHeader`.
+        let uses = |name: &str| references(body, name);
         let headers: Vec<&str> = ["MessageHeader", "GroupHeader", "VarDataHeader"]
             .into_iter()
             .filter(|name| uses(name))
@@ -109,10 +111,45 @@ impl<'a> Generator<'a> {
     }
 }
 
+/// Whether `body` names `ident` as a whole identifier.
+fn references(body: &str, ident: &str) -> bool {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    body.match_indices(ident).any(|(at, _)| {
+        let before = body.get(..at).and_then(|s| s.chars().next_back());
+        let after = body.get(at + ident.len()..).and_then(|s| s.chars().next());
+        !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ironsbe_schema::parse_schema;
+
+    /// IronSBE#80 review: imports follow whole identifiers, so a message
+    /// whose type names contain `GroupHeader` imports no `GroupHeader`.
+    #[test]
+    fn test_imports_follow_whole_identifiers() {
+        assert!(references("GroupHeader::new(1, 0)", "GroupHeader"));
+        assert!(!references("GroupHeaderSnapshotDecoder", "GroupHeader"));
+        assert!(!references("MyGroupHeader", "GroupHeader"));
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="edges" id="7" version="0" byteOrder="littleEndian">
+    <types>
+        <type name="uint32" primitiveType="uint32"/>
+    </types>
+    <sbe:message name="GroupHeaderSnapshot" id="1">
+        <field name="sequence" id="1" type="uint32"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+        let schema = parse_schema(xml).expect("Failed to parse");
+        let ir = SchemaIr::from_schema(&schema);
+        let code = Generator::new(&ir).generate().expect("codegen failed");
+        let imports = code.split("};").next().expect("an import block");
+        assert!(!imports.contains("GroupHeader"), "{imports}");
+        assert!(!imports.contains("VarDataHeader"), "{imports}");
+    }
 
     #[test]
     fn test_generate_simple_schema() {

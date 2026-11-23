@@ -17,3 +17,15 @@ pub mod car_v0 {
 pub mod car_v1 {
     include!(concat!(env!("OUT_DIR"), "/car_v1.rs"));
 }
+
+/// Codecs of a fixed-only message named `GroupHeaderSnapshot`: no group, so
+/// no `GroupHeader` import (IronSBE#80 review).
+pub mod edges {
+    include!(concat!(env!("OUT_DIR"), "/edges.rs"));
+}
+
+/// Codecs of a group whose fields are named `actingVersion` and
+/// `actingBlockLength` (IronSBE#80 review).
+pub mod metadata_names {
+    include!(concat!(env!("OUT_DIR"), "/metadata_names.rs"));
+}

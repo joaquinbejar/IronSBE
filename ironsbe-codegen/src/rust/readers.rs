@@ -389,7 +389,6 @@ fn generate_entry_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     output
         .push_str("        Self { buffer, offset, pos, part: 0, block_length, acting_version }\n");
     output.push_str("    }\n\n");
-    output.push_str(crate::rust::names::ENTRY_ACCESSORS);
 
     for field in &group.fields {
         output.push_str(&generate_field_getter(
@@ -424,7 +423,7 @@ fn generate_entry_reader(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     output.push_str("    }\n");
     output.push_str("}\n\n");
 
-    output
+    crate::rust::names::prune_entry_metadata(output)
 }
 
 /// Generates one accessor per variable part of a reader host, in schema

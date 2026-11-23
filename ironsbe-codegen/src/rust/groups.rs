@@ -434,7 +434,6 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
     output.push_str("    fn wrap(buffer: &'a [u8], offset: usize, block_length: u16, acting_version: u16) -> Self {\n");
     output.push_str("        Self { buffer, offset, block_length, acting_version }\n");
     output.push_str("    }\n\n");
-    output.push_str(crate::rust::names::ENTRY_ACCESSORS);
 
     // Field getters
     for field in &group.fields {
@@ -492,7 +491,7 @@ fn generate_entry_decoder(ir: &SchemaIr, layout: &GroupLayout<'_>) -> String {
 
     output.push_str("}\n\n");
 
-    output
+    crate::rust::names::prune_entry_metadata(output)
 }
 
 /// Generates a group encoder, its entry encoder, and the encoders of every
