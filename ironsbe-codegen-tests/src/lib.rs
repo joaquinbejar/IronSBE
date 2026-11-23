@@ -50,3 +50,9 @@ pub mod car_v0 {
 pub mod car_v1 {
     include!(concat!(env!("OUT_DIR"), "/car_v1_schema.rs"));
 }
+
+/// Codecs generated from the layout edges schema in `build.rs`.
+#[allow(dead_code, unused_imports, missing_docs, clippy::all)]
+pub mod layout_edges {
+    include!(concat!(env!("OUT_DIR"), "/layout_edges_schema.rs"));
+}

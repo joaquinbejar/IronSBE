@@ -197,8 +197,69 @@ fn real_logic_schema(file: &str) -> String {
     schema.replace(r#"<xi:include href="common-types.xml"/>"#, common)
 }
 
+/// Layout edge cases from the review of the implicit offset fix: a
+/// composite whose explicit offsets leave a gap, two composites each with an
+/// inline enum `Status`, inline members at explicit offsets, and numeric
+/// constants spelled with a sign or as a whole number.
+const LAYOUT_EDGES_SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="edges" id="44" version="0" byteOrder="littleEndian">
+    <types>
+        <composite name="messageHeader">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="templateId" primitiveType="uint16"/>
+            <type name="schemaId" primitiveType="uint16"/>
+            <type name="version" primitiveType="uint16"/>
+        </composite>
+        <composite name="Pad">
+            <type name="a" primitiveType="uint8" offset="0"/>
+            <type name="b" primitiveType="uint32" offset="4"/>
+        </composite>
+        <composite name="Order">
+            <enum name="Status" encodingType="uint8">
+                <validValue name="New">1</validValue>
+                <validValue name="Done">2</validValue>
+            </enum>
+        </composite>
+        <composite name="Fill">
+            <enum name="Status" encodingType="uint16">
+                <validValue name="Partial">300</validValue>
+                <validValue name="Full">400</validValue>
+            </enum>
+        </composite>
+        <composite name="Spaced">
+            <type name="x" primitiveType="uint8"/>
+            <enum name="Side" encodingType="uint8" offset="2">
+                <validValue name="Buy">1</validValue>
+                <validValue name="Sell">2</validValue>
+            </enum>
+        </composite>
+        <composite name="Limits">
+            <type name="plusOne" primitiveType="uint16" presence="constant">+1</type>
+            <type name="minusFive" primitiveType="int8" presence="constant">-5</type>
+            <type name="plusHalf" primitiveType="float" presence="constant">+1.5</type>
+            <type name="two" primitiveType="double" presence="constant">2</type>
+            <type name="v" primitiveType="uint8"/>
+        </composite>
+    </types>
+    <sbe:message name="Edges" id="1">
+        <field name="pad" id="1" type="Pad"/>
+        <field name="after" id="2" type="uint8"/>
+        <field name="order" id="3" type="Order"/>
+        <field name="fill" id="4" type="Fill"/>
+        <field name="spaced" id="5" type="Spaced"/>
+        <field name="limits" id="6" type="Limits"/>
+    </sbe:message>
+</sbe:messageSchema>"#;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+
+    let out_dir_edges = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    let code = ironsbe_codegen::generate_from_xml(LAYOUT_EDGES_SCHEMA)
+        .expect("codegen failed for the layout edges schema");
+    fs::write(out_dir_edges.join("layout_edges_schema.rs"), code)
+        .expect("failed to write generated layout edges codecs");
 
     // Real Logic's public example schemas (`schemas/real-logic/`), checked
     // against the reference tool's bytes by `tests/car_vectors.rs`.

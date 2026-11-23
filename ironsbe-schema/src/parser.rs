@@ -6,8 +6,8 @@
 use crate::error::ParseError;
 use crate::messages::{DataFieldDef, FieldDef, GroupDef, MessageDef};
 use crate::types::{
-    ByteOrder, CompositeDef, CompositeField, EnumDef, EnumValue, Presence, PrimitiveDef,
-    PrimitiveType, Schema, SetChoice, SetDef, TypeDef,
+    ByteOrder, CompositeDef, CompositeField, EnumDef, EnumValue, InlineType, Presence,
+    PrimitiveDef, PrimitiveType, Schema, SetChoice, SetDef, TypeDef,
 };
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -58,8 +58,59 @@ pub fn parse_schema(xml: &str) -> Result<Schema, ParseError> {
     let mut schema = schema.ok_or_else(|| ParseError::InvalidStructure {
         message: "No messageSchema element found".to_string(),
     })?;
+    register_inline_types(&mut schema);
     resolve_layout(&mut schema)?;
     Ok(schema)
+}
+
+/// Registers the types declared inside composites. Each keeps its own name
+/// unless a type of that name already exists (a top-level type, or another
+/// composite's inline type), in which case it gets the owning composite's
+/// name as a prefix (`Status` in `Order` becomes `OrderStatus`), and the
+/// owning member refers to it by that name. Inline types come before their
+/// owner in the list, so an owner still waiting is updated in the list.
+fn register_inline_types(schema: &mut Schema) {
+    let mut pending = std::mem::take(&mut schema.inline_types);
+    while !pending.is_empty() {
+        let (owner, member, mut def) = pending.remove(0);
+        let name = def.name().to_owned();
+        let mut final_name = name.clone();
+        if schema.has_type(&final_name) {
+            final_name = format!("{owner}{}", capitalise(&name));
+            let mut suffix = 2usize;
+            while schema.has_type(&final_name) {
+                final_name = format!("{owner}{}{suffix}", capitalise(&name));
+                suffix += 1;
+            }
+            def.set_name(final_name.clone());
+        }
+        let owner_in_schema = schema
+            .types
+            .iter_mut()
+            .find(|t| matches!(t, TypeDef::Composite(c) if c.name == owner));
+        let owner_def = match owner_in_schema {
+            Some(def) => Some(def),
+            None => pending
+                .iter_mut()
+                .map(|(_, _, def)| def)
+                .find(|t| matches!(t, TypeDef::Composite(c) if c.name == owner)),
+        };
+        if let Some(TypeDef::Composite(c)) = owner_def
+            && let Some(field) = c.fields.get_mut(member)
+        {
+            field.type_name = final_name;
+        }
+        schema.add_type(def);
+    }
+}
+
+/// `name` with its first character in upper case.
+fn capitalise(name: &str) -> String {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// Parses the messageSchema element attributes.
@@ -127,9 +178,7 @@ fn parse_types(reader: &mut Reader<&[u8]>, schema: &mut Schema) -> Result<(), Pa
                     }
                     "composite" => {
                         let (composite, nested) = parse_composite(reader, e)?;
-                        for nested in nested {
-                            schema.add_type(nested);
-                        }
+                        schema.inline_types.extend(nested);
                         schema.add_type(TypeDef::Composite(composite));
                         depth -= 1;
                     }
@@ -267,7 +316,7 @@ fn parse_primitive_type_empty(e: &BytesStart<'_>) -> Result<PrimitiveDef, ParseE
 fn parse_composite(
     reader: &mut Reader<&[u8]>,
     e: &BytesStart<'_>,
-) -> Result<(CompositeDef, Vec<TypeDef>), ParseError> {
+) -> Result<(CompositeDef, Vec<InlineType>), ParseError> {
     let mut name = String::new();
     let mut description = None;
     let mut semantic_type = None;
@@ -313,32 +362,50 @@ fn parse_composite(
                         composite.add_field(parse_composite_ref(e)?);
                     }
                     "enum" => {
+                        let offset = offset_attr(e)?;
                         let enum_def = parse_enum(reader, e)?;
-                        composite.add_field(CompositeField::new(
+                        let mut member = CompositeField::new(
                             enum_def.name.clone(),
                             enum_def.name.clone(),
                             enum_def.encoding_type.size(),
+                        );
+                        member.offset = offset;
+                        nested_types.push((
+                            composite.name.clone(),
+                            composite.fields.len(),
+                            TypeDef::Enum(enum_def),
                         ));
-                        nested_types.push(TypeDef::Enum(enum_def));
+                        composite.add_field(member);
                     }
                     "set" => {
+                        let offset = offset_attr(e)?;
                         let set_def = parse_set(reader, e)?;
-                        composite.add_field(CompositeField::new(
+                        let mut member = CompositeField::new(
                             set_def.name.clone(),
                             set_def.name.clone(),
                             set_def.encoding_type.size(),
+                        );
+                        member.offset = offset;
+                        nested_types.push((
+                            composite.name.clone(),
+                            composite.fields.len(),
+                            TypeDef::Set(set_def),
                         ));
-                        nested_types.push(TypeDef::Set(set_def));
+                        composite.add_field(member);
                     }
                     "composite" => {
+                        let offset = offset_attr(e)?;
                         let (inner, inner_nested) = parse_composite(reader, e)?;
-                        composite.add_field(CompositeField::new(
-                            inner.name.clone(),
-                            inner.name.clone(),
-                            0,
-                        ));
+                        let mut member =
+                            CompositeField::new(inner.name.clone(), inner.name.clone(), 0);
+                        member.offset = offset;
                         nested_types.extend(inner_nested);
-                        nested_types.push(TypeDef::Composite(inner));
+                        nested_types.push((
+                            composite.name.clone(),
+                            composite.fields.len(),
+                            TypeDef::Composite(inner),
+                        ));
+                        composite.add_field(member);
                     }
                     _ => {
                         let _ = read_element_text(reader)?;
@@ -354,6 +421,21 @@ fn parse_composite(
     }
 
     Ok((composite, nested_types))
+}
+
+/// The `offset` attribute of an element, when given.
+fn offset_attr(e: &BytesStart<'_>) -> Result<Option<usize>, ParseError> {
+    for attr in e.attributes().flatten() {
+        let key: &str = attr.key.as_ref();
+        if key == "offset" {
+            let value: &str = attr.value.as_ref();
+            return value
+                .parse()
+                .map(Some)
+                .map_err(|_| ParseError::invalid_attr("composite member", "offset", value));
+        }
+    }
+    Ok(None)
 }
 
 /// Reads the text of the element just opened up to its end tag, skipping
@@ -930,6 +1012,14 @@ fn resolve_layout(schema: &mut Schema) -> Result<(), ParseError> {
             let mut lengths = Vec::with_capacity(composite.fields.len());
             for member in &composite.fields {
                 let length = if member.is_ref() {
+                    if schema.get_type(&member.type_name).is_none()
+                        && PrimitiveType::from_sbe_name(&member.type_name).is_none()
+                    {
+                        return Err(ParseError::UnknownType {
+                            type_name: member.type_name.clone(),
+                            field: format!("{}.{}", composite.name, member.name),
+                        });
+                    }
                     type_length(schema, &member.type_name, 0)?
                 } else {
                     member.encoded_length
@@ -1015,15 +1105,28 @@ fn type_length(schema: &Schema, name: &str, depth: usize) -> Result<usize, Parse
     }
     match schema.get_type(name) {
         Some(TypeDef::Composite(composite)) => {
-            let mut total = 0usize;
+            // The extent of the members: an explicit offset's gap counts.
+            let mut running = 0usize;
+            let mut extent = 0usize;
             for member in &composite.fields {
-                total += if member.is_ref() {
+                let length = if member.is_ref() {
+                    if schema.get_type(&member.type_name).is_none()
+                        && PrimitiveType::from_sbe_name(&member.type_name).is_none()
+                    {
+                        return Err(ParseError::UnknownType {
+                            type_name: member.type_name.clone(),
+                            field: format!("{}.{}", composite.name, member.name),
+                        });
+                    }
                     type_length(schema, &member.type_name, depth + 1)?
                 } else {
                     member.encoded_length
                 };
+                let offset = member.offset.unwrap_or(running);
+                running = offset + length;
+                extent = extent.max(running);
             }
-            Ok(total)
+            Ok(extent)
         }
         Some(type_def) => Ok(type_def.encoded_length()),
         None => Ok(PrimitiveType::from_sbe_name(name).map_or(0, |prim| prim.size())),
@@ -1286,6 +1389,117 @@ mod tests {
         );
         let schema = parse_schema(&xml).expect("parse");
         assert_eq!(schema.messages[0].block_length, 32);
+    }
+
+    /// Wraps `types` and `fields` in a schema with one message `M`.
+    fn schema_with(types: &str, fields: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="edge" id="1" version="0" byteOrder="littleEndian">
+    <types>{types}</types>
+    <sbe:message name="M" id="1">{fields}</sbe:message>
+</sbe:messageSchema>"#
+        )
+    }
+
+    /// Codex review of #79, P1: a gap an explicit member offset leaves is
+    /// part of the composite, so the next field starts after it.
+    #[test]
+    fn test_composite_extent_counts_explicit_offset_gaps() {
+        let xml = schema_with(
+            r#"<composite name="Pad">
+                <type name="a" primitiveType="uint8" offset="0"/>
+                <type name="b" primitiveType="uint32" offset="4"/>
+            </composite>"#,
+            r#"<field name="p" id="1" type="Pad"/>
+               <field name="q" id="2" type="uint8"/>"#,
+        );
+        let schema = parse_schema(&xml).expect("parse");
+        assert_eq!(schema.get_type("Pad").map(TypeDef::encoded_length), Some(8));
+        let fields = &schema.messages[0].fields;
+        assert_eq!((fields[0].encoded_length, fields[1].offset), (8, 8));
+        assert_eq!(schema.messages[0].block_length, 9);
+    }
+
+    /// Codex review of #79, P2: two composites each declaring an inline enum
+    /// `Status` keep their own: the second is registered under its owner's
+    /// name and its member refers to it.
+    #[test]
+    fn test_same_named_inline_types_stay_apart() {
+        let xml = schema_with(
+            r#"<composite name="Order">
+                <enum name="Status" encodingType="uint8"><validValue name="A">1</validValue></enum>
+            </composite>
+            <composite name="Fill">
+                <enum name="Status" encodingType="uint16"><validValue name="B">2</validValue></enum>
+            </composite>"#,
+            r#"<field name="o" id="1" type="Order"/>
+               <field name="f" id="2" type="Fill"/>"#,
+        );
+        let schema = parse_schema(&xml).expect("parse");
+        let Some(TypeDef::Composite(order)) = schema.get_type("Order") else {
+            panic!("Order");
+        };
+        let Some(TypeDef::Composite(fill)) = schema.get_type("Fill") else {
+            panic!("Fill");
+        };
+        assert_eq!(order.fields[0].type_name, "Status");
+        assert_eq!(fill.fields[0].type_name, "FillStatus");
+        assert_eq!(
+            fill.fields[0].name, "Status",
+            "the member keeps its local name"
+        );
+        assert_eq!(
+            schema.get_type("Status").map(TypeDef::encoded_length),
+            Some(1)
+        );
+        assert_eq!(
+            schema.get_type("FillStatus").map(TypeDef::encoded_length),
+            Some(2)
+        );
+        assert_eq!((order.encoded_length(), fill.encoded_length()), (1, 2));
+    }
+
+    /// Codex review of #79, P2: an inline enum, set or composite keeps its
+    /// explicit offset.
+    #[test]
+    fn test_inline_members_keep_their_offsets() {
+        let xml = schema_with(
+            r#"<composite name="C">
+                <type name="x" primitiveType="uint8"/>
+                <enum name="E" encodingType="uint8" offset="4"><validValue name="A">1</validValue></enum>
+                <set name="S" encodingType="uint8" offset="6"><choice name="a">0</choice></set>
+                <composite name="Inner" offset="8"><type name="y" primitiveType="uint16"/></composite>
+            </composite>"#,
+            r#"<field name="c" id="1" type="C"/>"#,
+        );
+        let schema = parse_schema(&xml).expect("parse");
+        let Some(TypeDef::Composite(c)) = schema.get_type("C") else {
+            panic!("C");
+        };
+        let offsets: Vec<_> = c.fields.iter().map(|m| m.offset).collect();
+        assert_eq!(offsets, [Some(0), Some(4), Some(6), Some(8)]);
+        assert_eq!(c.encoded_length(), 10);
+    }
+
+    /// Codex review of #79, P2: a `<ref>` to a type the schema does not
+    /// declare is an error, not a member of 0 bytes.
+    #[test]
+    fn test_unknown_ref_is_an_error() {
+        let xml = schema_with(
+            r#"<composite name="C">
+                <type name="x" primitiveType="uint8"/>
+                <ref name="y" type="Missing"/>
+            </composite>"#,
+            r#"<field name="c" id="1" type="C"/>"#,
+        );
+        match parse_schema(&xml) {
+            Err(ParseError::UnknownType { type_name, field }) => {
+                assert_eq!((type_name.as_str(), field.as_str()), ("Missing", "C.y"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

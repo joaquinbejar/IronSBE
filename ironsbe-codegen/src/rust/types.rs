@@ -317,20 +317,31 @@ impl<'a> TypeGenerator<'a> {
 /// parse).
 fn constant_value(prim: Option<PrimitiveType>, value: &str) -> Option<(String, String)> {
     let prim = prim?;
+    let rust_type = prim.rust_type();
+    let value = value.trim();
     match prim {
         PrimitiveType::Char => Some(("&'static str".to_owned(), format!("{value:?}"))),
-        PrimitiveType::Float | PrimitiveType::Double => value.parse::<f64>().ok().map(|_| {
-            (
-                prim.rust_type().to_owned(),
-                format!("{value}_{}", prim.rust_type()),
-            )
-        }),
-        _ => value.parse::<i128>().ok().map(|_| {
-            (
-                prim.rust_type().to_owned(),
-                format!("{value}_{}", prim.rust_type()),
-            )
-        }),
+        PrimitiveType::Float | PrimitiveType::Double => {
+            // From the parsed value, so any XML spelling (`+1.5`, `2`, `1e3`)
+            // becomes a valid Rust float literal.
+            let parsed = value.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            Some((rust_type.to_owned(), format!("{parsed:?}_{rust_type}")))
+        }
+        _ => {
+            // From the parsed value, so `+1` emits `1_u16`; a value outside
+            // the type's range has no getter rather than code that does not
+            // compile.
+            let parsed = value.parse::<i128>().ok()?;
+            let bits = u32::try_from(prim.size().checked_mul(8)?).ok()?;
+            let (min, max) = if prim.is_signed() {
+                (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+            } else {
+                (0, (1i128 << bits) - 1)
+            };
+            (min..=max)
+                .contains(&parsed)
+                .then(|| (rust_type.to_owned(), format!("{parsed}_{rust_type}")))
+        }
     }
 }
 
